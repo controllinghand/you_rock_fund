@@ -42,6 +42,7 @@ YTD_FILE = BASE_DIR / "ytd_tracker.json"
 SETTINGS_FILE = BASE_DIR / "settings.json"
 SETTINGS_DEFAULT_FILE = BASE_DIR / "settings_default.json"
 IBC_CONFIG_FILE = BASE_DIR / "ibc_config.ini"
+TRADE_LOG_FILE = BASE_DIR / "trade_log.json"
 
 LIVE_PLACEHOLDERS = {
     "IBKR_PASSWORD_LIVE": "your_live_ibkr_password",
@@ -116,6 +117,76 @@ def load_ytd() -> dict:
     except Exception:
         return {"weeks": [], "total_premium": 0.0, "weeks_traded": 0,
                 "best_week": None, "worst_week": None}
+
+def load_trade_log() -> list:
+    try:
+        return json.loads(TRADE_LOG_FILE.read_text())
+    except Exception:
+        return []
+
+def _backfill_trade_log() -> None:
+    """One-time backfill of trade_log.json from state.json on first run.
+
+    Matches positions to executions by ticker, reconstructs records only when
+    fill_price is known. Skips any entry that can't be fully recovered.
+    """
+    if TRADE_LOG_FILE.exists() and TRADE_LOG_FILE.stat().st_size > 2:
+        return  # already populated
+
+    state = load_state()
+    positions  = state.get("positions", [])
+    executions = state.get("executions", [])
+    if not positions or not executions:
+        return
+
+    exec_map = {e.get("ticker"): e for e in executions if e.get("ticker")}
+    entries = []
+
+    for pos in positions:
+        ticker = pos.get("ticker")
+        if not ticker:
+            continue
+        ex = exec_map.get(ticker, {})
+        if ex.get("status") not in ("filled", "dry_run", "partial_fill"):
+            continue
+        fill_price = ex.get("fill_price")
+        if fill_price is None:
+            continue
+
+        expiry_raw  = pos.get("expiry", "")
+        expiry_fmt  = None
+        try:
+            from datetime import datetime as _dt
+            expiry_fmt = _dt.strptime(expiry_raw, "%a, %d %b %Y %H:%M:%S %Z").strftime("%Y%m%d")
+        except Exception:
+            continue  # unparseable expiry — skip
+
+        strike      = pos.get("strike")
+        delta       = pos.get("delta")
+        stock_price = pos.get("latest_price")
+        contracts   = pos.get("contracts")
+        premium_col = ex.get("premium_collected")
+
+        entries.append({
+            "symbol":               ticker,
+            "expiry":               expiry_fmt,
+            "strike":               float(strike) if strike is not None else None,
+            "right":                "P",
+            "entry_date":           ex.get("timestamp"),
+            "delta_at_entry":       round(delta, 4) if delta is not None else None,
+            "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2)
+                                    if stock_price and strike else None,
+            "premium_per_contract": fill_price,
+            "contracts":            contracts,
+            "total_premium":        premium_col,
+        })
+
+    if entries:
+        try:
+            TRADE_LOG_FILE.write_text(json.dumps(entries, indent=2))
+            logger.info(f"trade_log.json backfilled with {len(entries)} record(s) from state.json")
+        except Exception as e:
+            logger.warning(f"trade_log.json backfill write failed: {e}")
 
 # ── IBKR helpers ──────────────────────────────────────────────
 
@@ -684,6 +755,27 @@ def get_positions():
     settings = load_settings()
     ibkr = _get_ibkr_data(settings)
 
+    # Enrich live portfolio items with trade_log metadata
+    _backfill_trade_log()
+    trade_log = load_trade_log()
+    tl_index: dict = {}
+    for rec in trade_log:
+        k = (rec.get("symbol"), rec.get("expiry"), rec.get("strike"), rec.get("right"))
+        tl_index[k] = rec
+
+    portfolio = ibkr.get("portfolio", [])
+    enriched_portfolio = []
+    for item in portfolio:
+        tl_key = (item.get("symbol"), item.get("expiry"), item.get("strike"), item.get("right"))
+        tl = tl_index.get(tl_key, {})
+        enriched_portfolio.append({
+            **item,
+            "delta_at_entry":       tl.get("delta_at_entry"),
+            "buffer_pct_at_entry":  tl.get("buffer_pct_at_entry"),
+            "premium_per_contract": tl.get("premium_per_contract"),
+            "total_premium":        tl.get("total_premium"),
+        })
+
     return {
         "positions":       enriched,
         "csp_positions":   enriched,
@@ -691,7 +783,7 @@ def get_positions():
         "weekly_pnl":      state.get("weekly_pnl", {}),
         "run_date":        state.get("run_date"),
         "monday_context":  state.get("monday_context", {}),
-        "portfolio":       ibkr.get("portfolio", []),
+        "portfolio":       enriched_portfolio,
         "account_summary": ibkr.get("account_summary"),  # None when IBKR disconnected
     }
 

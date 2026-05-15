@@ -25,6 +25,7 @@ from screener import get_all_candidates
 import discord_poster
 
 STATE_FILE       = "state.json"
+TRADE_LOG_JSON   = "trade_log.json"
 MID_WAIT_SECS    = 120
 BID_WAIT_SECS    = 120
 MARKET_WAIT_SECS = 60
@@ -44,6 +45,24 @@ log = logging.getLogger(__name__)
 
 
 # ── State ──────────────────────────────────────────────────────
+
+def _append_trade_log(record: dict) -> None:
+    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right."""
+    try:
+        with open(TRADE_LOG_JSON) as f:
+            entries = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        entries = []
+    key = (record.get("symbol"), record.get("expiry"), record.get("strike"), record.get("right"))
+    for i, e in enumerate(entries):
+        if (e.get("symbol"), e.get("expiry"), e.get("strike"), e.get("right")) == key:
+            entries[i] = record
+            break
+    else:
+        entries.append(record)
+    with open(TRADE_LOG_JSON, "w") as f:
+        json.dump(entries, f, indent=2)
+
 
 def _load_state() -> dict:
     try:
@@ -207,7 +226,7 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
         log.info(f"  ❌ No call strike with delta ≥ {CC_DELTA_MIN:.2f} available")
         return None
 
-    return viable[-1]   # (strike, delta, mid)
+    return (*viable[-1], current_price)   # (strike, delta, mid, stock_price)
 
 
 # ── Orders ─────────────────────────────────────────────────────
@@ -611,7 +630,7 @@ def run_wheel_check() -> tuple[float, list]:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
                 continue
 
-            cc_strike, cc_delta, cc_mid = cc_info
+            cc_strike, cc_delta, cc_mid, cc_stock_price = cc_info
             mid_display = f"${cc_mid:.2f}" if cc_mid else "?"
             log.info(f"  🎯 Selling CC: ${cc_strike:.2f} strike  "
                      f"delta={cc_delta:.3f}  mid={mid_display}")
@@ -650,6 +669,28 @@ def run_wheel_check() -> tuple[float, list]:
                     "cc_expiry":  expiry,
                 })
                 log.info(f"  💰 CC premium: ${prem:,.0f}")
+                # Capture execution metadata for dashboard enrichment
+                fill_price = order_result.get("fill_price")
+                buffer_pct = (
+                    round(((cc_stock_price - cc_strike) / cc_stock_price) * 100, 2)
+                    if cc_stock_price and cc_stock_price > 0 else None
+                )
+                try:
+                    _append_trade_log({
+                        "symbol":               ticker,
+                        "expiry":               expiry,
+                        "strike":               float(cc_strike),
+                        "right":                "C",
+                        "entry_date":           datetime.now().isoformat(),
+                        "delta_at_entry":       round(cc_delta, 4),
+                        "buffer_pct_at_entry":  buffer_pct,
+                        "premium_per_contract": fill_price,
+                        "contracts":            shares // 100,
+                        "total_premium":        prem,
+                    })
+                    log.info(f"  📝 trade_log.json: {ticker} CC recorded")
+                except Exception as tl_err:
+                    log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
             else:
                 h["cc_status"] = "failed"
                 wheel_activity.append({

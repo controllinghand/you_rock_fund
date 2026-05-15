@@ -77,6 +77,7 @@ for runtime_file in \
     state.json \
     settings.json \
     ytd_tracker.json \
+    trade_log.json \
     earnings_cache.json \
     scheduler_heartbeat.json \
     scheduler_log.txt \

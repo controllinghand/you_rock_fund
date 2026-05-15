@@ -17,6 +17,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+TRADE_LOG_JSON      = "trade_log.json"
 MAX_SPREAD_PCT      = 0.20  # fallback default — settings.json overrides via check_liquidity
 MIN_BID_YIELD_PCT   = 0.01  # fallback default — bid yield threshold to proceed despite wide spread
 MAX_SPREAD_HARD_CAP = 0.50  # fallback default — spread above this is always skipped
@@ -28,6 +29,24 @@ MARKET_WAIT_SECS    = 60    # total polling window for market orders
 MARKET_POLL_SECS    = 5     # check every N seconds
 RECONNECT_WAIT_SECS = 30
 MAX_RECONNECTS      = 3
+
+
+def _append_trade_log(record: dict) -> None:
+    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right."""
+    try:
+        with open(TRADE_LOG_JSON) as f:
+            entries = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        entries = []
+    key = (record.get("symbol"), record.get("expiry"), record.get("strike"), record.get("right"))
+    for i, e in enumerate(entries):
+        if (e.get("symbol"), e.get("expiry"), e.get("strike"), e.get("right")) == key:
+            entries[i] = record
+            break
+    else:
+        entries.append(record)
+    with open(TRADE_LOG_JSON, "w") as f:
+        json.dump(entries, f, indent=2)
 
 
 def connect() -> IB:
@@ -562,6 +581,29 @@ def execute_positions(sized_positions: list, extra_targets: list = None) -> list
         if result["status"] in ("filled", "dry_run", "partial_fill"):
             filled_count     += 1
             capital_deployed += pos["capital_used"]
+            # Capture execution metadata for dashboard enrichment
+            stock_price = pos.get("latest_price")
+            fill_price  = result.get("fill_price")
+            if result["status"] == "partial_fill" and fill_price:
+                filled_qty = round(result.get("premium_collected", 0) / fill_price / 100)
+            else:
+                filled_qty = contracts
+            try:
+                _append_trade_log({
+                    "symbol":               ticker,
+                    "expiry":               contract.lastTradeDateOrContractMonth,
+                    "strike":               float(strike),
+                    "right":                "P",
+                    "entry_date":           result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    "delta_at_entry":       round(final_delta, 4) if final_delta is not None else None,
+                    "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2) if stock_price else None,
+                    "premium_per_contract": fill_price,
+                    "contracts":            filled_qty,
+                    "total_premium":        result.get("premium_collected"),
+                })
+                log.info(f"  📝 trade_log.json: {ticker} recorded")
+            except Exception as tl_err:
+                log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
         else:
             log.info(f"  🔄 {ticker} — order failed, trying next candidate")
 
