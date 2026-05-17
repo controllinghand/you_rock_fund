@@ -194,6 +194,28 @@ See **[CONTAINERIZATION.md](CONTAINERIZATION.md)** for the full setup guide — 
 - `docker/secrets/` files are empty placeholders kept for the `secrets_client` 3-tier fallback (HTTP → file → env). The real values live only in the encrypted volume.
 - `docker/secrets/` is in `.gitignore` and must never be committed.
 
+### What the Encryption Does and Doesn't Protect
+
+The AES-256-GCM encryption protects against **data-at-rest leaks** — if a volume backup or snapshot were exposed, the credentials inside would be unreadable without the key.
+
+**It does not protect against host-level access.** Because the encryption key lives in the same Docker volume as the encrypted data, anyone who can run `docker exec` on the host — or read the volume files directly — can access both the key and the secrets. The real security perimeter is:
+
+1. **Who can log into the Mac Mini** (physically or via SSH)
+2. **The API being localhost-only** — `http://localhost:8001` is never reachable from outside the machine
+
+### If You Go Live (Real Money)
+
+Before switching to a live IBKR account, review these risks:
+
+| Risk | Mitigation |
+|---|---|
+| Unauthorized SSH access → full secret exposure | Disable password SSH login; use key-based auth only (`/etc/ssh/sshd_config`: `PasswordAuthentication no`) |
+| Mac Mini stolen or physically accessed | Enable FileVault full-disk encryption — note this requires entering a password on every reboot (disables auto-login) |
+| IBKR API credentials compromised | Use a dedicated IBKR sub-account for the fund with withdrawal restrictions enabled in IBKR Client Portal |
+| Runaway trades if system malfunctions | Keep IBKR's built-in daily loss limit set in Client Portal → Settings → Account Settings |
+
+> **Auto-login vs. FileVault:** The default setup uses auto-login for hands-free reboots. FileVault disables auto-login. For live trading, the recommended posture is: enable FileVault, accept that a reboot requires a manual login to restart the stack, and treat that as a feature (no unattended access).
+
 ## Mac Startup (after any reboot)
 
 **Double-click `YRVI Startup` on your Desktop** to run the pre-flight check. It verifies the Docker containers are running and prints a full GO/NO-GO status table.
