@@ -432,7 +432,7 @@ vs $3,500+/week potential income = ROI in first week! 💰
 
 ## Legacy / Manual Setup (macOS launchd)
 
-> The Docker setup above is the recommended install. This section documents the original macOS-only launchd approach for reference or if Docker is not available.
+> **DEPRECATED — for historical reference only.** This pre-Docker launchd setup is no longer supported. Use the Docker setup above. Credentials in this section reference the old `.env` / Keychain approach, which was replaced by the secrets container in v1.3.0.
 
 **Prerequisites (legacy):** Python 3.13+, macOS Sequoia, IB Gateway.
 

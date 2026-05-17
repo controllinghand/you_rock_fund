@@ -64,21 +64,17 @@ If your browser doesn't open, paste `http://localhost:8001` into it directly. If
 
 ### Q: Discord test notification fails — "webhook not configured"
 
-**A:** The Discord webhook URL lives in a secret file, not in `.env.compose`. Create it manually:
+**A:** The Discord webhook URL is configured through the secrets container UI — it is not set in `.env.compose` or as a file.
 
-```bash
-echo "https://discord.com/api/webhooks/xxx/yyy" > ~/you_rock_fund/docker/secrets/discord_webhook_url
-```
+1. Open `http://localhost:8001` in your browser
+2. Find **Discord Webhook URL** and click **Set**
+3. Paste your webhook URL (get it from: **Discord → Edit Channel → Integrations → Webhooks**)
+4. Restart the scheduler to pick it up:
 
-Get your webhook URL from: **Discord → Edit Channel → Integrations → Webhooks**
-
-Then restart the scheduler to pick it up:
 ```bash
 cd ~/you_rock_fund
 docker compose --env-file .env.compose restart scheduler
 ```
-
-See `docker/secrets/README.md` for the full list of secret files.
 
 ---
 
@@ -114,13 +110,13 @@ This takes 30–60 minutes to decrypt. After it finishes, enable auto-login:
 
 ### Q: Scheduler fails to restart with "no such file or directory: render_secret"
 
-**A:** The `render_secret` file is missing from `docker/secrets/`. Create it:
+**A:** The Render API secret is missing from the secrets container. Open `http://localhost:8001`, find **Render Screener API Secret**, and click **Set**. Contact the fund operator for the value if you don't have it.
 
+If the secrets container itself is not running, restart the stack first:
 ```bash
-echo "your_render_secret_here" > ~/you_rock_fund/docker/secrets/render_secret
+cd ~/you_rock_fund
+docker compose --env-file .env.compose up -d
 ```
-
-Contact the fund operator for the Render API secret value if you don't have it.
 
 ---
 
@@ -135,9 +131,9 @@ docker compose --env-file .env.compose <command>
 
 ---
 
-### Q: Where do I find all the secret files I need to create?
+### Q: Where do I configure my credentials?
 
-**A:** See [`docker/secrets/README.md`](docker/secrets/README.md) for the complete list of secret files, what each contains, and how to get the values.
+**A:** All credentials are managed through the secrets container web UI at `http://localhost:8001`. Run `setup_docker.sh --paper` and it will open automatically. The required fields are: IBKR Paper Account ID, IBKR Paper Username, IBKR Paper Trading Password, and Render Screener API Secret.
 
 ---
 

@@ -1,6 +1,14 @@
-# Containerized YRVI
+# Containerized YRVI — DEPRECATED
 
-## Quickstart — New Install (5 Steps)
+> **This document is from the old `containerized` branch and is no longer accurate.**
+>
+> It references manual file-based secrets (`docker/secrets/`), the macOS Keychain setup, and an older `.env.compose` format — all of which were replaced by the **secrets container** in v1.3.0.
+>
+> For current setup instructions, see **README.md** and **MAC_MINI_SETUP.md**. Credentials are now configured through the web UI at `http://localhost:8001` — run `setup_docker.sh --paper` to get started.
+
+---
+
+## Quickstart — New Install (5 Steps) — DEPRECATED
 
 **Step 1 — Install Rancher Desktop**
 Download from [rancherdesktop.io](https://rancherdesktop.io) and start it. Enable dockerd (moby) in Preferences → Container Engine. Wait for the status indicator to show "Running."
