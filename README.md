@@ -471,6 +471,13 @@ cat state.json               # Full system state
 
 ## Version History
 
+### v1.6.0 (May 2026)
+- Version update notification — dashboard checks GitHub for a newer release and displays a banner with a one-click `yrvi://` upgrade link
+- `yrvi://` URL scheme registered by `setup_docker.sh` so upgrade links open Terminal and run the upgrade script automatically
+- Wheel manager prefers the assigned-strike CC when the highest available delta is ≥ 0.20, rather than always picking the strike closest to 0.20
+- This Week page shows a screener estimates disclaimer so members understand data is pre-market and may change
+- Bug fixes: generic tick list for option greeks, CC positions no longer consume CSP slots, held tickers always included in screener targets, secrets client used for Discord webhook URLs
+
 ### v1.5.0 (May 2026)
 - Dashboard IBKR Holdings table now shows Delta, Buffer %, Prem/Contract, and Total Premium for each option position
 - `trade_log.json` written to the `yrvi_data` volume at fill time for every CSP and CC order, capturing delta, buffer %, and premium at entry
