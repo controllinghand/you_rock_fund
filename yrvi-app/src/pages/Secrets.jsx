@@ -20,7 +20,7 @@ const LABELS = {
   render_secret:               { label: 'Render Screener API Secret',   required: true  },
   account_live:                { label: 'IBKR Live Account ID',         required: false },
   tws_userid_live:             { label: 'IBKR Live Username',           required: false },
-  vnc_server_password:         { label: 'VNC Password',                 required: false },
+  vnc_server_password:         { label: 'VNC Password',                 required: false, description: 'Default: ibgateway123!test — used to connect via VNC to the IB Gateway container (port 5900)' },
   discord_webhook_url:         { label: 'Discord Webhook URL',          required: false },
   discord_webhook_weekly_plan: { label: 'Discord Weekly Plan Webhook',  required: false },
 }
@@ -29,7 +29,7 @@ function deriveSecrets(statusSecrets) {
   if (!statusSecrets) return []
   return Object.keys(statusSecrets).map(name => {
     const meta = LABELS[name] || { label: name, required: false }
-    return { name, label: meta.label, required: meta.required }
+    return { name, label: meta.label, required: meta.required, description: meta.description }
   })
 }
 
@@ -137,6 +137,9 @@ function SecretRow({ secret, state, onSaved }) {
             )}
           </div>
           <div className="text-xs text-gray-500 mt-0.5 font-mono">{secret.name}</div>
+          {secret.description && (
+            <div className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{secret.description}</div>
+          )}
         </div>
 
         <div className="text-sm">

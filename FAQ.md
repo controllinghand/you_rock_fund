@@ -26,6 +26,18 @@ docker compose --env-file .env.compose down
 
 ---
 
+### Q: I need to check the IB Gateway screen (e.g. it's stuck on a 2FA or confirmation dialog)
+
+**A:** The IB Gateway runs headless inside Docker but exposes a VNC session on port 5900. macOS's built-in Screen Sharing won't work for this — it refuses to connect to localhost. Use **RealVNC Viewer** (free) instead:
+
+1. Download: https://www.realvnc.com/en/connect/download/viewer/
+2. Open RealVNC Viewer and connect to: `127.0.0.1:5900`
+3. Password: `ibgateway123!test` (unless you set a custom VNC Password in secrets)
+
+You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it.
+
+---
+
 ### Q: setup_docker.sh fails or containers won't start — I forgot to configure secrets
 
 **A:** Since v1.4.0, account credentials are entered via the secrets container UI, not `.env.compose`. Re-run `setup_docker.sh --paper` — it will open `http://localhost:8001` in your browser. Enter at minimum:
