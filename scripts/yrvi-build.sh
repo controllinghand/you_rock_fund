@@ -162,78 +162,92 @@ else
     ok "$RUNNING container(s) running — $CONTAINER found (id: ${CONTAINER_ID:0:12})"
 fi
 
-# ── Step 2: Inject secrets from macOS Keychain ─────────────────
+# ── Step 2: Inject secrets ─────────────────────────────────────
 echo ""
-printf "${BOLD}Step 2 / 4   Inject secrets from macOS Keychain${NC}\n"
+printf "${BOLD}Step 2 / 4   Inject secrets${NC}\n"
 echo "──────────────────────────────────────────────────────"
-
-mkdir -p docker/secrets
-
-# Create empty placeholder files for optional secrets (only if absent — never overwrite)
-for _placeholder in \
-    docker/secrets/discord_webhook_url \
-    docker/secrets/discord_webhook_weekly_plan \
-    docker/secrets/anthropic_api_key \
-    docker/secrets/ibkr_password_live; do
-    if [ ! -f "$_placeholder" ]; then
-        if [ "$DRY_RUN" = true ]; then
-            info "Would create placeholder: $_placeholder"
-        else
-            touch "$_placeholder"
-        fi
-    fi
-done
-unset _placeholder
-
-# Keychain service names (fixed — do not change without updating Keychain entries)
-KC_RENDER="YRVI_RENDER"
-if [ "$TRADING_MODE" = "paper" ]; then
-    KC_TWS="YRVI_TWS_PAPER"
-    TWS_SECRET_FILE="docker/secrets/tws_password_paper"
-    TWS_LABEL="IBKR paper trading password"
-else
-    KC_TWS="YRVI_TWS_LIVE"
-    TWS_SECRET_FILE="docker/secrets/tws_password_live"
-    TWS_LABEL="IBKR live trading password"
-fi
 
 WRITTEN_SECRET_FILES=()
 
-# fetch_secret SERVICE FILE LABEL
-#   Retrieves secret from Keychain only — exits if missing, never prompts.
-fetch_secret() {
-    local service="$1"
-    local file="$2"
-    local label="$3"
+# Check if the secrets container is running — if so, credentials are managed
+# there (stored in the yrvi_data Docker volume) and no Keychain injection needed.
+SECRETS_RUNNING=$(docker ps --filter "name=yrvi-secrets-1" --filter "status=running" \
+    --format "{{.Names}}" 2>/dev/null | grep -c "yrvi-secrets-1" || true)
 
-    local value
-    value=$(security find-generic-password -s "$service" -w 2>/dev/null || true)
+if [ "$SECRETS_RUNNING" -gt 0 ]; then
+    ok "Secrets container is running — credentials managed via secrets UI (port 8001)"
+    info "Skipping Keychain injection"
+else
+    # Secrets container not running — fall back to macOS Keychain injection
+    info "Secrets container not detected — injecting from macOS Keychain"
+    echo ""
 
-    if [ -z "$value" ]; then
-        printf "  ${RED}❌${NC}  '%s' not found in Keychain (service: %s)\n" "$label" "$service" >&2
-        printf "  ${BLUE}ℹ️${NC}   Run setup_docker.sh first to store secrets:\n" >&2
-        printf "         bash setup_docker.sh --%s\n" "$TRADING_MODE" >&2
-        exit 1
+    mkdir -p docker/secrets
+
+    # Create empty placeholder files for optional secrets (only if absent — never overwrite)
+    for _placeholder in \
+        docker/secrets/discord_webhook_url \
+        docker/secrets/discord_webhook_weekly_plan \
+        docker/secrets/anthropic_api_key \
+        docker/secrets/ibkr_password_live; do
+        if [ ! -f "$_placeholder" ]; then
+            if [ "$DRY_RUN" = true ]; then
+                info "Would create placeholder: $_placeholder"
+            else
+                touch "$_placeholder"
+            fi
+        fi
+    done
+    unset _placeholder
+
+    # Keychain service names (fixed — do not change without updating Keychain entries)
+    KC_RENDER="YRVI_RENDER"
+    if [ "$TRADING_MODE" = "paper" ]; then
+        KC_TWS="YRVI_TWS_PAPER"
+        TWS_SECRET_FILE="docker/secrets/tws_password_paper"
+        TWS_LABEL="IBKR paper trading password"
+    else
+        KC_TWS="YRVI_TWS_LIVE"
+        TWS_SECRET_FILE="docker/secrets/tws_password_live"
+        TWS_LABEL="IBKR live trading password"
     fi
 
-    if [ "$DRY_RUN" = true ]; then
-        ok "[dry run] Would write '$label' → $file"
-        return
-    fi
+    # fetch_secret SERVICE FILE LABEL
+    #   Retrieves secret from Keychain only — exits if missing, never prompts.
+    fetch_secret() {
+        local service="$1"
+        local file="$2"
+        local label="$3"
 
-    printf '%s' "$value" > "$file"
-    chmod 600 "$file"
-    WRITTEN_SECRET_FILES+=("$file")
-    ok "Retrieved '$label' from Keychain"
-}
+        local value
+        value=$(security find-generic-password -s "$service" -w 2>/dev/null || true)
 
-info "macOS may prompt you to allow Keychain access — click Allow."
-echo ""
+        if [ -z "$value" ]; then
+            printf "  ${RED}❌${NC}  '%s' not found in Keychain (service: %s)\n" "$label" "$service" >&2
+            printf "  ${BLUE}ℹ️${NC}   Run setup_docker.sh first to store secrets:\n" >&2
+            printf "         bash setup_docker.sh --%s\n" "$TRADING_MODE" >&2
+            exit 1
+        fi
 
-fetch_secret "$KC_TWS"    "$TWS_SECRET_FILE"            "$TWS_LABEL"
-fetch_secret "$KC_RENDER" "docker/secrets/render_secret" "Render screener API secret"
+        if [ "$DRY_RUN" = true ]; then
+            ok "[dry run] Would write '$label' → $file"
+            return
+        fi
 
-[ "$DRY_RUN" = false ] && ok "Secret files written to docker/secrets/"
+        printf '%s' "$value" > "$file"
+        chmod 600 "$file"
+        WRITTEN_SECRET_FILES+=("$file")
+        ok "Retrieved '$label' from Keychain"
+    }
+
+    info "macOS may prompt you to allow Keychain access — click Allow."
+    echo ""
+
+    fetch_secret "$KC_TWS"    "$TWS_SECRET_FILE"            "$TWS_LABEL"
+    fetch_secret "$KC_RENDER" "docker/secrets/render_secret" "Render screener API secret"
+
+    [ "$DRY_RUN" = false ] && ok "Secret files written to docker/secrets/"
+fi
 
 # ── Step 3: Build and restart ──────────────────────────────────
 echo ""
