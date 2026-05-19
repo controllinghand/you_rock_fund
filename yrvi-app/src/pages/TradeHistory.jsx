@@ -23,7 +23,7 @@ function fmtDate(s) {
 function fmtTime(s) {
   if (!s) return '—'
   try {
-    return new Date(s).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    return new Date(s).toLocaleString('en-US', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
   } catch { return s }
 }
 

@@ -340,7 +340,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             "status": "dry_run",
             "fill_price": mkt["mid"],
             "order_type": "limit_mid",
-            "premium_collected": round(contracts * mkt["mid"] * 100, 2)
+            "premium_collected": round(contracts * mkt["mid"] * 100, 2),
+            "exec_timestamp": datetime.now().isoformat()
         })
         return result
 
@@ -355,7 +356,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             result.update({
                 "status": "filled", "fill_price": fill,
                 "order_type": label,
-                "premium_collected": round(contracts * fill * 100, 2)
+                "premium_collected": round(contracts * fill * 100, 2),
+                "exec_timestamp": datetime.now().isoformat()
             })
             return True
         log.info(f"  ⏳ {label} unfilled — escalating...")
@@ -382,7 +384,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             result.update({
                 "status": "filled", "fill_price": fill,
                 "order_type": f"{label}_fok",
-                "premium_collected": round(filled_qty * fill * 100, 2)
+                "premium_collected": round(filled_qty * fill * 100, 2),
+                "exec_timestamp": datetime.now().isoformat()
             })
             return True
         log.info(f"  ⏳ {label} (FOK) did not fill (status: {final_status})")
@@ -430,7 +433,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
                 "status": "filled",
                 "fill_price": fill,
                 "order_type": "market",
-                "premium_collected": round(filled_qty * fill * 100, 2)
+                "premium_collected": round(filled_qty * fill * 100, 2),
+                "exec_timestamp": datetime.now().isoformat()
             })
             return result
 
@@ -448,7 +452,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             "status": "partial_fill",
             "fill_price": fill,
             "order_type": "market",
-            "premium_collected": round(final_qty * fill * 100, 2)
+            "premium_collected": round(final_qty * fill * 100, 2),
+            "exec_timestamp": datetime.now().isoformat()
         })
     else:
         log.error(f"  ❌ Could not fill {ticker} — manual review needed")
