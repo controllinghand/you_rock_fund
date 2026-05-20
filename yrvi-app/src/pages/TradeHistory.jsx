@@ -172,7 +172,10 @@ export default function TradeHistory() {
                   {executions.filter(e => e.status === 'filled' || e.status === 'dry_run').length} filled
                 </td>
                 <td className="px-4 py-3 text-right font-bold text-gray-900 dark:text-white">
-                  ${(pnl.csp_premium ?? 0).toLocaleString()}
+                  ${executions
+                      .filter(e => e.status === 'filled' || e.status === 'dry_run' || e.status === 'partial_fill')
+                      .reduce((sum, e) => sum + (e.premium_collected ?? 0), 0)
+                      .toLocaleString()}
                 </td>
                 <td />
               </tr>
