@@ -191,10 +191,10 @@ else
     info "Opening $SECRETS_URL in your browser..."
     case "$OS" in
         Darwin)               open "$SECRETS_URL" 2>/dev/null || true ;;
-        MINGW*|MSYS*|CYGWIN*) cmd.exe /c start "$SECRETS_URL" 2>/dev/null || true ;;
+        MINGW*|MSYS*|CYGWIN*) cmd.exe /c start "" "$SECRETS_URL" 2>/dev/null || true ;;
         Linux)
             if $IS_WSL; then
-                cmd.exe /c start "$SECRETS_URL" 2>/dev/null || xdg-open "$SECRETS_URL" 2>/dev/null || true
+                cmd.exe /c start "" "$SECRETS_URL" 2>/dev/null || xdg-open "$SECRETS_URL" 2>/dev/null || true
             else
                 xdg-open "$SECRETS_URL" 2>/dev/null || true
             fi ;;
