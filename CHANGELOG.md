@@ -1,3 +1,7 @@
+## [3.4.6] — 2026-06-04
+### Fixed
+- **Windows setup: secrets browser never opened** — `setup_docker.sh` Step 2 launched the secrets page with `cmd.exe /c start "$URL"`, but Windows `start` treats the first quoted argument as the window title, so it opened an empty window instead of the browser. With no timeout on the secrets wait loop and no CLI fallback, Windows setup appeared to hang at Step 2. Now uses `start "" "$URL"` (empty title) on both the Git Bash and WSL paths so the browser actually launches. Confirmed live on a fresh GEEKOM A5 (Win 11 Pro).
+
 ## [3.4.2] — 2026-06-02
 ### Fixed
 - **Weekly IB Key Token panel hidden for paper accounts** — paper logins don't use IB Key 2FA, so the token status, "No weekly token yet" warning, and Refresh Weekly Token button no longer appear in paper mode. Instead a short note explains it applies to live accounts only. The Auto-Update and Reset Installation 2FA warnings are likewise shown only in live mode, since paper restarts never require approval.
