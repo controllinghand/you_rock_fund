@@ -27,3 +27,6 @@ docker/secrets/*
 !docker/secrets/README.md
 .claude/
 AGENTS.md
+
+# Local backups (e.g. gateway /data volume snapshots) — never commit
+*.tar.gz
