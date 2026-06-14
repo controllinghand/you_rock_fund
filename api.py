@@ -523,10 +523,18 @@ def _read_weekly_token() -> Optional[str]:
 
 
 def _set_weekly_token() -> None:
-    """Record the token as established. No-op if already set — preserves the
-    original establishment time across the week's daily auto-restarts."""
-    if _read_weekly_token():
-        return
+    """Record the token as established. Preserves a current-week timestamp
+    across the week's daily auto-restarts, but overwrites a stale (pre-reset)
+    one — otherwise a missed Sunday "autorestart file not found" line would
+    freeze the displayed date at last week's value."""
+    existing = _read_weekly_token()
+    if existing:
+        try:
+            if (datetime.fromisoformat(existing).astimezone(ET)
+                    >= _last_weekly_token_reset(datetime.now(PST))):
+                return                     # already current this week — keep original time
+        except Exception:
+            pass                           # unparseable → fall through and rewrite
     try:
         WEEKLY_TOKEN_FILE.write_text(datetime.now(PST).isoformat())
         print("[api/weekly-token] token established — timestamp recorded")
