@@ -2087,18 +2087,30 @@ def version_upgrade():
     # so pulling via "origin" (which may be an SSH remote) would fail.
     _GIT_HTTPS = "https://github.com/controllinghand/you_rock_fund.git"
 
+    # git 2.35.2+ refuses to operate on a repo whose files are owned by a
+    # different user than the one running git ("detected dubious ownership").
+    # /host_repo is bind-mounted and owned by the host user, not the container's
+    # git user, so mark it safe. safe.directory is only honored from global/system
+    # config (git ignores it from -c / the command line), so it must be written
+    # to the global gitconfig before any git command touches the repo.
+    _git_env = {**os.environ, "HOME": os.environ.get("HOME", "/root")}
+    subprocess.run(
+        ["git", "config", "--global", "--replace-all", "safe.directory", str(host_repo)],
+        capture_output=True, env=_git_env,
+    )
+
     # Discard any local modifications to tracked files (e.g. VERSION) so the
     # pull never aborts with "your local changes would be overwritten".
     subprocess.run(
         ["git", "checkout", "--", "."],
-        capture_output=True, cwd=str(host_repo),
+        capture_output=True, cwd=str(host_repo), env=_git_env,
     )
 
     try:
         pull = subprocess.run(
             ["git", "pull", _GIT_HTTPS, "main"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(host_repo),
+            cwd=str(host_repo), env=_git_env,
         )
         output_parts.append(
             f"$ git pull {_GIT_HTTPS} main\n{(pull.stdout + pull.stderr).strip()}"
