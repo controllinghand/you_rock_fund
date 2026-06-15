@@ -294,57 +294,43 @@ def run_discord_preview():
         loop.close()
 
 
-# ── Monday 9:55AM — wheel check (runs before CSP pipeline) ────
-
-def run_wheel_check_job():
-    loop = _new_loop()
-    now  = datetime.now(PST)
-    if not is_first_trading_day_of_week(now.date()):
-        log.info(f"⏭️  WHEEL CHECK skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
-        loop.close()
-        return
-    log.info("\n" + "=" * 65)
-    log.info(f"🔄 WHEEL CHECK — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
-    log.info("=" * 65)
-    if not _ibkr_reachable():
-        msg = "IB Gateway unreachable before Monday wheel check — jobs will likely fail"
-        log.error(f"❌ {msg}")
-        _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
-    try:
-        from wheel_manager import run_wheel_check
-        r = run_wheel_check()
-        log.info(f"✅ Wheel check done — freed ${r['freed_capital']:,.0f}  "
-                 f"reserved ${r['reserved_capital']:,.0f}  skip {r['skip_tickers'] or 'none'}")
-    except Exception as e:
-        log.error(f"❌ Wheel check error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Monday wheel check failed: `{type(e).__name__}: {e}`")
-    finally:
-        loop.close()
-
-
-# ── Monday 10AM — CSP execution pipeline ──────────────────────
+# ── Monday — wheel check → CSP pipeline (one chained job) ─────
 
 def run_pipeline():
+    """Run the wheel check and the CSP pipeline back-to-back in one job.
+
+    The wheel check's results are handed to the CSP pipeline IN MEMORY rather
+    than via state.json. The two used to be separate cron jobs 5 min apart, but
+    when the wheel check actually sells covered calls it runs the order-escalation
+    ladder and can take 6+ min — overrunning the pipeline's start, which then read
+    a stale monday_context (cc_premium=0, active_wheel_count=0, reserved=0). That
+    dropped CC premium from the weekly total and made the pipeline over-fill CSP
+    slots against capital already tied up in wheel stock. Chaining them (the same
+    sequence as monday_runner.run_monday / the dashboard's Run Now) removes the race.
+    """
     loop = _new_loop()
     now  = datetime.now(PST)
     if not is_first_trading_day_of_week(now.date()):
-        log.info(f"⏭️  CSP PIPELINE skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
+        log.info(f"⏭️  MONDAY RUN skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
         loop.close()
         return
     log.info("\n" + "=" * 65)
-    log.info(f"⏰ WEEKLY EXECUTION — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info(f"🗓️  MONDAY RUN — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
     if not _ibkr_reachable():
-        msg = "IB Gateway unreachable before Monday CSP pipeline — trades will not execute"
+        msg = "IB Gateway unreachable before Monday run — trades will not execute"
         log.error(f"❌ {msg}")
         _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
     try:
-        # Read context left by wheel_check (9:55AM), then delegate to the shared
-        # Monday runner so the scheduled pipeline runs the exact same code as the
-        # dashboard's Run Now / Run Screener.
-        state   = _load_state()
-        context = state.get("monday_context", {})
+        # ── Step 1: wheel check (stop-loss sells + covered calls) ──
+        # Its return dict IS the pipeline context (skip_tickers, freed_capital,
+        # reserved_capital, active_wheel_count, cc_premium, shares_sold_pnl, …).
+        from wheel_manager import run_wheel_check
+        context = run_wheel_check()
+        log.info(f"✅ Wheel check done — freed ${context['freed_capital']:,.0f}  "
+                 f"reserved ${context['reserved_capital']:,.0f}  skip {context['skip_tickers'] or 'none'}")
 
+        # ── Step 2: CSP pipeline, driven by the wheel check's live results ──
         import json as _json
         _progress_file = "/data/run_progress.json"
         _ticker_results = []
@@ -388,8 +374,8 @@ def run_pipeline():
                  f"Total realized ${outcome.get('total_realized', 0):,.0f}")
 
     except Exception as e:
-        log.error(f"❌ Pipeline error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Monday CSP pipeline failed: `{type(e).__name__}: {e}`")
+        log.error(f"❌ Monday run error: {e}", exc_info=True)
+        _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
     finally:
         loop.close()
 
@@ -504,15 +490,13 @@ def main():
         trigger="cron", day_of_week="mon,tue", hour=prev_h, minute=prev_m,
         id="monday_discord_preview", name="Weekly Discord Preview"
     )
-    scheduler.add_job(
-        run_wheel_check_job,
-        trigger="cron", day_of_week="mon,tue", hour=wheel_h, minute=wheel_m,
-        id="monday_wheel_check", name="Weekly Wheel Check"
-    )
+    # Wheel check → CSP pipeline run as ONE chained job (no state.json hand-off
+    # race). It fires at the wheel-check time so CCs are still priced near the
+    # open; the CSP pipeline then runs immediately after the wheel check returns.
     scheduler.add_job(
         run_pipeline,
-        trigger="cron", day_of_week="mon,tue", hour=exec_h, minute=exec_m,
-        id="monday_execution", name="Weekly CSP Execution"
+        trigger="cron", day_of_week="mon,tue", hour=wheel_h, minute=wheel_m,
+        id="monday_execution", name="Weekly Wheel Check + CSP Execution"
     )
     scheduler.add_job(
         run_risk_monitor,
@@ -537,8 +521,7 @@ def main():
     log.info("   • Friday     4:15 PM PST  — assignment detection (skipped on Good Friday)")
     log.info("   • Saturday   6:00 PM PST  — screener preview")
     log.info(f"   • Mon/Tue*  {fmt(prev_h, prev_m):>11}  — Discord preview (if webhook set)")
-    log.info(f"   • Mon/Tue*  {fmt(wheel_h, wheel_m):>11}  — wheel check (stop loss + CCs)")
-    log.info(f"   • Mon/Tue*  {fmt(exec_h, exec_m):>11}  — CSP execution  ← configured")
+    log.info(f"   • Mon/Tue*  {fmt(wheel_h, wheel_m):>11}  — wheel check (stop loss + CCs) → CSP execution  ← configured {fmt(exec_h, exec_m)}")
     log.info("   • Tue–Thu    9:00 AM PST  — daily risk monitor (skipped on holidays)")
     log.info("   • Wed–Fri    3:00 AM PST  — auto-update check (if enabled in settings)")
     log.info("   * Shifts to Tuesday when Monday is a market holiday")

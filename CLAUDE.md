@@ -43,8 +43,7 @@ cat state.json               # Full system state (see schema below)
 |---|---|---|
 | Saturday 8:00AM | Assignment detection | `wheel_manager.detect_assignments()` |
 | Saturday 6:00PM | Screener preview | `screener` + `position_sizer` |
-| Monday 9:55AM | Wheel check: stop loss sells + covered calls | `wheel_manager.run_wheel_check()` |
-| Monday 10:00AM | CSP pipeline: screen → size → execute | `trader.execute_positions()` |
+| Monday 9:55AM | Wheel check → CSP pipeline (one chained job): stop loss sells + covered calls, then screen → size → execute | `scheduler.run_pipeline()` → `wheel_manager.run_wheel_check()` + `trader.execute_positions()` |
 | Tue–Thu 9:00AM | Daily risk monitor | `risk_manager.run_daily_monitor()` |
 
 ## Architecture
@@ -121,22 +120,34 @@ Each module connects with a distinct client ID to allow concurrent connections:
 
 ### Monday Data Flow
 
+`scheduler.run_pipeline()` runs both halves as ONE chained job (the wheel
+check's return dict is passed to the CSP pipeline in memory — no state.json
+hand-off, so the pipeline can never start before the wheel check finishes).
+
 ```
-9:55AM wheel_check:
+Step A — wheel_check (run_wheel_check):
   → call get_all_candidates() to get screener ticker set
   → Step 1: if ticker not in screener → sell at market (freed_capital += proceeds)
   → Step 2: query IBKR option chain for calls >= assigned_strike on nearest Friday
   → Step 3: if highest call delta >= 0.20 → sell CC; else → sell at market
-  → write monday_context (skip_tickers, freed_capital, cc_premium,
-    shares_sold_pnl, wheel_activity) to state.json
+  → write monday_context to state.json (for the Discord preview / recovery)
+    AND return it: skip_tickers, freed_capital, reserved_capital,
+    active_wheel_count, cc_premium, shares_sold_pnl, wheel_activity,
+    open_short_put_tickers
 
-10:00AM run_pipeline:
-  → read monday_context (skip_tickers, freed_capital)
+Step B — run_csp_pipeline(context=wheel_check_result):
   → filter skip_tickers from screener results
-  → size_all(targets, budget=TOTAL_FUND_BUDGET + freed_capital)
+  → target_fills = num_positions − active_wheel_count − already-open CSPs
+  → size_all(targets, budget=net_liq − reserved_capital + freed_capital)
   → execute CSPs (merges into existing state.json — wheel_holdings preserved)
-  → assemble and write weekly_pnl
+  → assemble and write weekly_pnl (csp_premium + cc_premium + shares_sold_pnl)
 ```
+
+> Earlier versions ran these as two cron jobs 5 min apart and the pipeline
+> re-read `monday_context` from disk; if a CC-heavy wheel check overran 5 min
+> the pipeline read stale context (lost CC premium + over-filled CSP slots).
+> Fixed v3.9.18 by chaining them. The dashboard's Run Now (`run_monday`) always
+> used this in-memory sequence.
 
 ### Order Execution (shared pattern)
 

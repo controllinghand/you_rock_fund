@@ -454,12 +454,19 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
         f"**Avg Yield/Week:** {avg_yield:.2f}%",
         f"**Progress:** {progress_pct:.1f}% toward ${ANNUAL_TARGET:,} annual target",
     ]
+    def _week_yield(week: dict, prem: float) -> float:
+        # Legacy week entries predate the yield_pct field — fall back to
+        # computing it from the week's premium so the post never crashes.
+        if "yield_pct" in week:
+            return week["yield_pct"]
+        return prem / fund_budget * 100 if fund_budget else 0
+
     if best:
         best_prem = best.get("premium_collected", best.get("realized", 0))
-        ytd_lines.append(f"**Best Week:** ${best_prem:,.0f} ({best['yield_pct']:.2f}%)")
+        ytd_lines.append(f"**Best Week:** ${best_prem:,.0f} ({_week_yield(best, best_prem):.2f}%)")
     if worst and best and worst["week_start"] != best["week_start"]:
         worst_prem = worst.get("premium_collected", worst.get("realized", 0))
-        ytd_lines.append(f"**Worst Week:** ${worst_prem:,.0f} ({worst['yield_pct']:.2f}%)")
+        ytd_lines.append(f"**Worst Week:** ${worst_prem:,.0f} ({_week_yield(worst, worst_prem):.2f}%)")
     fields.append({"name": "📊 YTD Stats", "value": "\n".join(ytd_lines), "inline": False})
 
     holdings = [h for h in state.get("wheel_holdings", []) if h.get("shares", 0) > 0]
