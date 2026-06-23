@@ -176,7 +176,7 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
         wheel_sell_when_cc_below_assigned=true to force False and force-sell an
         underwater holding instead.
 
-    Returns (strike, delta, mid_price, stock_price), or:
+    Returns (strike, delta, mid_price, implied_vol, stock_price), or:
       • CC_NO_DATA — IBKR returned no greeks/chain at all (can't price; e.g. a
         weekend preview with the market closed). Caller should NOT sell shares.
       • None       — greeks came back but no strike reached CC_DELTA_MIN
@@ -262,18 +262,21 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
 
     ib.sleep(5)
 
-    # Read delta and mid from each stream, then cancel
-    results: list[tuple[float, float, float | None]] = []
+    # Read delta, implied vol and mid from each stream, then cancel
+    results: list[tuple[float, float, float | None, float | None]] = []
     for strike, (contract, data) in streams.items():
         ib.cancelMktData(contract)
 
         delta = None
+        iv    = None
         for attr in ("modelGreeks", "lastGreeks"):
             g = getattr(data, attr, None)
             if g is not None:
                 d = getattr(g, "delta", None)
                 if d is not None and not _is_nan(d):
                     delta = d
+                    v = getattr(g, "impliedVol", None)
+                    iv = v if (v is not None and not _is_nan(v)) else None
                     break
 
         if delta is None:
@@ -284,7 +287,7 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
         mid = round((bid + ask) / 2, 2) \
               if (not _is_nan(bid) and not _is_nan(ask) and bid > 0 and ask > 0) \
               else None
-        results.append((strike, abs(delta), mid))
+        results.append((strike, abs(delta), mid, iv))
 
     ib.sleep(0.5)
 
@@ -296,12 +299,12 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
     results.sort(key=lambda x: x[0])  # ascending by strike
 
     log.info(f"  {'Strike':>8}  {'Delta':>7}  {'Mid':>8}")
-    for strike, delta, mid in results:
+    for strike, delta, mid, _iv in results:
         flag    = "✅" if delta >= CC_DELTA_MIN else "❌"
         mid_str = f"${mid:.2f}" if mid else "?"
         log.info(f"  ${strike:>7.2f}  {delta:>6.3f}  {mid_str:>8}  {flag}")
 
-    viable = [(s, d, m) for s, d, m in results if d >= CC_DELTA_MIN]
+    viable = [(s, d, m, iv) for s, d, m, iv in results if d >= CC_DELTA_MIN]
     if not viable:
         log.info(f"  ❌ No call strike with delta ≥ {CC_DELTA_MIN:.2f} available")
         return None
@@ -315,24 +318,24 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
     # put), which never equals a real strike. An exact `==` match silently skips
     # this path and always falls through to the 20-delta strike below.
     at_or_above = (
-        [(s, d, m) for s, d, m in viable if s >= assigned_strike]
+        [(s, d, m, iv) for s, d, m, iv in viable if s >= assigned_strike]
         if assigned_strike > 0 else []
     )
     if at_or_above:
-        s, d, m = at_or_above[0]
+        s, d, m, iv = at_or_above[0]
         log.info(f"  🎯 Cost-basis strike ${s:.2f} (≥ assigned ${assigned_strike:.2f}) "
                  f"delta={d:.3f} — selling CC there")
-        return (s, d, m, current_price)
+        return (s, d, m, iv, current_price)
 
     # Priority 2 — no viable strike at/above cost basis (stock is underwater, or
     # assigned_strike unknown). Use the highest qualifying strike (~20-delta CC).
     # With below-cost CCs enabled this writes below assigned_strike; otherwise the
     # assigned_strike scan floor means this is only reached when nothing qualifies
     # and the caller force-sells.
-    s, d, m = viable[-1]
+    s, d, m, iv = viable[-1]
     log.info(f"  🎯 No viable strike at/above assigned ${assigned_strike:.2f} — "
              f"using ${s:.2f} (delta={d:.3f})")
-    return (s, d, m, current_price)
+    return (s, d, m, iv, current_price)
 
 
 # ── Orders ─────────────────────────────────────────────────────
@@ -973,7 +976,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
                 continue
 
-            cc_strike, cc_delta, cc_mid, cc_stock_price = cc_info
+            cc_strike, cc_delta, cc_mid, cc_iv, cc_stock_price = cc_info
             below_assigned = assigned_strike > 0 and cc_strike < assigned_strike
             mid_display = f"${cc_mid:.2f}" if cc_mid else "?"
             log.info(f"  🎯 Selling CC: ${cc_strike:.2f} strike  "
@@ -1034,6 +1037,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                             "right":                "C",
                             "entry_date":           datetime.now().isoformat(),
                             "delta_at_entry":       round(cc_delta, 4),
+                            "iv_at_entry":          round(cc_iv, 4) if cc_iv is not None else None,
                             "buffer_pct_at_entry":  buffer_pct,
                             "premium_per_contract": fill_price,
                             "contracts":            shares // 100,
