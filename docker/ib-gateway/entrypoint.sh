@@ -120,6 +120,63 @@ patch_ibc_template() {
     return 0
 }
 
+# Self-heal a TWS version that the persistent volume is shadowing.
+#
+# The image installs the TWS/Gateway jars under $TWS_PATH (default /home/ibgateway/Jts),
+# but that path is a persistent named volume at runtime. Docker only seeds a named volume
+# from the image when the volume is EMPTY — so when the base image bumps the TWS version
+# on a rebuild (e.g. dashboard upgrade), the already-populated volume keeps the OLD version
+# and shadows the new jars baked into the image. IBC is told (TWS_MAJOR_VRSN) to launch the
+# new version, can't find its jars in the volume, and exits 4 with:
+#   "Offline TWS/Gateway version <X> is not installed: can't find jars folder"
+#
+# The Dockerfile stashes a copy of the install at /opt/tws-baked (outside the volume). Here
+# we copy the expected version out of that bake into the volume if it's missing — so an
+# upgrade self-heals on first start with no human and (on paper) no re-login. Idempotent:
+# does nothing once the version is present.
+self_heal_tws_version() {
+    baked="/opt/tws-baked"
+    tws_path="${TWS_PATH:-/home/ibgateway/Jts}"
+    vrsn="${TWS_MAJOR_VRSN:-}"
+
+    if [ -z "$vrsn" ]; then
+        echo "yrvi-gw-entrypoint: TWS_MAJOR_VRSN unset — skipping TWS version self-heal" >&2
+        return 0
+    fi
+    if [ ! -d "$baked" ]; then
+        echo "yrvi-gw-entrypoint: no baked TWS install at $baked — skipping self-heal (older image?)" >&2
+        return 0
+    fi
+
+    # Already present (with jars) in the volume-backed install tree? Nothing to do.
+    if find "$tws_path" -maxdepth 4 -type d -path "*/$vrsn/jars" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+
+    # Locate the version dir in the bake (must contain jars). Handles both the new
+    # nested layout ($baked/ibgateway/<vrsn>) and the old flat one ($baked/<vrsn>).
+    baked_verdir=""
+    for d in $(find "$baked" -maxdepth 3 -type d -name "$vrsn" 2>/dev/null); do
+        if [ -d "$d/jars" ]; then baked_verdir="$d"; break; fi
+    done
+    if [ -z "$baked_verdir" ]; then
+        echo "yrvi-gw-entrypoint: WARNING — TWS $vrsn not found in image bake ($baked); cannot self-heal volume" >&2
+        return 0
+    fi
+
+    rel="${baked_verdir#"$baked"/}"        # e.g. ibgateway/10.48.1b  (or 10.48.1b)
+    target_parent="$tws_path/$(dirname "$rel")"
+    echo "yrvi-gw-entrypoint: TWS $vrsn missing from volume — restoring from image bake ($rel)..."
+    mkdir -p "$target_parent"
+    if cp -a "$baked_verdir" "$target_parent/"; then
+        echo "yrvi-gw-entrypoint: restored TWS $vrsn into ${target_parent%/}/$vrsn"
+        send_discord_alert "🔄 YRVI: IB Gateway self-healed after upgrade — restored TWS $vrsn into the settings volume (the new version was shadowed by the old one). Starting normally."
+    else
+        echo "yrvi-gw-entrypoint: WARNING — failed to restore TWS $vrsn into volume" >&2
+    fi
+    return 0
+}
+
 # ── Credentials preflight ────────────────────────────────────────
 
 echo "yrvi-gw-entrypoint: fetching ${PASSWORD_KEY} from secrets container..."
@@ -150,6 +207,10 @@ fi
 # ── Patch IBC config and prepare env ─────────────────────────────
 
 patch_ibc_template
+
+# Restore the running TWS version into the settings volume if an upgrade left it
+# shadowed by an older one (otherwise IBC exits 4 "can't find jars folder").
+self_heal_tws_version
 
 # Allow the YRVI API to override AUTO_RESTART_TIME via a file on the shared volume
 # without requiring a .env.compose edit + full stack restart.

@@ -1,3 +1,11 @@
+## [5.0.3] — 2026-06-23
+### Fixed
+- **IB Gateway now self-heals a TWS version that an upgrade left shadowed — no more "can't find jars folder" exit-4 crash after updating.** The gateway image is built `FROM ghcr.io/gnzsnz/ib-gateway:latest`, and the TWS/Gateway jars install under `/home/ibgateway/Jts` — which is also a *persistent named volume*. Docker only seeds a named volume from the image when the volume is empty, so when a dashboard upgrade rebuilds the image and `latest` has bumped the bundled TWS version (e.g. 10.47.1e → 10.48.1b), the already-populated volume keeps the **old** version and shadows the new jars baked into the image. IBC is told (via `TWS_MAJOR_VRSN`) to launch the new version, can't find its jars in the volume, and the container exits 4 with `Error: Offline TWS/Gateway version <X> is not installed: can't find jars folder` — nothing ever binds the API port, so the dashboard just sees a dead gateway. (This looks like a 2FA/login lockout, which also exits 4, but it isn't — no login is ever attempted.) The Dockerfile now stashes a copy of the install at `/opt/tws-baked` (outside the volume), and `entrypoint.sh` copies the expected version out of that bake into the volume on startup if it's missing. The result: an upgrade that bumps TWS now repairs itself on the next gateway start — automatically, with no SSH access to the box and (on paper) no re-login. Idempotent; a one-time `🔄` Discord/in-app alert is posted when a restore happens. Live boxes still need their usual 2FA on the post-upgrade gateway start, but the version skew no longer blocks startup.
+
+## [5.0.2] — 2026-06-23
+### Fixed
+- **Diagnostics now polls up to 30s for delayed options data** instead of giving up immediately, so the gateway connectivity check no longer reports missing bid/ask on feeds that publish on a delay.
+
 ## [5.0.1] — 2026-06-23
 ### Changed
 - **Removed the duplicate top "Run Screener" button on the This Week page.** The header had a "Run Screener" button right next to "Run Now", plus a second "Run Screener Now" button in the empty-state card below — two controls for the same action. Dropped the top one; the empty-state "Run Screener Now" remains, and the green "Run Now" stays in the header. (To preview again after results show, navigate off the page and back — it re-renders the empty state.)
