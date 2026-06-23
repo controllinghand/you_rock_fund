@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
-import { RefreshCw, Clock, TrendingUp, AlertCircle, Play } from 'lucide-react'
+import { Clock, TrendingUp, AlertCircle, Play } from 'lucide-react'
 
 function useCountdown(isoStr) {
   const [label, setLabel] = useState('')
@@ -183,14 +183,6 @@ export default function ThisWeek() {
           <div className="flex flex-col items-end gap-3">
             <Clock size={40} className="text-blue-600/30" />
             <div className="flex gap-2">
-              <button
-                onClick={runScreener}
-                disabled={loading}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-wait text-white text-sm font-medium rounded-lg transition-colors"
-              >
-                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-                {loading ? 'Running...' : 'Run Screener'}
-              </button>
               <div className="flex flex-col items-end gap-1">
                 <button
                   onClick={triggerManualRun}

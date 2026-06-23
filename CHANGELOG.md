@@ -1,5 +1,6 @@
 ## [5.0.1] — 2026-06-23
 ### Changed
+- **Removed the duplicate top "Run Screener" button on the This Week page.** The header had a "Run Screener" button right next to "Run Now", plus a second "Run Screener Now" button in the empty-state card below — two controls for the same action. Dropped the top one; the empty-state "Run Screener Now" remains, and the green "Run Now" stays in the header. (To preview again after results show, navigate off the page and back — it re-renders the empty state.)
 - **Removed the redundant "Prem/Contract" column from the IBKR Holdings table.** Now that Avg Price is shown per-share for options (5.0.0), Prem/Contract showed the same per-share entry premium — and Avg Price is the better source (it comes from IBKR's cost basis, so it's always populated, whereas Prem/Contract was only filled for app-executed trades). Dropping it reclaims horizontal space. Total Premium (the aggregate) is unchanged.
 
 ## [5.0.0] — 2026-06-22
