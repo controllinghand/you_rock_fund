@@ -1404,6 +1404,12 @@ def _get_ibkr_data(settings: dict) -> dict:
                     # Derive per-share price from total value: value / (position * multiplier)
                     denom    = (pos.position or 0) * mult
                     mkt_px   = round(mkt_val / denom, 4) if (mkt_val is not None and denom) else None
+                    # IBKR avgCost for options is the per-contract dollar cost (premium ×
+                    # multiplier); divide by the multiplier so Avg Price is per-share and
+                    # directly comparable to marketPrice (Price). Stocks are unaffected.
+                    avg_cost = _safe_float(pos.avgCost, 4)
+                    if is_opt and avg_cost is not None and mult:
+                        avg_cost = round(avg_cost / mult, 4)
                     portfolio.append({
                         "symbol":        c.symbol,
                         "secType":       c.secType,
@@ -1411,7 +1417,7 @@ def _get_ibkr_data(settings: dict) -> dict:
                         "strike":        _safe_float(c.strike, 4) if is_opt else None,
                         "expiry":        c.lastTradeDateOrContractMonth if is_opt else None,
                         "position":      _safe_float(pos.position, 0),
-                        "avgCost":       _safe_float(pos.avgCost, 4),
+                        "avgCost":       avg_cost,
                         "marketPrice":   mkt_px,
                         "marketValue":   mkt_val,
                         "unrealizedPNL": unrl,
