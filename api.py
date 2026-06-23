@@ -1688,6 +1688,16 @@ def _build_diag() -> dict:
     version = version_file.read_text().strip() if version_file.exists() else "unknown"
     check("Version", "ok", f"v{version}")
 
+    # IB Gateway / TWS build version — published to /data by the gateway
+    # entrypoint on startup (the IBKR API only exposes the protocol
+    # serverVersion, not the Gateway build). Surfacing it here makes a future
+    # version skew visible at a glance instead of a mystery exit-4 crash.
+    gw_ver_file = Path("/data/gw_tws_version")
+    if gw_ver_file.exists():
+        gw_ver = gw_ver_file.read_text().strip()
+        if gw_ver:
+            check("Gateway Version", "ok", gw_ver)
+
     # ── 7 & 8. Live market data (SPY stock + options) ──────────
     # Only runs when gateway is reachable; adds ~10s to total diag time.
     if _gateway_running(port):
@@ -1754,7 +1764,14 @@ def _build_diag() -> dict:
                 price = tkr.last or tkr.close
                 if price and not _diag_is_nan(price):
                     spy_price = price
-                    check("SPY Price", "ok", f"${price:.2f} (delayed)")
+                    # Label the feed by its actual type rather than assuming
+                    # delayed — live accounts with a real-time subscription
+                    # report marketDataType 1 and were being mislabeled.
+                    _mdt = {1: "real-time", 2: "frozen",
+                            3: "delayed", 4: "delayed (frozen)"}
+                    mdt_label = _mdt.get(getattr(tkr, "marketDataType", None), "")
+                    suffix = f" ({mdt_label})" if mdt_label else ""
+                    check("SPY Price", "ok", f"${price:.2f}{suffix}")
                 else:
                     check("SPY Price", "warn", "No price data — market may be closed")
             except Exception as e:
@@ -1768,7 +1785,16 @@ def _build_diag() -> dict:
                     try:
                         chains = ib.reqSecDefOptParams("SPY", "", "STK", stk_q[0].conId)
                         ib.sleep(1)
-                        chain = next((c for c in chains if c.exchange == "SMART"), None) or next(iter(chains), None)
+                        # reqSecDefOptParams can return several SMART entries —
+                        # including a degenerate single-strike/single-expiry
+                        # artifact. Picking the first SMART match lands the probe
+                        # on an illiquid far-dated strike with no quote, which
+                        # false-flags healthy real-time data as "no bid/ask".
+                        # Choose the richest chain (most strikes, then expiries).
+                        smart = [c for c in chains if c.exchange == "SMART"]
+                        chain = max(smart or chains,
+                                    key=lambda c: (len(c.strikes), len(c.expirations)),
+                                    default=None)
                         if chain:
                             strikes = sorted(chain.strikes)
                             fridays = sorted(e for e in chain.expirations
