@@ -226,12 +226,30 @@ export default function ThisWeek() {
           {runStatus?.ticker_results?.length > 0 && (
             <div className="space-y-1">
               {runStatus.ticker_results.map((r, i) => {
-                const filled = r.status === 'filled' || r.status === 'partial_fill' || r.status === 'dry_run'
-                const skipped = r.status?.startsWith('skipped')
-                const emoji = filled ? '✅' : skipped ? '⚠️' : '❌'
-                const detail = filled
-                  ? `filled @ $${r.fill_price?.toFixed(2)} via ${r.order_type?.replace('_',' ')} — $${r.premium_collected?.toFixed(0)}`
-                  : r.status?.replace(/_/g, ' ')
+                const s = r.status || ''
+                let emoji = '❌'
+                let detail = s.replace(/_/g, ' ')
+                if (s === 'filled' || s === 'partial_fill' || s === 'dry_run') {
+                  emoji = '✅'
+                  detail = `filled @ $${r.fill_price?.toFixed(2)}`
+                    + (r.order_type ? ` via ${r.order_type.replace(/_/g, ' ')}` : '')
+                    + (r.premium_collected != null ? ` — $${r.premium_collected.toFixed(0)}` : '')
+                } else if (s === 'cc_opened') {
+                  emoji = '✅'
+                  detail = `CC $${r.cc_strike}${r.cc_delta != null ? ` (δ${r.cc_delta})` : ''}`
+                    + (r.cc_premium != null ? ` — $${r.cc_premium.toFixed(0)}` : '')
+                } else if (s === 'skipped_excluded') {
+                  emoji = '🚫'; detail = 'excluded — left alone'
+                } else if (s === 'cc_deferred') {
+                  emoji = '⏳'; detail = 'CC deferred (no data) — shares kept'
+                } else if (s === 'cc_already_open' || s === 'held_covered') {
+                  emoji = '♻️'; detail = 'already covered'
+                } else if (s.startsWith('sold_')) {
+                  emoji = '💰'
+                  detail = s.replace(/_/g, ' ') + (r.proceeds != null ? ` — $${r.proceeds.toFixed(0)}` : '')
+                } else if (s.startsWith('skipped')) {
+                  emoji = '⚠️'
+                }
                 return (
                   <div key={i} className="text-xs font-mono text-blue-800 dark:text-blue-300 flex gap-2">
                     <span>{emoji}</span>

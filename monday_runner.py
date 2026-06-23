@@ -259,7 +259,8 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     log.info(f"🗓️  MONDAY RUNNER [{mode}] — {datetime.now(PST).strftime('%Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
 
-    wheel = run_wheel_check(dry_run=dry_run, client_id=IBKR_CLIENT_ID_PREVIEW)
+    wheel = run_wheel_check(dry_run=dry_run, client_id=IBKR_CLIENT_ID_PREVIEW,
+                            progress_callback=progress_callback)
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
                              progress_callback=progress_callback,
                              account_summary=account_summary)

@@ -604,7 +604,8 @@ def detect_assignments():
         discord_poster.post_assignment_alert(new_assignments)
 
 
-def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
+def run_wheel_check(dry_run: bool = False, client_id: int = None,
+                    progress_callback=None) -> dict:
     """
     Monday, 5 min before the configured execution time (PST) — five-step
     evaluation for each held stock:
@@ -635,6 +636,15 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
     log.info(f"🔄 MONDAY WHEEL CHECK [{mode}] — "
              f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("=" * 65)
+
+    def _progress(ticker=None, stage=None, result=None):
+        """Push live wheel-check progress to the dashboard run-status feed, so the
+        CC phase is as visible as the CSP phase. Best-effort — never breaks the run."""
+        if progress_callback:
+            try:
+                progress_callback(ticker=ticker, stage=stage, result=result)
+            except Exception:
+                pass
 
     state    = _load_state()
     holdings = state.get("wheel_holdings", [])
@@ -772,6 +782,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                 log.info(f"  🚫 {ticker}: excluded from the wheel — no CC, no sell (left as-is)")
                 h["last_checked"] = datetime.now().isoformat()
                 wheel_activity.append({"ticker": ticker, "action": "skipped_excluded"})
+                _progress(ticker=ticker, stage="excluded",
+                          result={"ticker": ticker, "status": "skipped_excluded"})
                 continue
 
             # ── Recovery guard: already covered by a live short call ──
@@ -792,6 +804,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                     "cc_expiry": expiry if on_this else (exps[0] if exps else None),
                     "contracts": open_short_calls.get((ticker, expiry)),
                 })
+                _progress(ticker=ticker, stage="already covered",
+                          result={"ticker": ticker,
+                                  "status": "cc_already_open" if on_this else "held_covered"})
                 continue
 
             weeks_held      = h.get("weeks_held", 0) + 1
@@ -800,6 +815,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
 
             log.info(f"\n  ── {ticker}  {shares} shares  "
                      f"@ ${assigned_strike:.2f}  week {weeks_held} ──")
+            _progress(ticker=ticker, stage="checking covered call")
 
             if shares <= 0:
                 log.info(f"  ⏭️  {ticker}: 0 shares — skipping")
@@ -808,6 +824,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
             # ── Step 1: Screener check ────────────────────────
             if candidate_info and ticker not in candidate_info:
                 log.warning(f"  🚫 {ticker}: dropped from screener — selling shares")
+                _progress(ticker=ticker, stage="dropped screener — selling")
                 result = _sell_stock_market(ib, ticker, shares, "dropped_screener",
                                                assigned_strike=assigned_strike, dry_run=dry_run)
                 if result["status"] == "filled":
@@ -827,8 +844,13 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                         "realized_pnl": realized,
                     })
                     log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
+                    _progress(ticker=ticker, stage="sold (dropped screener)",
+                              result={"ticker": ticker, "status": "sold_dropped_screener",
+                                      "shares": shares, "proceeds": proceeds})
                 else:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                    _progress(ticker=ticker, stage="sale FAILED",
+                              result={"ticker": ticker, "status": "sell_failed"})
                 continue
 
             log.info(f"  ✅ {ticker} on screener — checking stop loss")
@@ -867,8 +889,13 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                                 "realized_pnl": realized,
                             })
                             log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
+                            _progress(ticker=ticker, stage="sold (stop loss)",
+                                      result={"ticker": ticker, "status": "sold_stop_loss",
+                                              "shares": shares, "proceeds": proceeds})
                         else:
                             log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                            _progress(ticker=ticker, stage="sale FAILED",
+                                      result={"ticker": ticker, "status": "sell_failed"})
                         continue
                     else:
                         log.info(
@@ -928,6 +955,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                              f"ignored (wheel_cc_ignore_earnings_filter=true)")
 
             log.info(f"  ✅ {ticker}: earnings check passed — querying option chain")
+            _progress(ticker=ticker, stage="scanning call strikes")
 
             # ── Step 3: Find best CC strike ───────────────────
             cc_info = _find_cc_strike(ib, ticker, expiry, assigned_strike,
@@ -948,6 +976,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                     "shares": shares,
                 })
                 h["cc_status"] = "pending"
+                _progress(ticker=ticker, stage="CC deferred (no data)",
+                          result={"ticker": ticker, "status": "cc_deferred"})
                 continue
 
             if cc_info is None:
@@ -972,8 +1002,13 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                         "realized_pnl": realized,
                     })
                     log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
+                    _progress(ticker=ticker, stage="sold (no viable CC)",
+                              result={"ticker": ticker, "status": "sold_no_viable_cc",
+                                      "shares": shares, "proceeds": proceeds})
                 else:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                    _progress(ticker=ticker, stage="sale FAILED",
+                              result={"ticker": ticker, "status": "sell_failed"})
                 continue
 
             cc_strike, cc_delta, cc_mid, cc_iv, cc_stock_price = cc_info
@@ -1001,6 +1036,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                 continue
 
             ref_mid      = cc_mid if (cc_mid and cc_mid > 0) else 0.50
+            _progress(ticker=ticker, stage=f"selling CC ${cc_strike:.0f} (δ{cc_delta:.2f})")
             order_result = _sell_cc_with_escalation(
                 ib, qualified[0], shares, ticker, cc_strike, ref_mid, dry_run=dry_run
             )
@@ -1021,6 +1057,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                     "cc_expiry":      expiry,
                     "below_assigned": below_assigned,
                 })
+                _progress(ticker=ticker, stage="CC filled",
+                          result={"ticker": ticker, "status": "cc_opened",
+                                  "cc_strike": cc_strike, "cc_premium": prem,
+                                  "cc_delta": round(cc_delta, 3), "cc_expiry": expiry})
                 log.info(f"  💰 CC premium: ${prem:,.0f}")
                 # Capture execution metadata for dashboard enrichment
                 fill_price = order_result.get("fill_price")
@@ -1052,6 +1092,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
                     "ticker": ticker, "action": "cc_failed", "cc_strike": cc_strike
                 })
                 log.warning(f"  ⚠️  {ticker}: CC order failed — no CC this week")
+                _progress(ticker=ticker, stage="CC order failed",
+                          result={"ticker": ticker, "status": "cc_failed", "cc_strike": cc_strike})
 
     finally:
         ib.disconnect()
