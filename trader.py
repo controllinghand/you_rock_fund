@@ -132,16 +132,19 @@ def is_nan(val) -> bool:
         return True
 
 
-def _get_delta_for_contract(ib: IB, contract) -> float | None:
-    """Request delayed market data and return put delta. Returns None if IBKR has no data."""
+def _get_greeks_for_contract(ib: IB, contract) -> tuple[float | None, float | None]:
+    """Request delayed market data and return (put delta, implied vol) from the
+    same greeks snapshot. Either value may be None if IBKR has no data."""
     tkr = ib.reqMktData(contract, genericTickList="106", snapshot=False)
     ib.sleep(3)
     ib.cancelMktData(contract)
     ib.sleep(0.5)
     for greeks in (tkr.modelGreeks, tkr.lastGreeks, tkr.bidGreeks, tkr.askGreeks):
         if greeks is not None and not is_nan(greeks.delta):
-            return greeks.delta
-    return None
+            iv = getattr(greeks, "impliedVol", None)
+            iv = iv if (iv is not None and not is_nan(iv)) else None
+            return greeks.delta, iv
+    return None, None
 
 
 def _get_stock_price(ib: IB, ticker: str) -> float | None:
@@ -175,8 +178,9 @@ def verify_and_adjust_strike(
     - If abs(delta) < MIN_DELTA (stock rose since Saturday): scan upward for highest
       strike still within delta ≤ MAX_DELTA (maximises premium within the safe zone).
 
-    Returns (qualified_contract, final_strike, orig_delta, final_delta, was_adjusted)
-    or None if qualification fails or no valid strike is found.
+    Returns (qualified_contract, final_strike, orig_delta, final_delta, final_iv,
+    was_adjusted) or None if qualification fails or no valid strike is found.
+    final_iv is the chosen contract's implied vol at execution (may be None).
     """
     expiry = parse_expiry(expiry_str)
 
@@ -192,7 +196,7 @@ def verify_and_adjust_strike(
         log.error(f"  ❌ {ticker} delta-check qualify error: {e}")
         return None
 
-    live_delta = _get_delta_for_contract(ib, c)
+    live_delta, live_iv = _get_greeks_for_contract(ib, c)
 
     if live_delta is None:
         log.warning(f"  ⚠️  {ticker} — no live delta from IBKR; "
@@ -203,7 +207,7 @@ def verify_and_adjust_strike(
 
     if MIN_DELTA <= abs(live_delta) <= MAX_DELTA:
         log.info(f"  ✅ {ticker} delta OK: {live_delta:.3f} at ${screener_strike:.2f}")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
 
     # Need to scan the chain — fetch once and reuse for both directions
     try:
@@ -230,13 +234,13 @@ def verify_and_adjust_strike(
                 alt_c = alt_q[0]
             except Exception:
                 continue
-            alt_delta = _get_delta_for_contract(ib, alt_c)
+            alt_delta, alt_iv = _get_greeks_for_contract(ib, alt_c)
             if alt_delta is None:
                 continue
             if abs(alt_delta) <= MAX_DELTA:
                 log.warning(f"  {label} {ticker} strike adjusted ${screener_strike:.2f} → "
                             f"${alt_strike:.2f} (delta {orig_delta:.3f} → {alt_delta:.3f})")
-                return alt_c, alt_strike, orig_delta, alt_delta, True
+                return alt_c, alt_strike, orig_delta, alt_delta, alt_iv, True
         return None
 
     if abs(live_delta) > MAX_DELTA:
@@ -266,13 +270,13 @@ def verify_and_adjust_strike(
             above.extend(s for s in ch.strikes if s > screener_strike)
     if not above:
         log.warning(f"  ⚠️  {ticker} — no higher strikes in chain; using screener strike as-is")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
     # 15 closest above screener, then scan highest-first to find best delta within cap
     closest_above = sorted(sorted(set(above))[:15], reverse=True)
     result = _scan_strikes(closest_above, "⬆️ ")
     if result is None:
         log.warning(f"  ⚠️  {ticker} — no higher strike improves delta; using screener strike as-is")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
     return result
 
 
@@ -688,7 +692,10 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 continue
 
-            contract, strike, orig_delta, final_delta, was_adjusted = delta_result
+            contract, strike, orig_delta, final_delta, final_iv, was_adjusted = delta_result
+            # Fall back to the screener's ATM IV if live greeks didn't carry one.
+            if final_iv is None:
+                final_iv = pos.get("iv_atm")
             if was_adjusted:
                 old_capital  = pos["capital_used"]
                 contracts    = pos["contracts"]
@@ -735,6 +742,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             continue
 
         result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
+        result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
         results.append(result)
 
         # Report result back to status callback
@@ -766,6 +774,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                     "right":                "P",
                     "entry_date":           result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
                     "delta_at_entry":       round(final_delta, 4) if final_delta is not None else None,
+                    "iv_at_entry":          round(final_iv, 4) if final_iv is not None else None,
                     "stock_price_at_entry": stock_price,
                     "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2) if stock_price else None,
                     "premium_per_contract": fill_price,

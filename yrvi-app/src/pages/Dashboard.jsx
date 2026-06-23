@@ -215,7 +215,7 @@ export default function Dashboard() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-gray-500 text-xs border-b border-gray-200 dark:border-gray-800">
-                    {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Unrealized P&L', 'Entry δ', 'Buffer %', 'Prem/Contract', 'Total Premium'].map(h => (
+                    {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Price', 'Unrealized P&L', 'Entry δ', 'Entry IV', 'Buffer %', 'Prem/Contract', 'Total Premium'].map(h => (
                       <th key={h} className={`${h === 'Instrument' ? 'text-left' : 'text-right'} px-4 py-3`}>{h}</th>
                     ))}
                     <th className="text-center px-4 py-3" title="Exclude from the wheel — no CSPs, no covered calls, never sold by the app">Exclude</th>
@@ -234,11 +234,17 @@ export default function Dashboard() {
                       <td className="px-4 py-3 text-right text-gray-600 dark:text-gray-400 font-mono">
                         {item.avgCost != null ? `$${item.avgCost.toFixed(2)}` : '—'}
                       </td>
+                      <td className="px-4 py-3 text-right text-gray-700 dark:text-gray-300 font-mono">
+                        {item.marketPrice != null ? `$${item.marketPrice.toFixed(2)}` : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                      </td>
                       <td className={`px-4 py-3 text-right font-mono font-semibold ${pnlColor(item.unrealizedPNL)}`}>
                         {fmtPnl(item.unrealizedPNL)}
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-gray-400 dark:text-gray-500">
                         {item.delta_at_entry != null ? item.delta_at_entry.toFixed(2) : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-gray-400 dark:text-gray-500">
+                        {item.iv_at_entry != null ? `${(item.iv_at_entry * 100).toFixed(1)}%` : <span className="text-gray-300 dark:text-gray-600">—</span>}
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-gray-400 dark:text-gray-500">
                         {item.buffer_pct_at_entry != null ? `${item.buffer_pct_at_entry.toFixed(1)}%` : <span className="text-gray-300 dark:text-gray-600">—</span>}

@@ -233,6 +233,7 @@ def _backfill_trade_log() -> None:
 
         strike      = pos.get("strike")
         delta       = pos.get("delta")
+        iv          = pos.get("iv_atm")
         stock_price = pos.get("latest_price")
         contracts   = pos.get("contracts")
         premium_col = ex.get("premium_collected")
@@ -244,6 +245,7 @@ def _backfill_trade_log() -> None:
             "right":                "P",
             "entry_date":           ex.get("timestamp"),
             "delta_at_entry":       round(delta, 4) if delta is not None else None,
+            "iv_at_entry":          round(iv, 4) if iv is not None else None,
             "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2)
                                     if stock_price and strike else None,
             "premium_per_contract": fill_price,
@@ -1958,6 +1960,7 @@ def get_positions():
             "simulated":             ex.get("simulated", False),
             "exec_timestamp":        ex.get("exec_timestamp") or ex.get("timestamp"),
             "delta_at_entry":        tl.get("delta_at_entry") or ex.get("delta_at_entry"),
+            "iv_at_entry":           tl.get("iv_at_entry") or ex.get("iv_at_entry"),
             "stock_price_at_entry":  stock_at_entry,
             "buffer_pct_at_entry":   buffer_at_entry,
         })
@@ -1973,6 +1976,7 @@ def get_positions():
         enriched_portfolio.append({
             **item,
             "delta_at_entry":       tl.get("delta_at_entry"),
+            "iv_at_entry":          tl.get("iv_at_entry"),
             "buffer_pct_at_entry":  tl.get("buffer_pct_at_entry"),
             "premium_per_contract": tl.get("premium_per_contract"),
             "total_premium":        tl.get("total_premium"),

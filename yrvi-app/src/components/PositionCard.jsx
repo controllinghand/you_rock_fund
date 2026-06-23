@@ -58,6 +58,7 @@ export default function PositionCard({ position: p }) {
           { label: 'Price',     value: displayPrice != null ? `$${displayPrice.toFixed(2)}` : '—' },
           { label: yieldLabel,  value: `${displayYield?.toFixed(2) ?? '—'}%`, className: 'text-green-600 dark:text-green-400' },
           { label: 'Entry δ',   value: p.delta_at_entry?.toFixed(3) ?? p.delta?.toFixed(3) ?? '—' },
+          { label: 'Entry IV',  value: (p.iv_at_entry ?? p.iv_atm) != null ? `${((p.iv_at_entry ?? p.iv_atm) * 100).toFixed(1)}%` : '—' },
         ].map(({ label, value, className = 'text-gray-900 dark:text-white' }) => (
           <div key={label}>
             <div className="text-gray-500 dark:text-gray-600 text-xs mb-0.5">{label}</div>
