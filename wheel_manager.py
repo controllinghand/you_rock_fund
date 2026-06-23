@@ -499,6 +499,8 @@ def detect_assignments():
     state             = _load_state()
     existing_holdings = {h["ticker"]: h for h in state.get("wheel_holdings", [])}
     strike_lookup     = {p["ticker"]: p["strike"] for p in state.get("positions", [])}
+    # Tickers the user excluded from the wheel — never adopt as a new holding.
+    excluded          = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
 
     ib = _connect()
     try:
@@ -556,6 +558,10 @@ def detect_assignments():
             h["last_checked"] = datetime.now().isoformat()
             log.info(f"  ✅ {ticker}: {shares} shares (existing — updated count)")
         else:
+            if ticker.upper() in excluded:
+                log.info(f"  🚫 {ticker}: excluded from the wheel — not adopting "
+                         f"as a new assignment (left as a plain hold)")
+                continue
             assigned_strike = strike_lookup.get(ticker, 0.0)
             if assigned_strike == 0.0:
                 ibkr_avg_cost = next(
@@ -644,6 +650,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
     retention_market_cap_min  = _s.get("wheel_retention_market_cap_min", 5_000_000_000)
     stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", False)
     stop_loss_pct             = _s.get("stop_loss_pct", 0.10)
+    # Tickers the user excluded from the wheel — never adopt, never CC, never sell.
+    excluded                  = {t.strip().upper() for t in _s.get("excluded_tickers", []) if t and t.strip()}
 
     freed_capital   = 0.0
     skip_tickers    = []
@@ -697,6 +705,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
         for p in live_pos:
             if p.contract.secType == "STK" and int(p.position) > 0:
                 sym = p.contract.symbol
+                if sym.upper() in excluded:
+                    log.info(f"  🚫 {sym}: excluded from the wheel — not adopting "
+                             f"into wheel_holdings (left as a plain hold)")
+                    continue
                 if sym not in known_tickers:
                     strike = strike_lookup.get(sym, 0.0)
                     if strike == 0.0:
@@ -749,6 +761,15 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None) -> dict:
             ticker          = h["ticker"]
             shares          = h.get("shares", 0)
             assigned_strike = h.get("assigned_strike", 0.0)
+
+            # ── Excluded from the wheel: leave it alone entirely ──
+            # No CC, no sell, no weeks_held bump. The user has opted this name out
+            # (e.g. a long-term hold) — the app must not trade it.
+            if ticker.upper() in excluded:
+                log.info(f"  🚫 {ticker}: excluded from the wheel — no CC, no sell (left as-is)")
+                h["last_checked"] = datetime.now().isoformat()
+                wheel_activity.append({"ticker": ticker, "action": "skipped_excluded"})
+                continue
 
             # ── Recovery guard: already covered by a live short call ──
             # If a CC is already open on this ticker, the shares are covered.

@@ -120,3 +120,6 @@ WHEEL_SELL_WHEN_CC_BELOW_ASSIGNED = _s.get("wheel_sell_when_cc_below_assigned", 
 WHEEL_STOP_LOSS_ENABLED          = _s.get("wheel_stop_loss_enabled",          False)
 STOP_LOSS_PCT                    = _s.get("stop_loss_pct",                    0.10)
 COMPOUND_ENABLED                 = _s.get("compound_enabled",                 True)
+# Tickers the user has excluded from the wheel entirely — no new CSPs, no covered
+# calls, never sold, never adopted into wheel_holdings. Normalized to uppercase.
+EXCLUDED_TICKERS                 = sorted({t.strip().upper() for t in _s.get("excluded_tickers", []) if t and t.strip()})

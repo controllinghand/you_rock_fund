@@ -105,6 +105,47 @@ function Toggle({ label, sub, checked, onChange }) {
   )
 }
 
+function TickerExcludeInput({ value, onChange }) {
+  const [draft, setDraft] = useState('')
+  const tickers = Array.isArray(value) ? value : []
+
+  const add = () => {
+    const sym = draft.trim().toUpperCase()
+    if (sym && !tickers.includes(sym)) onChange([...tickers, sym].sort())
+    setDraft('')
+  }
+  const remove = (sym) => onChange(tickers.filter(t => t !== sym))
+
+  return (
+    <div>
+      <div className="text-gray-700 dark:text-gray-300 text-sm">Excluded Tickers</div>
+      <div className="text-gray-500 dark:text-gray-600 text-xs mt-0.5 mb-2">
+        Never traded by the wheel — no CSPs, no covered calls, never sold. Use for long-term holds.
+      </div>
+      <div className="flex flex-wrap gap-2 mb-2">
+        {tickers.length === 0 && (
+          <span className="text-xs text-gray-400 dark:text-gray-600 italic">None excluded</span>
+        )}
+        {tickers.map(sym => (
+          <span key={sym} className="inline-flex items-center gap-1 text-xs font-mono bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 rounded-full px-2.5 py-1">
+            {sym}
+            <button type="button" onClick={() => remove(sym)} className="text-gray-400 hover:text-red-500" title={`Remove ${sym}`}>×</button>
+          </span>
+        ))}
+      </div>
+      <input
+        type="text"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add() } }}
+        onBlur={add}
+        placeholder="Add ticker (e.g. AAPL) — Enter to add"
+        className="w-full text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:border-blue-500"
+      />
+    </div>
+  )
+}
+
 const THEME_OPTIONS = [
   { value: 'system', label: 'System', icon: Monitor },
   { value: 'light',  label: 'Light',  icon: Sun },
@@ -427,7 +468,7 @@ export default function SettingsPage() {
     wheel_sell_when_cc_below_assigned: false,
     wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
-    min_oi_notional: 1000000,
+    min_oi_notional: 1000000, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
     auto_update_enabled: false,
@@ -561,6 +602,9 @@ export default function SettingsPage() {
         <SliderRow label="Max Delta"      value={settings.max_delta}            min={0.10} max={0.30} step={0.01} format={v => v.toFixed(2)}                onChange={v => set('max_delta', v)} />
         <SliderRow label="Min Buffer %"   value={settings.min_buffer_pct}       min={0.03} max={0.20} step={0.01} format={v => `${(v * 100).toFixed(0)}%`} onChange={v => set('min_buffer_pct', v)} />
         <SliderRow label="Earnings Window" value={settings.earnings_filter_days} min={0}    max={30}              format={v => `${v} days`}                  onChange={v => set('earnings_filter_days', v)} />
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <TickerExcludeInput value={settings.excluded_tickers ?? []} onChange={v => set('excluded_tickers', v)} />
+        </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
             label="Ignore Earnings for Wheel CCs"

@@ -96,6 +96,16 @@ def get_top_targets(n=5, always_include: set = None):
     rows = data.get("rows", [])
     print(f"✅ {len(rows)} candidates returned")
 
+    # ── Filter 0: user-excluded tickers ───────────────────────
+    # Read live (not the import-time config constant) so dashboard edits apply
+    # on the next run with no restart. Excluded names never get a new CSP.
+    from config import get_settings
+    excluded = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
+    if excluded:
+        before = len(rows)
+        rows = [r for r in rows if r.get("ticker", "").upper() not in excluded]
+        print(f"🚫 {len(rows)} after exclude list (removed {before - len(rows)}: {', '.join(sorted(excluded))})")
+
     # ── Filter 1: wheel-ready ─────────────────────────────────
     rows = [r for r in rows if r.get("wheel_fit") == "Wheel-ready"]
     print(f"🔧 {len(rows)} wheel-ready candidates")

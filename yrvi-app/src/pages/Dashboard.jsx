@@ -97,6 +97,24 @@ export default function Dashboard() {
     return () => clearInterval(t)
   }, [fetchAll])
 
+  const toggleExclude = useCallback(async (ticker, excluded) => {
+    // Optimistic update so the checkbox flips immediately; refetch reconciles.
+    setPositions(prev => {
+      if (!prev) return prev
+      const cur = new Set((prev.excluded_tickers ?? []).map(t => t.toUpperCase()))
+      if (excluded) cur.add(ticker.toUpperCase())
+      else cur.delete(ticker.toUpperCase())
+      return { ...prev, excluded_tickers: [...cur].sort() }
+    })
+    try {
+      await axios.post('/api/excluded-tickers', { ticker, excluded })
+    } catch (err) {
+      console.error('[Dashboard] toggleExclude error:', err)
+    } finally {
+      fetchAll()
+    }
+  }, [fetchAll])
+
   const countdown = useCountdown(status?.next_execution)
 
   const execLabel = (() => {
@@ -124,6 +142,8 @@ export default function Dashboard() {
   const runDate = positions?.run_date
     ? new Date(positions.run_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
     : null
+
+  const excludedSet = new Set((positions?.excluded_tickers ?? []).map(t => t.toUpperCase()))
 
   const openPositions = (positions?.positions ?? []).filter(
     p => ['filled', 'dry_run', 'partial_fill'].includes(p.status)
@@ -198,6 +218,7 @@ export default function Dashboard() {
                     {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Unrealized P&L', 'Entry δ', 'Buffer %', 'Prem/Contract', 'Total Premium'].map(h => (
                       <th key={h} className={`${h === 'Instrument' ? 'text-left' : 'text-right'} px-4 py-3`}>{h}</th>
                     ))}
+                    <th className="text-center px-4 py-3" title="Exclude from the wheel — no CSPs, no covered calls, never sold by the app">Exclude</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -227,6 +248,19 @@ export default function Dashboard() {
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-gray-400 dark:text-gray-500">
                         {item.total_premium != null ? `$${Math.round(item.total_premium).toLocaleString()}` : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {item.secType === 'STK' ? (
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer accent-blue-600"
+                            checked={excludedSet.has((item.symbol || '').toUpperCase())}
+                            onChange={e => toggleExclude(item.symbol, e.target.checked)}
+                            title={`Exclude ${item.symbol} from the wheel`}
+                          />
+                        ) : (
+                          <span className="text-gray-300 dark:text-gray-600">—</span>
+                        )}
                       </td>
                     </tr>
                   ))}

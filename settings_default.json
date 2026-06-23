@@ -11,6 +11,7 @@
   "wheel_sell_when_cc_below_assigned": false,
   "wheel_stop_loss_enabled": false,
   "stop_loss_pct": 0.10,
+  "excluded_tickers": [],
   "compound_enabled": true,
   "max_spread_pct": 0.20,
   "min_bid_yield_pct": 0.01,

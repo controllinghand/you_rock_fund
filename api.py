@@ -1987,6 +1987,7 @@ def get_positions():
         "monday_context":  state.get("monday_context", {}),
         "portfolio":       enriched_portfolio,
         "account_summary": ibkr.get("account_summary"),  # None when IBKR disconnected
+        "excluded_tickers": load_settings().get("excluded_tickers", []),
     }
 
 @app.get("/api/performance")
@@ -2134,6 +2135,7 @@ class SettingsUpdate(BaseModel):
     wheel_sell_when_cc_below_assigned: Optional[bool]  = None
     wheel_stop_loss_enabled:           Optional[bool]  = None
     stop_loss_pct:                     Optional[float] = None
+    excluded_tickers:                  Optional[list[str]] = None
     compound_enabled:                  Optional[bool]  = None
     max_spread_pct:           Optional[float] = None
     min_bid_yield_pct:        Optional[float] = None
@@ -2153,9 +2155,36 @@ class SettingsUpdate(BaseModel):
 def update_settings(body: SettingsUpdate):
     current = load_settings()
     updates = {k: v for k, v in body.dict().items() if v is not None}
+    if "excluded_tickers" in updates:
+        updates["excluded_tickers"] = sorted({
+            t.strip().upper() for t in updates["excluded_tickers"] if t and t.strip()
+        })
     current.update(updates)
     save_settings(current)
     return current
+
+
+class ExcludeToggle(BaseModel):
+    ticker:   str
+    excluded: bool
+
+@app.post("/api/excluded-tickers")
+def toggle_excluded(body: ExcludeToggle):
+    """Add/remove a single ticker from the wheel-exclusion list — backs the
+    per-holding checkbox on the dashboard. Excluded tickers get no new CSPs, no
+    covered calls, are never sold, and are never adopted into wheel_holdings."""
+    s   = load_settings()
+    cur = {t.strip().upper() for t in s.get("excluded_tickers", []) if t and t.strip()}
+    sym = body.ticker.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    if body.excluded:
+        cur.add(sym)
+    else:
+        cur.discard(sym)
+    s["excluded_tickers"] = sorted(cur)
+    save_settings(s)
+    return {"excluded_tickers": s["excluded_tickers"]}
 
 @app.get("/api/settings/timezone")
 def get_timezone():

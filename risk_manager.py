@@ -15,7 +15,7 @@ from datetime import datetime, date, timedelta
 
 from ib_insync import IB, Stock
 
-from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_RISK, ACCOUNT, ACCOUNT_TYPE, gateway_unreachable_message, probe_port
+from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_RISK, ACCOUNT, ACCOUNT_TYPE, gateway_unreachable_message, probe_port, get_settings
 from screener import get_all_candidates
 
 STATE_FILE = "state.json"
@@ -166,8 +166,13 @@ def run_daily_monitor():
     try:
         log.info(f"\n  Monitoring {len(holdings)} wheel holding(s):\n")
 
+        excluded = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
+
         for h in holdings:
             ticker          = h["ticker"]
+            if ticker.upper() in excluded:
+                log.info(f"  [{ticker}]  🚫 excluded from the wheel — skipping monitor")
+                continue
             shares          = h.get("shares", 0)
             assigned_strike = h.get("assigned_strike", 0.0)
             cc_strike       = h.get("current_cc_strike")
