@@ -212,7 +212,8 @@ export default function Dashboard() {
                 </span>
                 <span className="text-gray-400 dark:text-gray-600 text-xs ml-auto">live market prices</span>
               </div>
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[900px]">
                 <thead>
                   <tr className="text-gray-500 text-xs border-b border-gray-200 dark:border-gray-800">
                     {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Price', 'Unrealized P&L', 'Entry δ', 'Entry IV', 'Buffer %', 'Prem/Contract', 'Total Premium'].map(h => (
@@ -272,6 +273,7 @@ export default function Dashboard() {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
         </div>
