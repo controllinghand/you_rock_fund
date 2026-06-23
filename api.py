@@ -327,6 +327,30 @@ def _restart_ibgateway() -> None:
 IBC_COMMAND_PORT = int(os.environ.get("IBC_COMMAND_PORT", "7462"))
 
 
+def _get_gateway_tws_version():
+    """Read the gateway's TWS/Gateway build version (e.g. '10.48.1b') from the
+    ib_gateway container's env (TWS_MAJOR_VRSN) via docker inspect.
+
+    The IBKR API only exposes the protocol serverVersion, not the Gateway build,
+    so we read it from the container image's env. Using `docker inspect` rather
+    than `docker exec` means it works even when the container is stopped — which
+    is exactly when a version skew (exit-4) would have you wanting to see it.
+    Best-effort: returns None if docker is unavailable or the var isn't set.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{range .Config.Env}}{{println .}}{{end}}", "ib_gateway"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("TWS_MAJOR_VRSN="):
+                return line.split("=", 1)[1].strip() or None
+    except Exception as e:
+        print(f"[api/diag] could not read gateway TWS version: {e}")
+    return None
+
+
 def _soft_restart_ibgateway() -> bool:
     """Ask IBC for an on-demand soft restart via its command server.
 
@@ -1688,15 +1712,13 @@ def _build_diag() -> dict:
     version = version_file.read_text().strip() if version_file.exists() else "unknown"
     check("Version", "ok", f"v{version}")
 
-    # IB Gateway / TWS build version — published to /data by the gateway
-    # entrypoint on startup (the IBKR API only exposes the protocol
-    # serverVersion, not the Gateway build). Surfacing it here makes a future
-    # version skew visible at a glance instead of a mystery exit-4 crash.
-    gw_ver_file = Path("/data/gw_tws_version")
-    if gw_ver_file.exists():
-        gw_ver = gw_ver_file.read_text().strip()
-        if gw_ver:
-            check("Gateway Version", "ok", gw_ver)
+    # IB Gateway / TWS build version — read from the ib_gateway container env
+    # via docker inspect (the IBKR API only exposes the protocol serverVersion,
+    # not the Gateway build). Surfacing it here makes a future version skew
+    # visible at a glance instead of a mystery exit-4 crash.
+    gw_ver = _get_gateway_tws_version()
+    if gw_ver:
+        check("Gateway Version", "ok", gw_ver)
 
     # ── 7 & 8. Live market data (SPY stock + options) ──────────
     # Only runs when gateway is reachable; adds ~10s to total diag time.

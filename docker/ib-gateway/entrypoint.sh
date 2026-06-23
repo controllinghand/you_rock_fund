@@ -212,16 +212,6 @@ patch_ibc_template
 # shadowed by an older one (otherwise IBC exits 4 "can't find jars folder").
 self_heal_tws_version
 
-# Publish the running TWS/Gateway build version to the shared /data volume so the
-# dashboard diagnostics can show it (the IBKR API only exposes the protocol
-# serverVersion, not the Gateway build). Reflects the version IBC is about to
-# launch, after any self-heal. Best-effort; never blocks startup.
-if [ -n "${TWS_MAJOR_VRSN:-}" ] && [ -d /data ]; then
-    printf '%s' "$TWS_MAJOR_VRSN" > /data/gw_tws_version 2>/dev/null \
-        && echo "yrvi-gw-entrypoint: published TWS version $TWS_MAJOR_VRSN to /data/gw_tws_version" \
-        || echo "yrvi-gw-entrypoint: WARNING — could not write /data/gw_tws_version" >&2
-fi
-
 # Allow the YRVI API to override AUTO_RESTART_TIME via a file on the shared volume
 # without requiring a .env.compose edit + full stack restart.
 if [ -f "/data/gw_auto_restart_time" ]; then
