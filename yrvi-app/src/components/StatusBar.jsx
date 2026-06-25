@@ -25,6 +25,25 @@ const THEME_ICONS = {
   system: <Monitor size={14} />,
 }
 
+// How long the gateway must be continuously unreachable before the StatusBar
+// offers a one-click restart. A gateway that just restarted (upgrade, nightly
+// restart, soft restart) is normally disconnected for a minute or two while it
+// logs back in — that's healthy startup, not a wedge. Waiting ~2 min (the
+// watchdog itself waits 10) means the button only appears when it's actually
+// stuck, so nobody is tempted to restart a gateway that's already recovering
+// (which on live would fire a needless IB Key 2FA push).
+const RESTART_BTN_GRACE_MS = 120000
+
+// True when the gateway looks like it needs a manual restart: port down, or port
+// up but the API handshake is dead — but NOT a credential problem (locked/failed),
+// where a restart just risks a deeper lockout.
+function gatewayNeedsRecovery(s) {
+  return !!s
+    && s.gateway_login_status !== 'failed'
+    && s.gateway_login_status !== 'locked'
+    && (!s.gateway_running || !s.ibkr_connected)
+}
+
 function versionDiff(current, latest) {
   const parse = v => (v || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0)
   const [cM, cN, cP] = parse(current)
@@ -43,6 +62,7 @@ export default function StatusBar() {
 
   const [gwRestarting, setGwRestarting]   = useState(false)
   const [gwRestartFlash, setGwRestartFlash] = useState(null)  // {msg, color} | null
+  const [ibkrDownSince, setIbkrDownSince] = useState(null)    // ms timestamp | null
 
   const [versionInfo, setVersionInfo]     = useState(null)
   const [vChecking, setVChecking]         = useState(false)
@@ -74,6 +94,11 @@ export default function StatusBar() {
         setTimeout(() => setPidFlash(false), 2000)
       }
       prevPid.current = newPid
+      // Stamp when the gateway first went unreachable, so the restart button can
+      // wait out the normal login window before appearing. Cleared on recovery.
+      setIbkrDownSince(prev =>
+        gatewayNeedsRecovery(r.data) ? (prev ?? Date.now()) : null
+      )
     }).catch(() => {})
     fetch()
     const t = setInterval(fetch, 30000)
@@ -114,6 +139,9 @@ export default function StatusBar() {
     try {
       await axios.post('/api/gateway/restart')
       setGwRestartFlash({ msg: 'Restart sent — recovering…', color: 'text-amber-400' })
+      // Restart the grace clock: the gateway is now re-running login, so fall back
+      // to the calm "connecting…" state instead of immediately re-offering the button.
+      setIbkrDownSince(Date.now())
     } catch (err) {
       setGwRestartFlash({
         msg: err.response?.data?.detail ?? 'Restart failed',
@@ -226,12 +254,13 @@ export default function StatusBar() {
     setElapsedSecs(0)
   }
 
-  // Gateway needs recovery: port down, or port up but API handshake dead — but NOT
-  // a credential problem (locked/failed), where restarting just risks a deeper lockout.
-  const gwUnhealthy = !!status
-    && status.gateway_login_status !== 'failed'
-    && status.gateway_login_status !== 'locked'
-    && (!status.gateway_running || !status.ibkr_connected)
+  // Gateway needs recovery (raw signal). Split into two UI states by how long it's
+  // been down: within the grace window it's probably just logging in → show a calm
+  // "connecting…" hint; past the grace window it's likely wedged → offer the button.
+  const gwUnhealthy = gatewayNeedsRecovery(status)
+  const gwDownMs    = gwUnhealthy && ibkrDownSince ? Date.now() - ibkrDownSince : 0
+  const gwConnecting  = gwUnhealthy && gwDownMs <  RESTART_BTN_GRACE_MS
+  const gwShowRestart = gwUnhealthy && gwDownMs >= RESTART_BTN_GRACE_MS
 
   // ── Derived version state ─────────────────────────────────────
   const isLive    = status?.trading_mode === 'live'
@@ -264,12 +293,23 @@ export default function StatusBar() {
             }
           />
 
-          {/* Wedged-gateway one-click recovery */}
-          {gwUnhealthy && (
+          {/* Logging in — probably just a normal restart/reconnect; let it resolve */}
+          {gwConnecting && !gwRestarting && (
+            <span className="flex items-center gap-1.5 text-xs text-amber-500" title="Gateway is logging in — this usually clears on its own in a minute or two">
+              <svg className="animate-spin w-2.5 h-2.5" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Gateway connecting…
+            </span>
+          )}
+
+          {/* Still down past the grace window → likely wedged, offer one-click recovery */}
+          {(gwShowRestart || gwRestarting) && (
             <button
               onClick={restartGateway}
               disabled={gwRestarting}
-              title="Gateway unreachable — restart it to recover (live needs IB Key 2FA)"
+              title="Gateway still unreachable after a couple minutes — restart it to recover (live needs IB Key 2FA)"
               className="text-xs px-2 py-0.5 rounded border border-red-700 text-red-400 hover:bg-red-900/30 disabled:opacity-60 disabled:cursor-wait font-medium transition-colors"
             >
               {gwRestarting ? 'Restarting…' : 'Restart Gateway'}

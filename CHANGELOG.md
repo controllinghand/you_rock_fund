@@ -1,3 +1,7 @@
+## [5.1.2] — 2026-06-24
+### Changed
+- **The StatusBar "Restart Gateway" button now waits out the normal login window before appearing.** In 5.1.0 the button showed the instant IBKR was disconnected — including the minute or two a gateway is *normally* offline while it logs back in after an upgrade, nightly restart, or soft restart. That tempted an operator to "fix" a gateway that was already recovering — and on a live account a needless click means a needless IB Key 2FA push (and a logged-out gateway if nobody approves it). The button is now suppressed for the first ~2 minutes of a disconnection (the watchdog itself waits 10); during that window the StatusBar shows a calm spinning **"Gateway connecting…"** hint instead, so it's clear that waiting is the right move. Past ~2 minutes — i.e. actually wedged — the red **Restart Gateway** button appears as before. A manual restart resets the clock, so clicking it drops back to "connecting…" rather than immediately re-offering the button. The always-available Help → System Diagnostics button is unchanged (immediate, since navigating there is a deliberate act).
+
 ## [5.1.1] — 2026-06-24
 ### Changed
 - **Alerts bell now shows an absolute timestamp next to the relative one.** Each alert previously read only "39m ago" / "11h ago", which is ambiguous — an "11h ago" can't tell you whether it fired this morning or yesterday evening. Each row now reads e.g. `9:29 PM · 39m ago` (time-only for today's alerts, `Jun 24, 9:29 PM · …` for older ones), with the exact full date+time on hover.
