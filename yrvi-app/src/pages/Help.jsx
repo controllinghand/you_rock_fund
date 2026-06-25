@@ -195,6 +195,28 @@ export default function Help() {
   const [fbSending, setFbSending] = useState(false)
   const [fbResult, setFbResult]   = useState(null)  // {ok, text}
 
+  const [gwRestarting, setGwRestarting] = useState(false)
+  const [gwRestartMsg, setGwRestartMsg] = useState(null)  // {ok, text}
+
+  const restartGateway = async () => {
+    if (!window.confirm(
+      'Restart the IB Gateway?\n\n' +
+      'This recovers a wedged gateway (port open but API not responding) by ' +
+      're-running login. On a LIVE account you must approve an IB Key 2FA push ' +
+      'on your phone. Paper logs in automatically. Takes ~1–2 minutes.'
+    )) return
+    setGwRestarting(true)
+    setGwRestartMsg(null)
+    try {
+      const res = await axios.post('/api/gateway/restart')
+      setGwRestartMsg({ ok: true, text: res.data.message })
+    } catch (err) {
+      setGwRestartMsg({ ok: false, text: err.response?.data?.detail ?? err.message ?? 'Restart failed' })
+    } finally {
+      setGwRestarting(false)
+    }
+  }
+
   const submitFeedback = async () => {
     if (!fbMessage.trim()) return
     setFbSending(true)
@@ -240,14 +262,37 @@ export default function Help() {
           (it waits for the delayed options feed to populate, like the trader does).
         </div>
 
-        <button
-          onClick={runDiag}
-          disabled={running}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-wait text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          <RefreshCw size={13} className={running ? 'animate-spin' : ''} />
-          {running ? 'Running…' : results ? 'Run Again' : 'Run Diagnostics'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={runDiag}
+            disabled={running}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-wait text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <RefreshCw size={13} className={running ? 'animate-spin' : ''} />
+            {running ? 'Running…' : results ? 'Run Again' : 'Run Diagnostics'}
+          </button>
+
+          <button
+            onClick={restartGateway}
+            disabled={gwRestarting}
+            title="Recover a wedged gateway by restarting it (re-runs login; live needs IB Key 2FA)"
+            className="flex items-center gap-2 px-4 py-2 border border-amber-600 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 disabled:opacity-60 disabled:cursor-wait text-sm font-medium rounded-lg transition-colors"
+          >
+            <RotateCcw size={13} className={gwRestarting ? 'animate-spin' : ''} />
+            {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
+          </button>
+        </div>
+
+        {gwRestartMsg && (
+          <div className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border ${
+            gwRestartMsg.ok
+              ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/30 dark:border-amber-800 dark:text-amber-400'
+              : 'bg-red-900/30 border-red-800 text-red-400'
+          }`}>
+            <RotateCcw size={14} className="shrink-0" />
+            {gwRestartMsg.text}
+          </div>
+        )}
 
         {error && (
           <div className="flex items-center gap-2 px-3 py-2 bg-red-900/30 border border-red-800 text-red-400 text-sm rounded-lg">

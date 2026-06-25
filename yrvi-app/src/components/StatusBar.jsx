@@ -41,6 +41,9 @@ export default function StatusBar() {
   const prevPid                   = useRef(null)
   const { theme, setTheme }       = useThemeContext()
 
+  const [gwRestarting, setGwRestarting]   = useState(false)
+  const [gwRestartFlash, setGwRestartFlash] = useState(null)  // {msg, color} | null
+
   const [versionInfo, setVersionInfo]     = useState(null)
   const [vChecking, setVChecking]         = useState(false)
   const [vFlash, setVFlash]               = useState(null)   // {msg, color} | null
@@ -95,6 +98,31 @@ export default function StatusBar() {
   const flash = (msg, color) => {
     setVFlash({ msg, color })
     setTimeout(() => setVFlash(null), 2500)
+  }
+
+  // ── Wedged-gateway recovery (one-click full restart) ─────────
+  const restartGateway = async () => {
+    if (gwRestarting) return
+    if (!window.confirm(
+      'Restart the IB Gateway?\n\n' +
+      'This recovers a wedged gateway by re-running login. On a LIVE account you ' +
+      'must approve an IB Key 2FA push on your phone; paper logs in automatically. ' +
+      'Takes ~1–2 minutes.'
+    )) return
+    setGwRestarting(true)
+    setGwRestartFlash(null)
+    try {
+      await axios.post('/api/gateway/restart')
+      setGwRestartFlash({ msg: 'Restart sent — recovering…', color: 'text-amber-400' })
+    } catch (err) {
+      setGwRestartFlash({
+        msg: err.response?.data?.detail ?? 'Restart failed',
+        color: 'text-red-400',
+      })
+    } finally {
+      setGwRestarting(false)
+      setTimeout(() => setGwRestartFlash(null), 6000)
+    }
   }
 
   const checkVersionNow = () => {
@@ -198,6 +226,13 @@ export default function StatusBar() {
     setElapsedSecs(0)
   }
 
+  // Gateway needs recovery: port down, or port up but API handshake dead — but NOT
+  // a credential problem (locked/failed), where restarting just risks a deeper lockout.
+  const gwUnhealthy = !!status
+    && status.gateway_login_status !== 'failed'
+    && status.gateway_login_status !== 'locked'
+    && (!status.gateway_running || !status.ibkr_connected)
+
   // ── Derived version state ─────────────────────────────────────
   const isLive    = status?.trading_mode === 'live'
   const vUp       = versionInfo && !versionInfo.error && versionInfo.up_to_date === true
@@ -228,6 +263,23 @@ export default function StatusBar() {
               'Gateway'
             }
           />
+
+          {/* Wedged-gateway one-click recovery */}
+          {gwUnhealthy && (
+            <button
+              onClick={restartGateway}
+              disabled={gwRestarting}
+              title="Gateway unreachable — restart it to recover (live needs IB Key 2FA)"
+              className="text-xs px-2 py-0.5 rounded border border-red-700 text-red-400 hover:bg-red-900/30 disabled:opacity-60 disabled:cursor-wait font-medium transition-colors"
+            >
+              {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
+            </button>
+          )}
+          {gwRestartFlash && (
+            <span className={`text-xs font-medium ${gwRestartFlash.color}`}>
+              {gwRestartFlash.msg}
+            </span>
+          )}
 
           {/* Scheduler with PID-change flash */}
           <div className="flex items-center gap-1.5">
