@@ -1,3 +1,7 @@
+## [5.1.1] — 2026-06-24
+### Changed
+- **Alerts bell now shows an absolute timestamp next to the relative one.** Each alert previously read only "39m ago" / "11h ago", which is ambiguous — an "11h ago" can't tell you whether it fired this morning or yesterday evening. Each row now reads e.g. `9:29 PM · 39m ago` (time-only for today's alerts, `Jun 24, 9:29 PM · …` for older ones), with the exact full date+time on hover.
+
 ## [5.1.0] — 2026-06-24
 ### Added
 - **One-click "Restart Gateway" button** so a non-technical operator can recover a wedged gateway without a terminal. When the watchdog can't self-heal and pages you, the old instruction was `docker compose --env-file .env.compose restart ib_gateway` — useless to anyone who can't (or won't) open a shell, especially on the Windows boxes. There's now a **Restart Gateway** button on the **Help → System Diagnostics** page (next to Reset Installation), and one that appears in the top **StatusBar** the moment the gateway goes unreachable. Both POST to the new `/api/gateway/restart` endpoint, which runs `docker restart ib_gateway` from the api container (via the already-mounted `docker.sock`). A full restart re-runs login — automatic on paper, an IB Key 2FA push on live (the button warns first). It's deliberately exempt from the watchdog's auto-restart cooldown (a human clicking is intentional) but records the restart so the watchdog won't immediately fire another on top of it. The StatusBar button is suppressed when the gateway is `locked`/`failed`, where a restart would only risk a deeper lockout.

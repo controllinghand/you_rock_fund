@@ -24,6 +24,24 @@ function relTime(iso) {
   return `${d}d ago`
 }
 
+// Absolute wall-clock time. Shows just the time for today's alerts; prepends the
+// date for older ones so an "11h ago" can't be mistaken for the wrong day.
+function absTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (d.toDateString() === new Date().toDateString()) return time
+  return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+// Full date+time for the hover tooltip (exact, unambiguous).
+function fullTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
+
 const DOT = {
   critical: 'bg-red-500',
   warning:  'bg-yellow-400',
@@ -145,7 +163,9 @@ export default function AlertsBell() {
                     <p className="text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words leading-snug">
                       {clean(a.message)}
                     </p>
-                    <p className="mt-1 text-[10px] text-gray-400 dark:text-gray-600">{relTime(a.ts)}</p>
+                    <p className="mt-1 text-[10px] text-gray-400 dark:text-gray-600" title={fullTime(a.ts)}>
+                      {absTime(a.ts)} · {relTime(a.ts)}
+                    </p>
                   </div>
                 </div>
               ))
