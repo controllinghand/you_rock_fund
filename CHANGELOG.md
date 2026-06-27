@@ -1,3 +1,7 @@
+## [5.1.5] — 2026-06-27
+### Fixed
+- **StatusBar LIVE/PAPER badge and "N wheels" text are now readable in light mode.** Both carried dark-mode-only colors — the LIVE/PAPER mode badge used a dark translucent fill with `*-400` text, and the wheel-count used `text-yellow-400` — so in light mode they were pale and low-contrast. Added light-mode classes (`bg-*-100 / text-*-700 / border-*-300` for the badge, `text-yellow-600` for the wheel count) with the dark styles moved behind `dark:` variants. The LIVE badge keeps its `animate-pulse` flash.
+
 ## [5.1.4] — 2026-06-27
 ### Fixed
 - **CC Status badges are now readable in light mode.** The `open` (green) and `pending` (yellow) badges in the Wheel Holdings table — on both **This Week** and the **Dashboard** — only carried dark-mode colors (a dark translucent fill with `*-400` text). In light mode that rendered as pale text on a dark-tinted pill, which was hard to read. Added light-mode classes (`bg-*-100 / text-*-700/800 / border-*-300`) with the existing dark styles moved behind `dark:` variants, so each badge has proper contrast in both themes.

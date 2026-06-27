@@ -407,7 +407,7 @@ export default function StatusBar() {
           <span className="text-gray-500">Buying Power</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.buying_power)}</span>
           {(status?.wheel_count ?? 0) > 0 && (
-            <span className="text-yellow-400 font-medium">🔄 {status.wheel_count} wheel{status.wheel_count !== 1 ? 's' : ''}</span>
+            <span className="text-yellow-600 dark:text-yellow-400 font-medium">🔄 {status.wheel_count} wheel{status.wheel_count !== 1 ? 's' : ''}</span>
           )}
         </div>
 
@@ -416,8 +416,8 @@ export default function StatusBar() {
         {/* Mode badge */}
         <span className={`text-xs font-bold px-3 py-1 rounded-full border ${
           isLive
-            ? 'bg-green-900/50 text-green-400 border-green-700 animate-pulse'
-            : 'bg-blue-900/40 text-blue-400 border-blue-800'
+            ? 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/50 dark:text-green-400 dark:border-green-700 animate-pulse'
+            : 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-400 dark:border-blue-800'
         }`}>
           {isLive ? '🟢 LIVE' : '📄 PAPER'}
         </span>
