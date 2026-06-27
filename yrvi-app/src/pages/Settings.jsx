@@ -38,6 +38,7 @@ function isPreset(val) {
 }
 
 function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange, description }) {
+  const fillPct = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0
   return (
     <div>
       <div className="flex items-center gap-4">
@@ -52,7 +53,8 @@ function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange
           step={step}
           value={value}
           onChange={e => onChange(Number(e.target.value))}
-          className="flex-1 accent-blue-500 h-1.5"
+          className="yrvi-range flex-1"
+          style={{ '--fill': `${fillPct}%` }}
         />
         <div className="flex gap-1 text-xs text-gray-400 dark:text-gray-600 w-28 shrink-0 justify-end">
           <span>{format(min)}</span>

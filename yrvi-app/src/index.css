@@ -33,3 +33,46 @@
     font-variant-numeric: tabular-nums;
   }
 }
+
+@layer components {
+  /* Range slider with an explicit blue fill (driven by --fill) so the filled
+     track renders consistently across browsers — older Safari does not paint
+     the native accent-color fill, which made sliders look flat/grey. */
+  .yrvi-range {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border-radius: 9999px;
+    cursor: pointer;
+    background: linear-gradient(to right,
+      #3b82f6 var(--fill, 0%), #e5e7eb var(--fill, 0%));
+  }
+  html.dark .yrvi-range {
+    background: linear-gradient(to right,
+      #3b82f6 var(--fill, 0%), #374151 var(--fill, 0%));
+  }
+  .yrvi-range:focus { outline: none; }
+
+  .yrvi-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: #3b82f6;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+  html.dark .yrvi-range::-webkit-slider-thumb { border-color: #030712; }
+
+  .yrvi-range::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    background: #3b82f6;
+    border: 2px solid #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+  html.dark .yrvi-range::-moz-range-thumb { border-color: #030712; }
+  .yrvi-range::-moz-range-track { background: transparent; }
+}
