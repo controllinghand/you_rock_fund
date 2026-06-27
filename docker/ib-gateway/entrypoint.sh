@@ -177,6 +177,64 @@ self_heal_tws_version() {
     return 0
 }
 
+# Self-heal the Java runtime pointer for the running TWS version.
+#
+# IBC locates the JRE by reading install4j's pref_jre.cfg (preferred), falling back to
+# inst_jre.cfg, from the version's .install4j dir. Some image bakes ship a version dir
+# with NO pref_jre.cfg and an inst_jre.cfg that still points at the install-time temp dir
+# (/tmp/setup/ibgateway-<vrsn>-...sh.NNNN.dir/jre) — which does not exist at runtime. IBC
+# then dies with "Can't find suitable Java installation" even though the bundled JRE sits
+# right beside the jars at <verdir>/jre. This is the JRE-pointer cousin of the jars shadow
+# handled by self_heal_tws_version above, and it broke the 10.48.1c upgrade (10.48.1b had a
+# valid pref_jre.cfg; 10.48.1c shipped without one and fell back to the dead temp path).
+#
+# Fix: whenever the current JRE pointer is missing or dead, repoint pref_jre.cfg at the
+# in-tree bundled JRE (<verdir>/jre) — which lives in the volume right next to the jars, so
+# it is always present and valid. Idempotent: a pointer that already resolves to a working
+# java is left untouched.
+self_heal_jre_pointer() {
+    tws_path="${TWS_PATH:-/home/ibgateway/Jts}"
+    vrsn="${TWS_MAJOR_VRSN:-}"
+
+    if [ -z "$vrsn" ]; then
+        echo "yrvi-gw-entrypoint: TWS_MAJOR_VRSN unset — skipping JRE-pointer self-heal" >&2
+        return 0
+    fi
+
+    # Find the version dir that actually holds the jars (handles nested + flat layout).
+    verdir=""
+    for d in $(find "$tws_path" -maxdepth 4 -type d -path "*/$vrsn/jars" 2>/dev/null); do
+        verdir=$(dirname "$d"); break
+    done
+    if [ -z "$verdir" ]; then
+        echo "yrvi-gw-entrypoint: TWS $vrsn install dir not found — skipping JRE-pointer self-heal" >&2
+        return 0
+    fi
+
+    bundled_jre="$verdir/jre"
+    if [ ! -x "$bundled_jre/bin/java" ]; then
+        echo "yrvi-gw-entrypoint: no bundled JRE at $bundled_jre — skipping JRE-pointer self-heal" >&2
+        return 0
+    fi
+
+    i4j="$verdir/.install4j"
+    mkdir -p "$i4j"
+    pref="$i4j/pref_jre.cfg"
+
+    # If pref_jre.cfg already resolves to a working java, leave it alone.
+    if [ -f "$pref" ]; then
+        cur=$(tr -d '\n\r' < "$pref" 2>/dev/null || true)
+        if [ -n "$cur" ] && [ -x "$cur/bin/java" ]; then
+            return 0
+        fi
+    fi
+
+    printf '%s' "$bundled_jre" > "$pref"
+    echo "yrvi-gw-entrypoint: JRE-pointer self-heal — set pref_jre.cfg -> $bundled_jre"
+    send_discord_alert "🔄 YRVI: IB Gateway self-healed its Java pointer after upgrade — the new TWS version shipped without a JRE path, so it was repointed to the bundled JRE. Starting normally."
+    return 0
+}
+
 # ── Credentials preflight ────────────────────────────────────────
 
 echo "yrvi-gw-entrypoint: fetching ${PASSWORD_KEY} from secrets container..."
@@ -211,6 +269,10 @@ patch_ibc_template
 # Restore the running TWS version into the settings volume if an upgrade left it
 # shadowed by an older one (otherwise IBC exits 4 "can't find jars folder").
 self_heal_tws_version
+
+# Repoint the JRE if this version shipped without a valid pref_jre.cfg (otherwise IBC
+# exits with "Can't find suitable Java installation" — what broke the 10.48.1c upgrade).
+self_heal_jre_pointer
 
 # Allow the YRVI API to override AUTO_RESTART_TIME via a file on the shared volume
 # without requiring a .env.compose edit + full stack restart.
