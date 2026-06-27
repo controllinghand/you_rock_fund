@@ -461,7 +461,7 @@ export default function SettingsPage() {
   const isDirty = JSON.stringify(settings) !== JSON.stringify(original)
 
   const DEFAULTS = {
-    fund_budget: 250000, num_positions: 5, min_position_size: 10000,
+    fund_budget: 250000, goal_pct: 0.24, num_positions: 5, min_position_size: 10000,
     max_position_size: 70000, max_delta: 0.21, min_buffer_pct: 0.05,
     earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
     wheel_retention_market_cap_min: 5000000000,
@@ -576,6 +576,14 @@ export default function SettingsPage() {
       {/* Fund Settings */}
       <Section title="Fund Settings" emoji="💰">
         <SliderRow label="Initial Fund Budget"  value={settings.fund_budget}      min={10000}  max={2000000} step={10000} format={v => `$${v.toLocaleString()}`} onChange={v => set('fund_budget', v)} />
+        <SliderRow
+          label="Annual Goal %"
+          value={settings.goal_pct ?? 0.24}
+          min={0.06} max={0.60} step={0.02}
+          format={v => `${(v * 100).toFixed(0)}%`}
+          onChange={v => set('goal_pct', v)}
+          description={`Target annual return as % of fund budget. Drives both goal bars: premium goal = $${Math.round((settings.fund_budget ?? 250000) * (settings.goal_pct ?? 0.24)).toLocaleString()}, account-value target = $${Math.round((settings.fund_budget ?? 250000) * (1 + (settings.goal_pct ?? 0.24))).toLocaleString()}. Default 24% ≈ 2%/month.`}
+        />
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
             label="Compound Weekly"

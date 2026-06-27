@@ -246,8 +246,14 @@ def run_assignment_detection():
                             and h.get("assignment_date") == today]
             settings      = _load_settings()
             fund_budget   = settings.get("fund_budget", TOTAL_FUND_BUDGET)
+            goal_pct      = settings.get("goal_pct", 0.24)
+            try:
+                _, net_liq = _fetch_account_summary(fund_budget)
+            except Exception:
+                net_liq = None
             post_weekly_review(state_after, called_away or [], new_ones,
-                                fund_budget=fund_budget)
+                                fund_budget=fund_budget, capital=fund_budget,
+                                goal_pct=goal_pct, net_liq=net_liq)
     except Exception as e:
         log.error(f"❌ Assignment detection error: {e}", exc_info=True)
         _discord_alert(f"🚨 **YRVI** Saturday assignment detection failed: `{type(e).__name__}: {e}`")

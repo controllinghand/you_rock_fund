@@ -19,7 +19,6 @@ load_dotenv()
 WEBHOOK_URL = get_secret("discord_webhook_url", "DISCORD_WEBHOOK_URL")
 YTD_FILE      = "ytd_tracker.json"
 PST           = ZoneInfo("America/Los_Angeles")
-ANNUAL_TARGET = 100_000
 
 _version_file = Path(__file__).parent / "VERSION"
 _VERSION = f"v{_version_file.read_text().strip()}" if _version_file.exists() else "unknown"
@@ -383,7 +382,37 @@ def post_weekly_plan(positions: list, wheel_plan: list = None,
     }]})
 
 
-def post_weekly_results(state: dict, fund_budget: float = 250_000):
+def _goal_lines(ytd_total: float, capital: float, goal_pct: float,
+                net_liq: float = None, bold: bool = False) -> list:
+    """Two-goal status block for the weekly posts:
+      • Premium Goal — gross income collected vs the annual target (capital × goal_pct)
+      • Account Value — live Net Liq vs (capital + target), with the +/- growth
+    The account line is omitted when net_liq is unavailable (e.g. IBKR down).
+    `bold` wraps the labels in ** for the rich-embed (results) post.
+    """
+    b = "**" if bold else ""
+    annual_target  = capital * goal_pct
+    account_target = capital * (1 + goal_pct)
+    prem_pct = (ytd_total / annual_target * 100) if annual_target else 0
+    lines = [
+        f"{b}Premium Goal:{b} {prem_pct:.1f}% — "
+        f"${ytd_total:,.0f} / ${annual_target:,.0f} ({goal_pct * 100:.0f}%/yr)"
+    ]
+    if net_liq is not None and capital:
+        growth     = net_liq - capital
+        growth_pct = growth / capital * 100
+        sign       = "+" if growth >= 0 else "−"
+        emoji      = "🟢" if growth >= 0 else "🔴"
+        lines.append(
+            f"{b}Account Value:{b} {emoji} ${net_liq:,.0f} / ${account_target:,.0f} "
+            f"({sign}${abs(growth):,.0f}, {sign}{abs(growth_pct):.1f}% vs ${capital:,.0f} capital)"
+        )
+    return lines
+
+
+def post_weekly_results(state: dict, fund_budget: float = 250_000,
+                         capital: float = None, goal_pct: float = 0.24,
+                         net_liq: float = None):
     """Post rich embed after Monday CSP execution completes."""
     if not WEBHOOK_URL:
         return
@@ -401,7 +430,10 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
 
     avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100) \
                    if ytd["weeks_traded"] and fund_budget else 0
-    progress_pct = ytd["total_premium"] / ANNUAL_TARGET * 100
+    # Goal is anchored to contributed capital (static fund_budget setting), not
+    # the compound deployment budget — keep the two from drifting apart.
+    if capital is None:
+        capital = fund_budget
 
     fields = [
         {"name": "CSP Premium",      "value": f"${csp_premium:,.0f}",     "inline": True},
@@ -468,7 +500,7 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
         f"**Total Premium:** ${ytd['total_premium']:,.0f}",
         f"**Weeks Traded:** {ytd['weeks_traded']}",
         f"**Avg Yield/Week:** {avg_yield:.2f}%",
-        f"**Progress:** {progress_pct:.1f}% toward ${ANNUAL_TARGET:,} annual target",
+        *_goal_lines(ytd["total_premium"], capital, goal_pct, net_liq, bold=True),
     ]
     def _week_yield(week: dict, prem: float) -> float:
         # Legacy week entries predate the yield_pct field — fall back to
@@ -587,7 +619,8 @@ def post_emergency_share_sale(result: dict):
 
 
 def post_weekly_review(state: dict, called_away: list, new_assignments: list,
-                        fund_budget: float = 250_000):
+                        fund_budget: float = 250_000, capital: float = None,
+                        goal_pct: float = 0.24, net_liq: float = None):
     """
     Post Friday end-of-week summary — how every position resolved.
     Replaces the individual assignment + called-away alerts with one rich embed.
@@ -693,15 +726,17 @@ def post_weekly_review(state: dict, called_away: list, new_assignments: list,
     # YTD — read-only (already updated Monday after CSP execution)
     ytd = _load_ytd()
     if ytd.get("weeks_traded"):
-        avg_yield    = ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100
-        progress_pct = ytd["total_premium"] / ANNUAL_TARGET * 100
+        if capital is None:
+            capital = fund_budget
+        avg_yield  = ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100 if fund_budget else 0
+        goal_block = "\n".join(_goal_lines(ytd["total_premium"], capital, goal_pct, net_liq))
         fields.append({
             "name": "📊 YTD Stats",
             "value": (
                 f"Total Premium: ${ytd['total_premium']:,.0f}\n"
                 f"Weeks Traded: {ytd['weeks_traded']}\n"
                 f"Avg Yield/Week: {avg_yield:.2f}%\n"
-                f"Progress: {progress_pct:.1f}% toward ${ANNUAL_TARGET:,.0f} annual target"
+                f"{goal_block}"
             ),
             "inline": False,
         })

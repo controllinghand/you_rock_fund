@@ -53,7 +53,6 @@ LIVE_REQUIRED_SECRETS = {
 
 PST = ZoneInfo("America/Los_Angeles")
 ET  = ZoneInfo("America/New_York")
-ANNUAL_TARGET = 100_000
 CONTAINERIZED = os.environ.get("YRVI_CONTAINERIZED", "0") == "1"
 HEARTBEAT_FILE = BASE_DIR / "scheduler_heartbeat.json"
 GATEWAY_STATUS_FILE = (
@@ -2141,14 +2140,29 @@ def get_performance():
     ytd = load_ytd()
     initial_fund_budget = settings.get("fund_budget", 250_000)
     compound_enabled    = settings.get("compound_enabled", True)
+    goal_pct            = settings.get("goal_pct", 0.24)
+
+    # Net Liq drives both the compound yield denominator AND the account-value
+    # growth bar, so fetch it once regardless of compound mode.
+    cached  = _ibkr_cache.get("data")
+    net_liq = cached.get("account_value") if cached else None
+
     if compound_enabled:
         # Use net_liq for yield display — buying_power reflects only undeployed cash
         # and is misleading as a fund-size denominator when capital is tied up in CSPs.
-        cached  = _ibkr_cache.get("data")
-        net_liq = cached.get("account_value") if cached else None
-        budget  = net_liq or initial_fund_budget
+        budget = net_liq or initial_fund_budget
     else:
         budget = initial_fund_budget
+
+    # The GOAL is anchored to contributed capital (fund_budget), NOT net_liq —
+    # the target must not chase the account around as it grows or shrinks.
+    capital        = initial_fund_budget
+    annual_target  = round(capital * goal_pct)          # premium income goal ($)
+    account_target = round(capital * (1 + goal_pct))    # total account-value target
+    monthly_target = round(annual_target / 12)          # 2%/month at the 24% default
+    net_growth     = round(net_liq - capital, 2) if net_liq is not None else None
+    net_growth_pct = (round(net_growth / capital * 100, 2)
+                      if net_liq is not None and capital else None)
 
     raw_weeks = ytd.get("weeks", [])
     # Normalize and recompute yield_pct against current budget so stale stored
@@ -2167,7 +2181,7 @@ def get_performance():
     total_realized = round(sum(w["total_realized"] for w in weeks), 2)
     weeks_traded = ytd.get("weeks_traded", 0)
     avg_yield = (total / weeks_traded / budget * 100) if weeks_traded and budget else 0.0
-    progress_pct = (total / ANNUAL_TARGET * 100) if ANNUAL_TARGET else 0.0
+    progress_pct = (total / annual_target * 100) if annual_target else 0.0
 
     def _fix_week_yield(w):
         if not w:
@@ -2183,8 +2197,15 @@ def get_performance():
         "avg_yield_pct":  round(avg_yield, 3),
         "best_week":      _fix_week_yield(ytd.get("best_week")),
         "worst_week":     _fix_week_yield(ytd.get("worst_week")),
-        "annual_target":  ANNUAL_TARGET,
+        "annual_target":  annual_target,
         "progress_pct":   round(progress_pct, 1),
+        "capital":        capital,
+        "goal_pct":       goal_pct,
+        "account_target": account_target,
+        "monthly_target": monthly_target,
+        "net_liq":        net_liq,
+        "net_growth":     net_growth,
+        "net_growth_pct": net_growth_pct,
     }
 
 @app.get("/api/screener")
@@ -2269,6 +2290,7 @@ def get_settings_endpoint():
 
 class SettingsUpdate(BaseModel):
     fund_budget:              Optional[float] = None
+    goal_pct:                 Optional[float] = None
     num_positions:            Optional[int]   = None
     min_position_size:        Optional[float] = None
     max_position_size:        Optional[float] = None

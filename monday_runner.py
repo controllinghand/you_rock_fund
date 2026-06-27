@@ -41,7 +41,8 @@ def _load_state() -> dict:
         return {}
 
 
-def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0) -> float:
+def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
+                      net_liq: float = None) -> float:
     """Assemble weekly_pnl from CSP premium + wheel-check context, persist it, and
     post Discord results. Returns total_realized. Shared by the normal and the
     'no remaining CSP slots' code paths so P&L is consistent either way."""
@@ -69,7 +70,17 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0)
     try:
         from discord_poster import is_enabled, post_weekly_results
         if is_enabled():
-            post_weekly_results(_load_state(), fund_budget=fund_budget)
+            settings = get_settings()
+            capital  = settings.get("fund_budget", TOTAL_FUND_BUDGET)
+            goal_pct = settings.get("goal_pct", 0.24)
+            nl       = net_liq
+            if nl is None:
+                try:
+                    _, nl = _fetch_account_summary(capital)
+                except Exception:
+                    nl = None
+            post_weekly_results(_load_state(), fund_budget=fund_budget,
+                                capital=capital, goal_pct=goal_pct, net_liq=nl)
     except Exception as e:
         log.warning(f"  ⚠️  Discord weekly results post failed: {e}")
 
@@ -172,6 +183,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     all_targets = get_top_targets(10)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
 
+    net_liq = None  # captured below for the weekly account-value goal post
     if compound_enabled:
         if account_summary is not None:
             buying_power, net_liq = account_summary
@@ -226,7 +238,8 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)
-    total_realized = _write_weekly_pnl(csp_premium, context, fund_budget=effective_budget)
+    total_realized = _write_weekly_pnl(csp_premium, context, fund_budget=effective_budget,
+                                        net_liq=net_liq)
 
     log.info(f"✅ CSP pipeline done — {len(filled)}/{target_fills} fills  "
              f"CSP ${csp_premium:,.0f}  CC ${context.get('cc_premium', 0.0):,.0f}  total ${total_realized:,.0f}")

@@ -139,6 +139,16 @@ export default function Dashboard() {
   const ytdTarget   = performance?.annual_target ?? 100_000
   const progressPct = Math.min(100, (ytdTotal / ytdTarget) * 100)
 
+  // Account-value (wealth) goal — capital + premium goal, vs live Net Liq
+  const capital       = performance?.capital ?? 0
+  const accountTarget = performance?.account_target ?? 0
+  const netLiq        = performance?.net_liq ?? positions?.account_summary?.net_liquidation ?? null
+  const netGrowth     = performance?.net_growth ?? (netLiq != null && capital ? netLiq - capital : null)
+  const netGrowthPct  = performance?.net_growth_pct
+    ?? (netLiq != null && capital ? (netGrowth / capital) * 100 : null)
+  const accountPct    = (netLiq != null && accountTarget) ? Math.min(100, (netLiq / accountTarget) * 100) : 0
+  const growthUp      = (netGrowth ?? 0) >= 0
+
   const runDate = positions?.run_date
     ? new Date(positions.run_date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
     : null
@@ -288,24 +298,57 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* YTD progress bar */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-gray-900 dark:text-white font-semibold text-sm">Annual Goal Progress</div>
-          <div className="text-gray-500 text-xs">
-            ${ytdTotal.toLocaleString()} / ${ytdTarget.toLocaleString()}
+      {/* Annual goal progress — premium income + account value */}
+      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 space-y-5">
+        <div className="text-gray-900 dark:text-white font-semibold text-sm">Annual Goal Progress</div>
+
+        {/* Premium income (gross) */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-gray-700 dark:text-gray-300 text-xs font-medium">Premium Income</div>
+            <div className="text-gray-500 text-xs">
+              ${ytdTotal.toLocaleString()} / ${ytdTarget.toLocaleString()}
+            </div>
+          </div>
+          <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-2.5">
+            <div
+              className="bg-gradient-to-r from-blue-600 to-green-500 h-2.5 rounded-full transition-all duration-700"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+          <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
+            <span>{progressPct.toFixed(1)}%</span>
+            <span>${(ytdTarget - ytdTotal).toLocaleString()} to go</span>
           </div>
         </div>
-        <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-2.5">
-          <div
-            className="bg-gradient-to-r from-blue-600 to-green-500 h-2.5 rounded-full transition-all duration-700"
-            style={{ width: `${progressPct}%` }}
-          />
-        </div>
-        <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
-          <span>{progressPct.toFixed(1)}%</span>
-          <span>${(ytdTarget - ytdTotal).toLocaleString()} to go</span>
-        </div>
+
+        {/* Account value (wealth) — Net Liq vs capital + goal */}
+        {netLiq != null && accountTarget > 0 && (
+          <div className="border-t border-gray-100 dark:border-gray-800 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-gray-700 dark:text-gray-300 text-xs font-medium">Account Value</div>
+              <div className="text-gray-500 text-xs">
+                ${Math.round(netLiq).toLocaleString()} / ${accountTarget.toLocaleString()}
+              </div>
+            </div>
+            <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-2.5">
+              <div
+                className={`h-2.5 rounded-full transition-all duration-700 ${growthUp ? 'bg-gradient-to-r from-blue-600 to-green-500' : 'bg-gradient-to-r from-amber-500 to-red-500'}`}
+                style={{ width: `${accountPct}%` }}
+              />
+            </div>
+            <div className="flex justify-between mt-2 text-xs">
+              <span className={growthUp ? 'text-green-500' : 'text-red-500'}>
+                {growthUp ? '+' : '−'}${Math.abs(Math.round(netGrowth)).toLocaleString()}
+                {netGrowthPct != null && ` (${growthUp ? '+' : '−'}${Math.abs(netGrowthPct).toFixed(1)}%)`}
+                {' '}vs ${capital.toLocaleString()} capital
+              </span>
+              <span className="text-gray-500 dark:text-gray-600">
+                ${Math.round(accountTarget - netLiq).toLocaleString()} to go
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* YTD chart */}
