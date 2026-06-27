@@ -193,6 +193,19 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
     current_price = stock_data.last or stock_data.close or 0
     ib.cancelMktData(q_stock[0])
 
+    # No valid stock price means we can't place the scan floor (and the feed is
+    # almost certainly dead — e.g. a weekend preview on an account without
+    # delayed-data entitlement, where reqMktData returns NaN). Treat it as
+    # "can't price", not "no viable CC": a NaN price is truthy in Python, so it
+    # slips past the `current_price > 0` guard below and collapses the scan floor
+    # back to assigned_strike — scanning only deep-OTM strikes that can falsely
+    # come back with delta < CC_DELTA_MIN, which would wrongly sell the shares.
+    # Defer the CC and KEEP the shares instead.
+    if _is_nan(current_price) or current_price <= 0:
+        log.warning(f"  ⚠️  {ticker}: no valid stock price (got {current_price}) — "
+                    f"cannot price CC (feed likely closed/unentitled)")
+        return CC_NO_DATA
+
     chains = ib.reqSecDefOptParams(ticker, "", "STK", q_stock[0].conId)
     if not chains:
         log.warning(f"  ⚠️  {ticker}: IBKR returned no option chain data")
