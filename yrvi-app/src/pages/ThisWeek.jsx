@@ -350,8 +350,8 @@ export default function ThisWeek() {
                         <td className="px-4 py-3 text-right text-red-400 font-medium font-mono">${capitalTied.toLocaleString()}</td>
                         <td className="px-4 py-3 text-right">
                           <span className={`text-xs px-2 py-0.5 rounded-full border capitalize ${
-                            h.cc_status === 'open'    ? 'bg-green-900/40 text-green-400 border-green-800'
-                            : h.cc_status === 'pending' ? 'bg-yellow-900/40 text-yellow-400 border-yellow-800'
+                            h.cc_status === 'open'    ? 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/40 dark:text-green-400 dark:border-green-800'
+                            : h.cc_status === 'pending' ? 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-400 dark:border-yellow-800'
                             : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'
                           }`}>{h.cc_status ?? '—'}</span>
                         </td>
