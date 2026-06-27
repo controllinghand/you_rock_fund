@@ -50,8 +50,14 @@ export default function Performance() {
   const {
     weeks = [], total_premium = 0, total_realized = 0, weeks_traded = 0,
     avg_yield_pct = 0, best_week, worst_week,
-    annual_target = 100_000, progress_pct = 0
+    annual_target = 100_000, progress_pct = 0,
+    capital = 0, account_target = 0, net_liq = null,
+    net_growth = null, net_growth_pct = null
   } = data ?? {}
+
+  const accountPct   = (net_liq != null && account_target) ? Math.min(100, (net_liq / account_target) * 100) : 0
+  const growthUp     = (net_growth ?? 0) >= 0
+  const growthPctVal = net_growth_pct ?? (net_liq != null && capital ? (net_growth / capital) * 100 : null)
 
   const maxPremium = weeks.length ? Math.max(...weeks.map(w => w.premium_collected ?? 0)) : 0
 
@@ -137,22 +143,57 @@ export default function Performance() {
         )}
       </div>
 
-      {/* Annual progress bar */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-gray-900 dark:text-white font-semibold text-sm">Annual Goal: $100,000</div>
-          <div className="text-gray-500 text-xs">{progress_pct.toFixed(1)}% complete</div>
+      {/* Annual goal progress — premium income + account value */}
+      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 space-y-5">
+        <div className="text-gray-900 dark:text-white font-semibold text-sm">Annual Goal Progress</div>
+
+        {/* Premium income (gross) */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-gray-700 dark:text-gray-300 text-xs font-medium">Premium Income</div>
+            <div className="text-gray-500 text-xs">
+              ${total_premium.toLocaleString()} / ${annual_target.toLocaleString()}
+            </div>
+          </div>
+          <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-3">
+            <div
+              className="bg-gradient-to-r from-blue-600 to-green-500 h-3 rounded-full transition-all duration-700"
+              style={{ width: `${progress_pct}%` }}
+            />
+          </div>
+          <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
+            <span>{progress_pct.toFixed(1)}%</span>
+            <span>${(annual_target - total_premium).toLocaleString()} to go</span>
+          </div>
         </div>
-        <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-3">
-          <div
-            className="bg-gradient-to-r from-blue-600 to-green-500 h-3 rounded-full transition-all duration-700"
-            style={{ width: `${progress_pct}%` }}
-          />
-        </div>
-        <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
-          <span>${total_premium.toLocaleString()} earned</span>
-          <span>${(annual_target - total_premium).toLocaleString()} remaining</span>
-        </div>
+
+        {/* Account value (wealth) — Net Liq vs capital + goal */}
+        {net_liq != null && account_target > 0 && (
+          <div className="border-t border-gray-100 dark:border-gray-800 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-gray-700 dark:text-gray-300 text-xs font-medium">Account Value</div>
+              <div className="text-gray-500 text-xs">
+                ${Math.round(net_liq).toLocaleString()} / ${account_target.toLocaleString()}
+              </div>
+            </div>
+            <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-3">
+              <div
+                className={`h-3 rounded-full transition-all duration-700 ${growthUp ? 'bg-gradient-to-r from-blue-600 to-green-500' : 'bg-gradient-to-r from-amber-500 to-red-500'}`}
+                style={{ width: `${accountPct}%` }}
+              />
+            </div>
+            <div className="flex justify-between mt-2 text-xs">
+              <span className={growthUp ? 'text-green-500' : 'text-red-500'}>
+                {growthUp ? '+' : '−'}${Math.abs(Math.round(net_growth)).toLocaleString()}
+                {growthPctVal != null && ` (${growthUp ? '+' : '−'}${Math.abs(growthPctVal).toFixed(1)}%)`}
+                {' '}vs ${capital.toLocaleString()} capital
+              </span>
+              <span className="text-gray-500 dark:text-gray-600">
+                ${Math.round(account_target - net_liq).toLocaleString()} to go
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Bar chart */}
