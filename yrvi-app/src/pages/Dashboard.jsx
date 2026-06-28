@@ -146,7 +146,13 @@ export default function Dashboard() {
   const netGrowth     = performance?.net_growth ?? (netLiq != null && capital ? netLiq - capital : null)
   const netGrowthPct  = performance?.net_growth_pct
     ?? (netLiq != null && capital ? (netGrowth / capital) * 100 : null)
-  const accountPct    = (netLiq != null && accountTarget) ? Math.min(100, (netLiq / accountTarget) * 100) : 0
+  // Fill tracks GROWTH toward the goal (capital → target), not net_liq from
+  // zero — otherwise an underwater account reads as a mostly-full bar. The
+  // denominator (target − capital) equals capital × goal_pct = the premium
+  // goal, so both bars share the same "$X of goal" axis. Below capital → empty.
+  const goalAmount    = accountTarget - capital
+  const accountPct    = (netLiq != null && goalAmount > 0)
+    ? Math.min(100, Math.max(0, (netGrowth / goalAmount) * 100)) : 0
   const growthUp      = (netGrowth ?? 0) >= 0
 
   const runDate = positions?.run_date

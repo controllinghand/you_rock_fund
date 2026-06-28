@@ -55,7 +55,13 @@ export default function Performance() {
     net_growth = null, net_growth_pct = null
   } = data ?? {}
 
-  const accountPct   = (net_liq != null && account_target) ? Math.min(100, (net_liq / account_target) * 100) : 0
+  // Fill tracks GROWTH toward the goal (capital → target), not net_liq from
+  // zero — otherwise an underwater account reads as a mostly-full bar. The
+  // denominator (target − capital) equals capital × goal_pct = the premium
+  // goal, so both bars share the same "$X of goal" axis. Below capital → empty.
+  const goalAmount   = account_target - capital
+  const accountPct   = (net_liq != null && goalAmount > 0)
+    ? Math.min(100, Math.max(0, (net_growth / goalAmount) * 100)) : 0
   const growthUp     = (net_growth ?? 0) >= 0
   const growthPctVal = net_growth_pct ?? (net_liq != null && capital ? (net_growth / capital) * 100 : null)
 
