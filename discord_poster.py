@@ -425,15 +425,21 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
     total_realized  = pnl.get("total_realized", 0.0)
 
     premium_collected = csp_premium + cc_premium
-    yield_pct = premium_collected / fund_budget * 100 if fund_budget else 0
-    ytd       = _update_ytd(week_start, premium_collected, shares_sold_pnl, fund_budget)
-
-    avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100) \
-                   if ytd["weeks_traded"] and fund_budget else 0
     # Goal is anchored to contributed capital (static fund_budget setting), not
     # the compound deployment budget — keep the two from drifting apart.
     if capital is None:
         capital = fund_budget
+    # Yield denominator = the week's deployment budget. On a zero-CSP-slot week
+    # the caller passes fund_budget=0 (no CSPs were sized), which would zero the
+    # yield and paint the whole post red — title 🔴, red sidebar, 0.00% — despite
+    # CC premium having been collected. Fall back to net_liq, then contributed
+    # capital, so the yield reflects reality and matches the dashboard.
+    denom = fund_budget or net_liq or capital or 0
+    yield_pct = premium_collected / denom * 100 if denom else 0
+    ytd       = _update_ytd(week_start, premium_collected, shares_sold_pnl, denom)
+
+    avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / denom * 100) \
+                   if ytd["weeks_traded"] and denom else 0
 
     fields = [
         {"name": "CSP Premium",      "value": f"${csp_premium:,.0f}",     "inline": True},
@@ -507,7 +513,7 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
         # computing it from the week's premium so the post never crashes.
         if "yield_pct" in week:
             return week["yield_pct"]
-        return prem / fund_budget * 100 if fund_budget else 0
+        return prem / denom * 100 if denom else 0
 
     if best:
         best_prem = best.get("premium_collected", best.get("realized", 0))
