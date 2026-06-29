@@ -14,6 +14,7 @@
 # is guarded so a missing file never breaks a screener run.
 # ----------------------------------------------------------
 
+import json
 import uuid
 from pathlib import Path
 
@@ -53,6 +54,19 @@ def get_version() -> str:
 
 
 def get_trading_mode() -> str:
+    # settings.json is the app's source of truth for trading_mode (settings_default
+    # supplies the baseline). Prefer it over /data/gw_trading_mode, which only exists
+    # once the mode has been toggled via the dashboard — a box that's been paper
+    # since setup never writes that file, which would otherwise report "unknown".
+    for fname in ("settings.json", "settings_default.json"):
+        try:
+            data = json.loads((_BASE / fname).read_text())
+            mode = str(data.get("trading_mode", "")).strip().lower()
+            if mode in ("paper", "live"):
+                return mode
+        except Exception:
+            pass
+    # Fallback: the durable gateway mode file (present only after a UI toggle).
     try:
         mode = (_DATA_DIR / "gw_trading_mode").read_text().strip().lower()
         if mode in ("paper", "live"):
