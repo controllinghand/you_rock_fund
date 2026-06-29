@@ -45,7 +45,7 @@ export default function PositionCard({ position: p }) {
           <div className="text-gray-500 text-sm">{p.sector || '—'}</div>
         </div>
         <span className={`text-xs px-2.5 py-1 rounded-full border font-medium capitalize ${badgeClass}`}>
-          {statusLabel}
+          CSP: {statusLabel}
         </span>
       </div>
 

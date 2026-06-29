@@ -2581,9 +2581,10 @@ def get_trade_history():
 
     return {
         "current_week": {
-            "run_date":   state.get("run_date"),
-            "executions": enriched,
-            "weekly_pnl": state.get("weekly_pnl", {}),
+            "run_date":       state.get("run_date"),
+            "executions":     enriched,
+            "weekly_pnl":     state.get("weekly_pnl", {}),
+            "wheel_activity": state.get("monday_context", {}).get("wheel_activity", []),
         },
         "weekly_summaries": weekly_summaries,
         "total_premium":    ytd.get("total_premium", 0),
