@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import axios from 'axios'
-import { Clock, DollarSign, TrendingUp, RefreshCw } from 'lucide-react'
+import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2 } from 'lucide-react'
 import PositionCard from '../components/PositionCard.jsx'
 import YTDChart from '../components/YTDChart.jsx'
 
@@ -22,6 +22,77 @@ function useCountdown(isoStr) {
     return () => clearInterval(t)
   }, [isoStr])
   return label
+}
+
+// Humanize a per-ticker result status into a short chip label.
+const RESULT_LABELS = {
+  filled:                'CSP filled',
+  partial_fill:          'CSP partial',
+  cc_opened:             'CC sold',
+  cc_deferred:           'CC deferred',
+  sold_dropped_screener: 'sold (off screener)',
+  sold_stop_loss:        'sold (stop loss)',
+  sold_no_viable_cc:     'sold (no CC)',
+  sell_failed:           'sell FAILED',
+  failed_market_data:    'no market data',
+  skipped_excluded:      'excluded',
+}
+function resultLabel(status) {
+  return RESULT_LABELS[status] || (status ? status.replace(/_/g, ' ') : '—')
+}
+function resultBad(status) {
+  return status === 'sell_failed' || status === 'failed_market_data'
+}
+
+// Live progress card — replaces the Next-Execution countdown while a run
+// (scheduled or manual) is executing, so the whole workflow is visible.
+function RunProgress({ runStatus }) {
+  const phase   = runStatus.current_phase
+  const ticker  = runStatus.current_ticker
+  const stage   = runStatus.current_stage
+  const results = runStatus.ticker_results ?? []
+  const source  = runStatus.source === 'scheduler' ? 'Scheduled run' : 'Run in progress'
+  const phaseLabel = phase === 'CSP pipeline' ? 'CSP pipeline'
+                   : phase === 'wheel check'  ? 'Wheel check'
+                   : null
+
+  return (
+    <div className="flex-1 bg-white dark:bg-gray-900 border border-blue-400/60 dark:border-blue-500/50 rounded-xl p-6">
+      <div className="flex items-center justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 text-sm mb-1">
+            <Loader2 size={14} className="animate-spin" />
+            <span>{source}{phaseLabel ? ` — ${phaseLabel}` : ''}</span>
+          </div>
+          <div className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight truncate">
+            {ticker ? <>Working on <span className="text-blue-600 dark:text-blue-400">{ticker}</span></>
+                    : 'Pipeline executing…'}
+          </div>
+          <div className="text-gray-500 dark:text-gray-400 text-sm mt-1.5 truncate">
+            {stage || 'connecting to IBKR…'}
+          </div>
+        </div>
+        <Loader2 size={48} className="text-blue-600/30 animate-spin shrink-0" />
+      </div>
+
+      {results.length > 0 && (
+        <div className="mt-4 flex flex-wrap gap-1.5">
+          {results.map((r, i) => (
+            <span
+              key={i}
+              className={`text-xs px-2 py-0.5 rounded-full border ${
+                resultBad(r.status)
+                  ? 'border-red-400/50 text-red-500 dark:text-red-400'
+                  : 'border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400'
+              }`}
+            >
+              <span className="font-medium">{r.ticker}</span> {resultLabel(r.status)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function StatCard({ label, value, sub, accent = 'text-gray-900 dark:text-white' }) {
@@ -72,6 +143,7 @@ export default function Dashboard() {
   const [performance, setPerformance] = useState(null)
   const [loading, setLoading]         = useState(true)
   const [lastRefresh, setLastRefresh] = useState(null)
+  const [runStatus, setRunStatus]     = useState(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -94,6 +166,24 @@ export default function Dashboard() {
   useEffect(() => {
     fetchAll()
     const t = setInterval(fetchAll, 30000)
+    return () => clearInterval(t)
+  }, [fetchAll])
+
+  // Poll run-status every 5s (manual OR scheduled) so the countdown card can
+  // switch to live "Working on X" status the moment a run kicks off. When a run
+  // finishes, refetch once so the dashboard picks up the new weekly results.
+  useEffect(() => {
+    let wasExecuting = false
+    const poll = async () => {
+      try {
+        const { data } = await axios.get('/api/run-status')
+        if (wasExecuting && !data.executing) fetchAll()
+        wasExecuting = !!data.executing
+        setRunStatus(data)
+      } catch { /* ignore — run-status is best-effort */ }
+    }
+    poll()
+    const t = setInterval(poll, 5000)
     return () => clearInterval(t)
   }, [fetchAll])
 
@@ -170,18 +260,22 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Header row: countdown + refresh */}
+      {/* Header row: live run progress while executing, else countdown */}
       <div className="flex items-start gap-4">
-        <div className="flex-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-gray-500 text-sm mb-1">Next Execution</div>
-              <div className="text-4xl font-bold text-gray-900 dark:text-white font-mono tracking-tight">{countdown}</div>
-              <div className="text-gray-500 dark:text-gray-600 text-sm mt-1.5">{execLabel}</div>
+        {runStatus?.executing ? (
+          <RunProgress runStatus={runStatus} />
+        ) : (
+          <div className="flex-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-gray-500 text-sm mb-1">Next Execution</div>
+                <div className="text-4xl font-bold text-gray-900 dark:text-white font-mono tracking-tight">{countdown}</div>
+                <div className="text-gray-500 dark:text-gray-600 text-sm mt-1.5">{execLabel}</div>
+              </div>
+              <Clock size={52} className="text-blue-600/30" />
             </div>
-            <Clock size={52} className="text-blue-600/30" />
           </div>
-        </div>
+        )}
 
         <button
           onClick={fetchAll}

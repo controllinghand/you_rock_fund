@@ -327,43 +327,61 @@ def run_pipeline():
         msg = "IB Gateway unreachable before Monday run — trades will not execute"
         log.error(f"❌ {msg}")
         _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
+    # ── Live progress feed ───────────────────────────────────────────
+    # Written from the very first second so the dashboard can swap the
+    # Next-Execution countdown for live "Working on X" status for the WHOLE
+    # workflow — both the wheel-check (CC) phase AND the CSP phase. Earlier this
+    # only covered the CSP phase, so the multi-minute CC-selling phase showed
+    # nothing. /api/run-status serves this file. Best-effort — never breaks the run.
+    import json as _json
+    _progress_file  = "/data/run_progress.json"
+    _ticker_results = []
+    _phase          = {"name": "wheel check"}
+
+    def _sched_progress(ticker=None, stage=None, result=None):
+        if result:
+            _ticker_results.append(result)
+        try:
+            _json.dump({
+                "executing":      True,
+                "current_phase":  _phase["name"],
+                "current_ticker": ticker,
+                "current_stage":  stage,
+                "ticker_results": list(_ticker_results),
+            }, open(_progress_file, "w"))
+        except Exception:
+            pass
+
+    def _clear_progress():
+        try:
+            _json.dump({"executing": False, "current_phase": None,
+                        "current_ticker": None, "current_stage": None,
+                        "ticker_results": _ticker_results}, open(_progress_file, "w"))
+        except Exception:
+            pass
+
+    # Flip the feed to "executing" before any IBKR work so the dashboard hides
+    # the countdown immediately, not only once the CSP phase starts.
+    _sched_progress(ticker=None, stage="starting wheel check")
+
     try:
         # ── Step 1: wheel check (stop-loss sells + covered calls) ──
         # Its return dict IS the pipeline context (skip_tickers, freed_capital,
         # reserved_capital, active_wheel_count, cc_premium, shares_sold_pnl, …).
+        # progress_callback streams per-ticker CC/sell activity to the feed.
         from wheel_manager import run_wheel_check
-        context = run_wheel_check()
+        context = run_wheel_check(progress_callback=_sched_progress)
         log.info(f"✅ Wheel check done — freed ${context['freed_capital']:,.0f}  "
                  f"reserved ${context['reserved_capital']:,.0f}  skip {context['skip_tickers'] or 'none'}")
 
         # ── Step 2: CSP pipeline, driven by the wheel check's live results ──
-        import json as _json
-        _progress_file = "/data/run_progress.json"
-        _ticker_results = []
-
-        def _sched_progress(ticker=None, stage=None, result=None):
-            if result:
-                _ticker_results.append(result)
-            try:
-                _json.dump({
-                    "executing": True,
-                    "current_ticker": ticker,
-                    "current_stage": stage,
-                    "ticker_results": list(_ticker_results),
-                }, open(_progress_file, "w"))
-            except Exception:
-                pass
-
-        _sched_progress(ticker=None, stage="starting")
+        _phase["name"] = "CSP pipeline"
+        _sched_progress(ticker=None, stage="screening candidates")
         from monday_runner import run_csp_pipeline
         outcome = run_csp_pipeline(context, dry_run=False, progress_callback=_sched_progress)
 
         # Clear progress file now that execution is done
-        try:
-            _json.dump({"executing": False, "current_ticker": None, "current_stage": None,
-                        "ticker_results": _ticker_results}, open(_progress_file, "w"))
-        except Exception:
-            pass
+        _clear_progress()
 
         # ── Systemic market data failure alert ────────────────
         results    = outcome.get("results", [])
@@ -382,6 +400,8 @@ def run_pipeline():
     except Exception as e:
         log.error(f"❌ Monday run error: {e}", exc_info=True)
         _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
+        # Don't leave the feed stuck on "executing" — restore the countdown.
+        _clear_progress()
     finally:
         loop.close()
 
