@@ -177,6 +177,20 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
             "executed": not dry_run,
         }
         if not dry_run:
+            # No CSPs ran this week, so trader.execute_positions never executed and
+            # never refreshed the CSP-run fields — they'd keep the PRIOR week's run.
+            # Clear them here so the Discord weekly post and the Trade-History
+            # "Current Week" view don't resurface last week's executions/positions.
+            # Must happen BEFORE _write_weekly_pnl, which re-loads state to build the
+            # Discord "This Week's Trades" section from state["executions"].
+            state = _load_state()
+            state["run_date"]      = datetime.now().isoformat()
+            state["positions"]     = []
+            state["executions"]    = []
+            state["filled_count"]  = 0
+            state["total_premium"] = 0
+            with open(STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
             _write_weekly_pnl(0.0, context)
         return result
 
