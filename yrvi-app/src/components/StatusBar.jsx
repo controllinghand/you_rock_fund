@@ -72,10 +72,16 @@ export default function StatusBar() {
   const [upgradeOutput, setUpgradeOutput] = useState('')
   const [buildLog, setBuildLog]           = useState('')
   const [elapsedSecs, setElapsedSecs]     = useState(0)
+  const [failedServices, setFailedServices] = useState([])   // services that failed to build/restart
+  const [slowNotice, setSlowNotice]       = useState(false)  // soft "taking longer than expected" — not a failure
   const pollRef      = useRef(null)
   const timerRef     = useRef(null)
   const logBoxRef    = useRef(null)
   const startTimeRef = useRef(null)
+  // Read synchronously inside the version-check tick — failed_services arrives
+  // via a separate poll call in the same interval, so state (async) can't be
+  // trusted to be up to date yet when the version-check callback runs.
+  const failedServicesRef = useRef([])
 
   // Auto-scroll build log to bottom as new lines arrive
   useEffect(() => {
@@ -186,6 +192,9 @@ export default function StatusBar() {
     setUpgradePhase('waiting_up')
     setBuildLog('')
     setElapsedSecs(0)
+    setFailedServices([])
+    setSlowNotice(false)
+    failedServicesRef.current = []
     startTimeRef.current = Date.now()
 
     // Elapsed-time ticker (every second)
@@ -202,10 +211,12 @@ export default function StatusBar() {
         return
       }
 
-      // Version check — detects when upgrade is complete
+      // Version check — detects when the api container is upgraded. NOT
+      // sufficient on its own: failed_services (below) is the authoritative
+      // signal, since api can succeed while scheduler/web silently stay stale.
       axios.get('/api/version/check', { timeout: 2000 })
         .then(r => {
-          if (r.data?.current && r.data.current === expectedVersion) {
+          if (r.data?.current && r.data.current === expectedVersion && failedServicesRef.current.length === 0) {
             stopPoll()
             setUpgradePhase('done')
             setTimeout(() => window.location.reload(), 2000)
@@ -213,9 +224,20 @@ export default function StatusBar() {
         })
         .catch(() => {})
 
-      // Log poll — streams live build output
+      // Log poll — streams live build output, the authoritative failed_services
+      // list, and a soft (non-failure) "taking longer than expected" notice.
       axios.get('/api/upgrade/log', { timeout: 2000 })
-        .then(r => { if (r.data?.content) setBuildLog(r.data.content) })
+        .then(r => {
+          if (r.data?.content) setBuildLog(r.data.content)
+          const failed = r.data?.failed_services || []
+          failedServicesRef.current = failed
+          setFailedServices(failed)
+          setSlowNotice(!!r.data?.slow)
+          if (failed.length > 0) {
+            stopPoll()
+            setUpgradePhase('error')
+          }
+        })
         .catch(() => {})
     }, 3000)
   }
@@ -252,6 +274,9 @@ export default function StatusBar() {
     setUpgradeOutput('')
     setBuildLog('')
     setElapsedSecs(0)
+    setFailedServices([])
+    setSlowNotice(false)
+    failedServicesRef.current = []
   }
 
   // Gateway needs recovery (raw signal). Split into two UI states by how long it's
@@ -484,18 +509,35 @@ export default function StatusBar() {
             <div className="w-full max-w-2xl">
               <div className="flex items-center gap-3 mb-5">
                 <span className="text-2xl">⚠️</span>
-                <h2 className="text-white text-xl font-bold">Build taking longer than expected</h2>
+                <h2 className="text-white text-xl font-bold">
+                  {failedServices.length > 0 ? 'Upgrade partially failed' : 'Build taking longer than expected'}
+                </h2>
               </div>
+              {failedServices.length > 0 && (
+                <p className="text-red-400 text-sm mb-3">
+                  {failedServices.join(', ')} failed to build/restart and {failedServices.length === 1 ? 'is' : 'are'} still on the previous version.
+                  Other services were upgraded successfully.
+                </p>
+              )}
               {(upgradeOutput || buildLog) && (
                 <pre className="bg-gray-950 text-green-300 text-xs font-mono p-4 rounded-lg overflow-auto max-h-72 mb-5 whitespace-pre-wrap break-all">
                   {upgradeOutput}{buildLog ? '\n\n' + buildLog : ''}
                 </pre>
               )}
               <p className="text-yellow-400 text-sm mb-5">
-                The git pull succeeded — containers may still be building. Run manually if needed:{' '}
-                <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
-                  bash scripts/yrvi-build.sh all --paper
-                </code>
+                {failedServices.length > 0 ? (
+                  <>Retry the failed service(s):{' '}
+                    <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
+                      bash scripts/yrvi-build.sh {failedServices[0]} --paper
+                    </code>
+                  </>
+                ) : (
+                  <>The git pull succeeded — containers may still be building. Run manually if needed:{' '}
+                    <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
+                      bash scripts/yrvi-build.sh all --paper
+                    </code>
+                  </>
+                )}
               </p>
               <button
                 onClick={closeUpgrade}
@@ -509,7 +551,8 @@ export default function StatusBar() {
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mb-5" />
               <h2 className="text-white text-xl font-semibold mb-1">Upgrading YRVI…</h2>
               <p className="text-gray-400 text-sm mb-1">Rebuilding containers — dashboard will reload automatically</p>
-              <p className="text-gray-600 text-xs mb-6 font-mono">{elapsedSecs}s elapsed · typically 1–2 min</p>
+              <p className="text-gray-600 text-xs mb-1 font-mono">{elapsedSecs}s elapsed · typically 1–2 min</p>
+              <p className="text-yellow-500 text-xs mb-5 h-4">{slowNotice ? 'Build is taking longer than expected…' : ''}</p>
               {(upgradeOutput || buildLog) && (
                 <pre
                   ref={logBoxRef}

@@ -2706,8 +2706,12 @@ def version_upgrade():
         return {"success": False, "output": "\n\n".join(output_parts)}
 
     upgrade_log = Path("/data/upgrade.log")
+    upgrade_result = Path("/data/upgrade_result.json")
     try:
         upgrade_log.write_text("")  # clear any previous run
+        # Clear the previous run's failed_services too — otherwise a poll mid-build
+        # would read the prior run's result until this run finishes and overwrites it.
+        upgrade_result.write_text("")
         log_fh = open(upgrade_log, "w")
         _mode_flag = "--live" if load_settings().get("trading_mode") == "live" else "--paper"
         _env = os.environ.copy()
@@ -2734,12 +2738,32 @@ def version_upgrade():
 @app.get("/api/upgrade/log")
 def upgrade_log_read():
     import re
+    import time as _time
     log = Path("/data/upgrade.log")
     if not log.exists():
-        return {"content": ""}
+        return {"content": "", "failed_services": [], "slow": False}
     raw = log.read_text(errors="replace")
     clean = re.sub(r'\x1b\[[0-9;]*[mGKHFABCDJsur]', '', raw)
-    return {"content": clean}
+
+    # Authoritative failure signal — written by yrvi-build.sh's "all" path once
+    # builds run per-service. A clean upgrade can still have api succeed while
+    # web/scheduler silently stay stale; the dashboard must check this rather
+    # than only api's own /api/version/check before declaring "done".
+    failed_services = []
+    result_file = Path("/data/upgrade_result.json")
+    if result_file.exists():
+        try:
+            failed_services = json.loads(result_file.read_text()).get("failed_services", [])
+        except Exception:
+            pass
+
+    # Soft, informational-only notice — NOT a failure signal. Threshold is 240s
+    # (not the original 90s) because a legitimate npm install/vite build on a
+    # slow/resource-constrained box can run several minutes with no stdout; a
+    # short threshold would false-positive on exactly the hardware this targets.
+    slow = (_time.time() - log.stat().st_mtime) > 240
+
+    return {"content": clean, "failed_services": failed_services, "slow": slow}
 
 
 @app.get("/api/health")
