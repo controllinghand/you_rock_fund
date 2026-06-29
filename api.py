@@ -2573,6 +2573,8 @@ def get_trade_history():
     weekly_summaries = [
         {**w,
          "premium_collected": w.get("premium_collected", w.get("realized", 0)),
+         "shares_sold_pnl":   w.get("shares_sold_pnl", 0),
+         "total_realized":    w.get("total_realized", w.get("realized", 0)),
          "yield_pct": round(
              w.get("premium_collected", w.get("realized", 0)) / budget * 100, 3
          ) if budget else w.get("yield_pct", 0)}

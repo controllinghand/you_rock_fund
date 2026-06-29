@@ -262,26 +262,43 @@ export default function TradeHistory() {
             <thead>
               <tr className="text-gray-500 text-xs border-b border-gray-200 dark:border-gray-800">
                 <th className="text-left px-5 py-3">Week Of</th>
+                <th className="text-right px-5 py-3">Premium</th>
+                <th className="text-right px-5 py-3">Sales P&amp;L</th>
                 <th className="text-right px-5 py-3">Realized</th>
                 <th className="text-right px-5 py-3">Yield</th>
               </tr>
             </thead>
             <tbody>
-              {[...weekly_summaries].reverse().map((w, i) => (
-                <tr key={i} className="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
-                  <td className="px-5 py-3 text-gray-700 dark:text-gray-300">{fmtDate(w.week_start + 'T00:00:00')}</td>
-                  <td className="px-5 py-3 text-right text-green-400 font-medium">
-                    ${(w.total_realized ?? w.realized ?? 0).toLocaleString()}
-                  </td>
-                  <td className={`px-5 py-3 text-right font-medium ${
-                    (w.yield_pct ?? 0) >= 1 ? 'text-green-400'
-                    : (w.yield_pct ?? 0) >= 0.5 ? 'text-yellow-400'
-                    : 'text-red-400'
-                  }`}>
-                    {(w.yield_pct ?? 0).toFixed(3)}%
-                  </td>
-                </tr>
-              ))}
+              {[...weekly_summaries].reverse().map((w, i) => {
+                const premium  = w.premium_collected ?? w.realized ?? 0
+                const salesPnl = w.shares_sold_pnl ?? 0
+                const realized = w.total_realized ?? w.realized ?? premium
+                return (
+                  <tr key={i} className="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
+                    <td className="px-5 py-3 text-gray-700 dark:text-gray-300">{fmtDate(w.week_start + 'T00:00:00')}</td>
+                    <td className="px-5 py-3 text-right text-green-400 font-medium">
+                      ${premium.toLocaleString()}
+                    </td>
+                    <td className={`px-5 py-3 text-right font-medium ${
+                      salesPnl > 0 ? 'text-green-400' : salesPnl < 0 ? 'text-red-400' : 'text-gray-500 dark:text-gray-600'
+                    }`}>
+                      {salesPnl === 0 ? '—' : `${salesPnl >= 0 ? '+' : ''}$${salesPnl.toLocaleString()}`}
+                    </td>
+                    <td className={`px-5 py-3 text-right font-semibold ${
+                      realized >= 0 ? 'text-gray-900 dark:text-white' : 'text-red-400'
+                    }`}>
+                      {realized >= 0 ? '' : '−'}${Math.abs(realized).toLocaleString()}
+                    </td>
+                    <td className={`px-5 py-3 text-right font-medium ${
+                      (w.yield_pct ?? 0) >= 1 ? 'text-green-400'
+                      : (w.yield_pct ?? 0) >= 0.5 ? 'text-yellow-400'
+                      : 'text-red-400'
+                    }`}>
+                      {(w.yield_pct ?? 0).toFixed(3)}%
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
