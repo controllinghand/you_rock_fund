@@ -272,7 +272,11 @@ run_with_build_timeout() {
 
 if [ "$DRY_RUN" = true ]; then
     if [ "$CONTAINER" = "all" ]; then
-        info "Would run: docker compose --env-file .env.compose up -d --no-deps ib_gateway secrets"
+        info "Would build+restart all 5 services in dependency order:"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build secrets"
+        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets   (then wait until healthy)"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build --pull ib_gateway"
+        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
         for svc in scheduler web api; do
             info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build $svc"
             info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
@@ -283,15 +287,53 @@ if [ "$DRY_RUN" = true ]; then
 else
     info "Building and restarting ${CONTAINER}..."
     if [ "$CONTAINER" = "all" ]; then
-        # Restart ib_gateway/secrets first — "all" never rebuilds these, just
-        # restarts them to pick up any .env.compose changes (unchanged behavior).
-        docker compose --env-file .env.compose up -d --no-deps ib_gateway secrets
-
         BUILD_FAILED=()
 
-        # scheduler and web are built+restarted independently so a stuck/crashed
-        # build of ONE service can never block the others — each gets its own
-        # bounded build (run_with_build_timeout) and its own immediate restart.
+        # ── secrets FIRST ──────────────────────────────────────────
+        # Every other service depends on the secrets container being healthy
+        # (it serves credentials at their startup), so rebuild it, force a
+        # restart, and WAIT for healthy before touching anything that needs it.
+        info "Building secrets..."
+        if run_with_build_timeout docker compose --env-file .env.compose build secrets; then
+            docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets
+            info "Waiting for secrets container to become healthy..."
+            SECRETS_HEALTHY=""
+            for _ in $(seq 1 30); do
+                if [ "$(docker inspect --format '{{.State.Health.Status}}' yrvi-secrets-1 2>/dev/null)" = "healthy" ]; then
+                    SECRETS_HEALTHY=1; break
+                fi
+                sleep 2
+            done
+            if [ -n "$SECRETS_HEALTHY" ]; then
+                ok "secrets built, restarted and healthy"
+            else
+                warn "secrets did not report healthy within 60s — dependents may be degraded"
+                BUILD_FAILED+=("secrets")
+            fi
+        else
+            warn "secrets build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+            BUILD_FAILED+=("secrets")
+        fi
+
+        # ── ib_gateway ─────────────────────────────────────────────
+        # --pull so a routine upgrade auto-adopts a newer upstream TWS/gateway
+        # image whenever one is available. The volume-shadow + JRE-pointer
+        # self-heals in docker/ib-gateway/entrypoint.sh recover any version skew
+        # on first boot (with a 🔄 Discord alert). NOTE: restarting the gateway
+        # forces an IB Key 2FA approval on the LIVE box, every upgrade.
+        info "Building ib_gateway (--pull — may adopt a newer upstream TWS)..."
+        if run_with_build_timeout docker compose --env-file .env.compose build --pull ib_gateway; then
+            docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway
+            ok "ib_gateway built and restarted (approve IB Key 2FA on the live box)"
+        else
+            warn "ib_gateway build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+            BUILD_FAILED+=("ib_gateway")
+        fi
+
+        # ── scheduler, web ─────────────────────────────────────────
+        # Built+restarted independently so a stuck/crashed build of ONE service
+        # can never block the others — each gets its own bounded build
+        # (run_with_build_timeout) and its own immediate restart.
         for svc in scheduler web; do
             info "Building ${svc}..."
             if run_with_build_timeout docker compose --env-file .env.compose build "$svc"; then

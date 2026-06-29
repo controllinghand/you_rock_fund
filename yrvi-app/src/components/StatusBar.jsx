@@ -470,9 +470,16 @@ export default function StatusBar() {
           <div className="bg-white dark:bg-gray-900 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl border border-gray-200 dark:border-gray-700">
             <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Upgrade YRVI?</h2>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
-              This will pull the latest code and rebuild the containers.
-              The dashboard will automatically reconnect when complete. Continue?
+              This pulls the latest code and rebuilds + restarts the entire stack
+              (including the IB Gateway). The dashboard will automatically reconnect
+              when complete. Continue?
             </p>
+            {isLive && (
+              <p className="text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg px-3 py-2 mb-3">
+                📱 This restarts the IB Gateway — have your phone ready to approve
+                the <strong>IB Key 2FA</strong> push, or the gateway won’t reconnect.
+              </p>
+            )}
             <p className="text-sm font-mono text-gray-400 dark:text-gray-500 mb-6">
               v{versionInfo?.current} → v{versionInfo?.latest}
             </p>

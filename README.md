@@ -260,6 +260,7 @@ See **[CONTAINERIZATION.md](CONTAINERIZATION.md)** for the full setup guide — 
 - Secrets are stored AES-256-GCM-encrypted in a persistent Docker volume managed by the `secrets` container. The encryption key is generated on first run and stored at `/data/secrets.key` inside the volume (chmod 600).
 - The secrets API (`http://localhost:8001`) is bound to `localhost` on the host and reachable inside the Docker network as `http://secrets:8001` — never exposed externally.
 - `docker/secrets/` files are empty placeholders kept for the `secrets_client` 3-tier fallback (HTTP → file → env). The real values live only in the encrypted volume.
+- **These placeholder files stay empty (0 bytes) — the IBKR password is never written to disk in cleartext.** Verified on both a dashboard upgrade and a full stop/start: the files never change size. (`setup_docker.sh` only `touch`es them; the legacy Keychain→file injection path in `yrvi-build.sh` is a bootstrap fallback that the secrets-container setup never triggers.)
 - `docker/secrets/` is in `.gitignore` and must never be committed.
 
 ### What the Encryption Does and Doesn't Protect
