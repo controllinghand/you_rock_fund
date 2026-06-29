@@ -1,6 +1,12 @@
 import requests
 from datetime import datetime, timezone
 from config import RENDER_URL as URL, RENDER_SECRET as SECRET
+from app_identity import request_headers
+
+# Anonymous per-box identity (install id + version + paper/live) sent on every
+# screener-API call so the Render service can attribute traffic and count
+# unique boxes. Computed once at import — small, stable for the process.
+HEADERS = request_headers()
 
 PARAMS = {
     "secret": SECRET,
@@ -89,7 +95,7 @@ def score_target(row: dict) -> float:
 def get_top_targets(n=5, always_include: set = None):
     print(f"\n📡 Fetching CSP targets from Render API...")
     _warm_up()
-    response = requests.get(URL, params=PARAMS, timeout=60)
+    response = requests.get(URL, params=PARAMS, headers=HEADERS, timeout=60)
     response.raise_for_status()
 
     data = response.json()
@@ -220,7 +226,7 @@ def get_all_candidates(ignore_earnings_filter=False, market_cap_min=None,
         if market_cap_min is not None:
             params["market_cap_min"] = market_cap_min
         _warm_up()
-        response = requests.get(URL, params=params, timeout=60)
+        response = requests.get(URL, params=params, headers=HEADERS, timeout=60)
         response.raise_for_status()
         rows = response.json().get("rows", [])
     except Exception as e:
