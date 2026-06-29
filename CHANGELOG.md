@@ -1,3 +1,7 @@
+## [5.2.7] — 2026-06-29
+### Changed
+- **The Discord feedback webhook is no longer shown as a configurable secret, now that it's auto-populated.** Since v5.2.4 the feedback form works out of the box via a baked-in default, so the **Discord Feedback Webhook URL** row is removed from the Secrets page, and the Help-page "Report a Bug or Request a Feature" box no longer tells first-timers to grab the webhook URL from `#yrvi_secrets` and add it in Secrets. The secret is hidden in the UI (filtered in `Secrets.jsx` `deriveSecrets`), not deleted from the backend — a box can still override the feedback channel programmatically via the `discord_feedback_webhook_url` secret if ever needed.
+
 ## [5.2.6] — 2026-06-29
 ### Fixed
 - **The `X-Trading-Mode` header on screener calls now reports paper/live correctly instead of "unknown".** The v5.2.5 identity header read the trading mode from `/data/gw_trading_mode`, but that durable file only gets written when the mode is *toggled* via the dashboard — a box that's been paper (or live) since setup never writes it, so the header logged `unknown` (confirmed live: the paper box's first v5.2.5 screener call logged `mode=unknown` while `install_id` and `version` came through fine). `app_identity.get_trading_mode()` now reads `trading_mode` from `settings.json` (the app's actual source of truth, with `settings_default.json` as baseline) and only falls back to `/data/gw_trading_mode` then `unknown`. The `install_id` / `app_version` parts of v5.2.5 were already correct.

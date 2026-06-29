@@ -353,12 +353,6 @@ export default function Help() {
           Describe what happened or what you'd like to see — this goes straight to the
           YRVI team on Discord. No account needed.
         </div>
-        <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
-          First time? Get the feedback webhook URL from the{' '}
-          <span className="font-mono text-blue-500 dark:text-blue-400">#yrvi_secrets</span>{' '}
-          channel in the You Rock Club Discord and add it in{' '}
-          <a href="/secrets" className="underline hover:text-blue-500">Secrets</a>.
-        </div>
 
         <div className="space-y-3">
           {/* Type selector */}

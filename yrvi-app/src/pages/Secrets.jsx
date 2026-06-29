@@ -22,14 +22,15 @@ const LABELS = {
   tws_userid_live:             { label: 'IBKR Live Username',           required: false },
   vnc_server_password:         { label: 'VNC Password',                 required: false, description: 'Default: ibgateway123!test — used to connect via VNC to the IB Gateway container (port 5900)' },
   discord_webhook_url:          { label: 'Discord Webhook URL',          required: false, description: 'All Discord notifications — weekly plan, execution results, assignments, and alerts — go to this channel.' },
-  discord_feedback_webhook_url: { label: 'Discord Feedback Webhook URL', required: false, description: 'Powers the bug/feature feedback form on the Help page. Pre-configured by default — only set this to override which Discord channel feedback goes to.' },
+  // discord_feedback_webhook_url is auto-populated (api.py _FEEDBACK_WEBHOOK_DEFAULT) and hidden from the Secrets UI — see deriveSecrets filter.
   flex_token:    { label: 'IBKR Flex Token',    required: false, description: 'Flex Web Service token from IBKR Portal → Performance & Reports → Flex Queries. Required for "Fetch from IBKR" in the Reconciler.' },
   flex_query_id: { label: 'IBKR Flex Query ID', required: false, description: 'Numeric query ID of your Activity Flex Query (Executions sub-type, XML format). Required for "Fetch from IBKR" in the Reconciler.' },
 }
 
 function deriveSecrets(statusSecrets) {
   if (!statusSecrets) return []
-  return Object.keys(statusSecrets).map(name => {
+  // discord_feedback_webhook_url is auto-populated by default (api.py) — hide it from the Secrets UI.
+  return Object.keys(statusSecrets).filter(name => name !== 'discord_feedback_webhook_url').map(name => {
     const meta = LABELS[name] || { label: name, required: false }
     return { name, label: meta.label, required: meta.required, description: meta.description }
   })
