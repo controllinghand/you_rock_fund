@@ -80,8 +80,9 @@ ALERTS_FILE = (
 ALERTS_MAX = 200
 _alerts_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
-# Feedback webhook — configure via discord_feedback_webhook_url secret in the secrets container
-_FEEDBACK_WEBHOOK_DEFAULT = ""
+# Feedback webhook — defaults to the shared You Rock Club feedback channel so every
+# box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
+_FEEDBACK_WEBHOOK_DEFAULT = "https://discord.com/api/webhooks/1506828497757147167/364xR_1wKCz1LPREGwqpE9mmvQkwkC-EiSirRqWua69eCs-rma5Hc4j7RGIwqBas0jyE"
 # clientId 100-999 used at runtime (random per call) — never conflicts with trader(1) wheel(2) risk(3)
 
 # ── Watchdog ───────────────────────────────────────────────────
