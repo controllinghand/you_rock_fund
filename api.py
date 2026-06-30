@@ -1386,6 +1386,7 @@ def _get_ibkr_data(settings: dict) -> dict:
         return _ibkr_cache["data"]
 
     result      = dict(_IBKR_EMPTY)
+    prev        = _ibkr_cache.get("data")  # last snapshot; reused if this fetch blanks
     port        = settings.get("ibkr_port", 4004)
     host        = os.environ.get("IBKR_HOST", "127.0.0.1")
     account_env = settings.get("account") or os.environ.get("ACCOUNT", "")
@@ -1434,6 +1435,14 @@ def _get_ibkr_data(settings: dict) -> dict:
                     ib.sleep(0.3)
             pnl_unrl = _safe_float(acct_pnl.unrealizedPnL) if acct_pnl else None
             pnl_real = _safe_float(acct_pnl.realizedPnL)   if acct_pnl else None
+            # When reqPnL hasn't ticked this cycle, the summary tags are usually
+            # absent/0 — which blanks the Unrealized card to +$0.00. Prefer the
+            # last good cached value over that 0 so the card holds steady.
+            prev_summary = prev.get("account_summary") if prev else None
+            if pnl_unrl is None and prev_summary:
+                pnl_unrl = _safe_float(prev_summary.get("unrealized_pnl"))
+            if pnl_real is None and prev_summary:
+                pnl_real = _safe_float(prev_summary.get("realized_pnl"))
             result["unrealized_pnl"]     = (pnl_unrl if pnl_unrl is not None
                                             else _safe_float(summary_dict.get("UnrealizedPnL", 0)))
             result["realized_pnl"]       = (pnl_real if pnl_real is not None
@@ -1479,7 +1488,20 @@ def _get_ibkr_data(settings: dict) -> dict:
                                          ib.reqPnLSingle(acct, "", pos.contract.conId)))
                     except Exception as se:
                         print(f"[api] reqPnLSingle failed for {pos.contract.symbol}: {se}")
-                ib.sleep(3)  # let PnLSingle streams populate
+                # Poll up to ~8s for the PnLSingle streams to tick, breaking
+                # early once every stream has a value. A fixed 3s wait was too
+                # short on slower boxes: a fresh connection subscribing ~10
+                # streams at once frequently missed it, so every price came back
+                # NaN and the whole holdings table blanked for that 30s cache
+                # window (the "prices disappear then come back" flicker).
+                waited = 0.0
+                while waited < 8.0:
+                    ib.sleep(0.5)
+                    waited += 0.5
+                    if pnl_reqs and all(
+                        _safe_float(s.value) is not None for _, s in pnl_reqs
+                    ):
+                        break
                 for con_id, single in pnl_reqs:
                     pnl_lookup[con_id] = single
                     try:
@@ -1517,6 +1539,23 @@ def _get_ibkr_data(settings: dict) -> dict:
                         "unrealizedPNL": unrl,
                     })
                 portfolio.sort(key=lambda x: (0 if x["secType"] == "STK" else 1, x["symbol"]))
+                # Don't clobber good prices with blanks: if a PnLSingle stream
+                # still didn't tick, reuse the last cached price for that exact
+                # contract (flagged stale) instead of rendering "—". Self-heals
+                # on the next cycle that ticks.
+                if prev:
+                    def _pkey(x):
+                        return (x.get("symbol"), x.get("secType"), x.get("strike"),
+                                x.get("right"), x.get("expiry"))
+                    prev_by_key = {_pkey(p): p for p in prev.get("portfolio", [])}
+                    for item in portfolio:
+                        if item["marketPrice"] is None:
+                            old = prev_by_key.get(_pkey(item))
+                            if old and old.get("marketPrice") is not None:
+                                item["marketPrice"]   = old["marketPrice"]
+                                item["marketValue"]   = old.get("marketValue")
+                                item["unrealizedPNL"] = old.get("unrealizedPNL")
+                                item["priceStale"]    = True
                 result["portfolio"] = portfolio
             except Exception as pe:
                 print(f"[api] Positions fetch failed (account_summary preserved): {pe}")
