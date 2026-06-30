@@ -1557,6 +1557,19 @@ def _get_ibkr_data(settings: dict) -> dict:
                                 item["unrealizedPNL"] = old.get("unrealizedPNL")
                                 item["priceStale"]    = True
                 result["portfolio"] = portfolio
+
+                # Account-level Unrealized P&L: prefer the SUM of the per-position
+                # values (which we already have and which match the holdings
+                # table) over the separate account-level reqPnL stream. reqPnL
+                # frequently hands back a PARTIAL aggregate before every position
+                # sums in — on the live box it briefly flipped the card from
+                # -$5,047 to +$22 between refreshes. Only override when every
+                # position has a value, so the card always equals the table.
+                pos_unrl = [it.get("unrealizedPNL") for it in portfolio]
+                if pos_unrl and all(v is not None for v in pos_unrl):
+                    result["unrealized_pnl"] = round(sum(pos_unrl), 2)
+                    if result.get("account_summary"):
+                        result["account_summary"]["unrealized_pnl"] = result["unrealized_pnl"]
             except Exception as pe:
                 print(f"[api] Positions fetch failed (account_summary preserved): {pe}")
 
