@@ -192,13 +192,23 @@ export default function TradeHistory() {
                 // For CC: show premium (green). For sales: show realized P&L (signed).
                 const ccPrem   = isCC && a.cc_premium != null ? a.cc_premium : null
                 const realized = a.realized_pnl != null ? a.realized_pnl : null
+                // Income yield = premium / capital tied up in the stock (cost basis × shares).
+                const costBasis  = a.assigned_strike ?? null
+                const capital    = costBasis != null && a.shares ? costBasis * a.shares : null
+                const yieldPct   = ccPrem != null && capital ? (ccPrem / capital) * 100 : null
+                // How far the CC strike sits below cost basis, as a signed %.
+                const belowGap   = a.below_assigned && costBasis
+                  ? ((a.cc_strike - costBasis) / costBasis) * 100 : null
                 return (
                   <tr key={i} className="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
                     <td className="px-4 py-3 font-semibold text-gray-900 dark:text-white">{a.ticker}</td>
                     <td className="px-4 py-3">
                       <span className={`text-xs ${meta.cls}`}>{meta.label}</span>
                       {a.below_assigned && (
-                        <span className="ml-1.5 text-[10px] text-yellow-400">below cost</span>
+                        <span className="ml-1.5 text-[10px] text-yellow-400">
+                          below cost{costBasis != null && ` $${costBasis.toFixed(2)}`}
+                          {belowGap != null && ` (${belowGap.toFixed(1)}%)`}
+                        </span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-right text-gray-700 dark:text-gray-300">
@@ -218,7 +228,14 @@ export default function TradeHistory() {
                     </td>
                     <td className="px-4 py-3 text-right font-medium">
                       {ccPrem != null ? (
-                        <span className="text-green-400">${Math.round(ccPrem).toLocaleString()}</span>
+                        <div className="leading-tight">
+                          <span className="text-green-400">${Math.round(ccPrem).toLocaleString()}</span>
+                          {yieldPct != null && (
+                            <div className="text-[10px] text-gray-500 dark:text-gray-400 font-normal">
+                              {yieldPct.toFixed(2)}% income
+                            </div>
+                          )}
+                        </div>
                       ) : realized != null ? (
                         <span className={realized >= 0 ? 'text-green-400' : 'text-red-400'}>
                           {realized >= 0 ? '+' : '−'}${Math.abs(Math.round(realized)).toLocaleString()}

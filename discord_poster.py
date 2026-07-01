@@ -275,9 +275,20 @@ def _wheel_plan_lines(wheel_plan: list) -> list:
         action = a.get("action", "")
         ticker = a.get("ticker", "?")
         if action == "cc_opened":
+            prem   = a.get('cc_premium', 0)
+            strike = a.get('cc_strike')
+            cost   = a.get('assigned_strike')
+            shares = a.get('shares', 0)
+            yield_str = ""
+            if cost and shares:
+                yield_str = f" | {prem / (cost * shares) * 100:.2f}% income"
+            cost_str = ""
+            if a.get("below_assigned") and cost and strike:
+                cost_str = f" | ⚠️ below cost ${cost:.2f} ({(strike - cost) / cost * 100:.1f}%)"
             lines.append(
-                f"✅ **{ticker}** — Write CC @ {_fmt_strike(a.get('cc_strike'))} | "
-                f"δ{a.get('cc_delta', 0):.2f} | ~${a.get('cc_premium', 0):,.0f} | exp {a.get('cc_expiry', '?')}"
+                f"✅ **{ticker}** — Write CC @ {_fmt_strike(strike)} | "
+                f"δ{a.get('cc_delta', 0):.2f} | ~${prem:,.0f} | exp {a.get('cc_expiry', '?')}"
+                f"{yield_str}{cost_str}"
             )
         elif action == "cc_deferred":
             lines.append(
@@ -465,9 +476,21 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
                 prem   = a.get("cc_premium", 0)
                 strike = a.get("cc_strike", 0)
                 delta  = a.get("cc_delta", 0)
+                cost   = a.get("assigned_strike")
+                shares = a.get("shares", 0)
+                # Income yield = premium / capital tied up in the stock (cost × shares).
+                yield_str = ""
+                if cost and shares:
+                    yld = prem / (cost * shares) * 100
+                    yield_str = f"  ({yld:.2f}% income)"
+                # Flag below-cost CCs and show the cost basis + gap.
+                cost_str = ""
+                if a.get("below_assigned") and cost:
+                    gap = (strike - cost) / cost * 100
+                    cost_str = f"  ⚠️ below cost ${cost:.2f} ({gap:.1f}%)"
                 activity_lines.append(
                     f"🔄 **{ticker}** CC @ ${strike:.2f}  δ{delta:.2f}  "
-                    f"${prem:,.0f} premium"
+                    f"${prem:,.0f} premium{yield_str}{cost_str}"
                 )
             elif action == "sold_earnings_this_week":
                 dte     = a.get("days_to_earnings", "?")

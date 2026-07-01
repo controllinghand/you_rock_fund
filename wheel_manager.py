@@ -1140,13 +1140,15 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 h["current_cc_premium"] = prem
                 h["cc_status"]          = "open"
                 wheel_activity.append({
-                    "ticker":         ticker,
-                    "action":         "cc_opened",
-                    "cc_strike":      cc_strike,
-                    "cc_delta":       round(cc_delta, 3),
-                    "cc_premium":     prem,
-                    "cc_expiry":      expiry,
-                    "below_assigned": below_assigned,
+                    "ticker":          ticker,
+                    "action":          "cc_opened",
+                    "cc_strike":       cc_strike,
+                    "cc_delta":        round(cc_delta, 3),
+                    "cc_premium":      prem,
+                    "cc_expiry":       expiry,
+                    "below_assigned":  below_assigned,
+                    "assigned_strike": round(assigned_strike, 2) if assigned_strike else None,
+                    "shares":          shares,
                 })
                 _progress(ticker=ticker, stage="CC filled",
                           result={"ticker": ticker, "status": "cc_opened",
