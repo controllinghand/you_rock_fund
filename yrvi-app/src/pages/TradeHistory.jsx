@@ -4,12 +4,12 @@ import axios from 'axios'
 const STATUS_CLASS = {
   filled:             'text-green-400',
   dry_run:            'text-green-400',
-  partial_fill:       'text-yellow-400',
+  partial_fill:       'text-yellow-600 dark:text-yellow-400',
   failed:             'text-red-400',
   failed_qualify:     'text-red-400',
   failed_market_data: 'text-red-400',
   unfilled:           'text-red-400',
-  skipped_liquidity:  'text-yellow-400',
+  skipped_liquidity:  'text-yellow-600 dark:text-yellow-400',
 }
 
 function fmtDate(s) {
@@ -30,7 +30,7 @@ function fmtTime(s) {
 const WHEEL_ACTION = {
   cc_opened:               { label: 'CC opened',         cls: 'text-green-400' },
   cc_failed:               { label: 'CC failed',         cls: 'text-red-400' },
-  cc_deferred:             { label: 'CC deferred',       cls: 'text-yellow-400' },
+  cc_deferred:             { label: 'CC deferred',       cls: 'text-yellow-600 dark:text-yellow-400' },
   cc_already_open:         { label: 'CC already open',   cls: 'text-gray-500 dark:text-gray-400' },
   held_covered:            { label: 'Held (covered)',    cls: 'text-gray-500 dark:text-gray-400' },
   sold_dropped_screener:   { label: 'Sold (off screener)', cls: 'text-red-400' },
@@ -205,7 +205,7 @@ export default function TradeHistory() {
                     <td className="px-4 py-3">
                       <span className={`text-xs ${meta.cls}`}>{meta.label}</span>
                       {a.below_assigned && (
-                        <span className="ml-1.5 text-[10px] text-yellow-400">
+                        <span className="ml-1.5 text-[10px] text-yellow-600 dark:text-yellow-400">
                           below cost{costBasis != null && ` $${costBasis.toFixed(2)}`}
                           {belowGap != null && ` (${belowGap.toFixed(1)}%)`}
                         </span>
@@ -308,7 +308,7 @@ export default function TradeHistory() {
                     </td>
                     <td className={`px-5 py-3 text-right font-medium ${
                       (w.yield_pct ?? 0) >= 1 ? 'text-green-400'
-                      : (w.yield_pct ?? 0) >= 0.5 ? 'text-yellow-400'
+                      : (w.yield_pct ?? 0) >= 0.5 ? 'text-yellow-600 dark:text-yellow-400'
                       : 'text-red-400'
                     }`}>
                       {(w.yield_pct ?? 0).toFixed(3)}%
