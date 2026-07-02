@@ -382,7 +382,7 @@ export default function StatusBar() {
                 }
                 <span className={`text-xs ${
                   pillColor === 'green'  ? 'text-gray-700 dark:text-gray-300' :
-                  pillColor === 'yellow' ? 'text-yellow-400' :
+                  pillColor === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
                   pillColor === 'red'    ? 'text-red-400' : 'text-gray-500'
                 }`}>
                   {vChecking
@@ -404,7 +404,7 @@ export default function StatusBar() {
                   onClick={() => setShowConfirm(true)}
                   className={`text-xs px-2 py-0.5 rounded border font-medium transition-colors ${
                     pillColor === 'yellow'
-                      ? 'border-yellow-600 text-yellow-400 hover:bg-yellow-900/30'
+                      ? 'border-yellow-600 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-100 dark:hover:bg-yellow-900/30'
                       : 'border-red-700 text-red-400 hover:bg-red-900/30'
                   }`}
                 >
