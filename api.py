@@ -2106,6 +2106,7 @@ def get_status():
         "account":            ibkr["account"],
         "next_execution":       _next_execution(),
         "trading_mode":         settings.get("trading_mode", "paper"),
+        "dry_run":              settings.get("dry_run", False),
         "execution_time":       settings.get("execution_time", "10:00"),
         "wheel_count":          wheel_count,
         "gateway_login_status": _gateway_login_status,

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import axios from 'axios'
-import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, Pencil, Plus, X } from 'lucide-react'
+import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, Pencil, Plus, X, AlertTriangle } from 'lucide-react'
 import PositionCard from '../components/PositionCard.jsx'
 import YTDChart from '../components/YTDChart.jsx'
 
@@ -367,6 +368,26 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* Dry-run callout — fresh installs seed dry_run=true as a safety default,
+          so a new user who forgets to flip it off would see "no trades" and
+          think the app is broken. Make the reason loud and point at the fix. */}
+      {status?.dry_run && (
+        <div className="flex items-start gap-3 bg-yellow-100 dark:bg-yellow-900/40 border border-yellow-300 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300 rounded-xl p-4">
+          <AlertTriangle size={20} className="shrink-0 mt-0.5" />
+          <div className="text-sm">
+            <div className="font-semibold">Dry Run is ON — no real orders are being placed.</div>
+            <div className="mt-1">
+              YRVI is only <em>simulating</em> trades. This is the safe default for a new
+              install. Any positions below are simulated and won't appear in your IBKR
+              account. When you're ready to trade for real, turn it off in{' '}
+              <Link to="/settings" className="font-semibold underline hover:no-underline">
+                Settings → Dry Run
+              </Link>.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header row: live run progress while executing, else countdown */}
       <div className="flex items-start gap-4">
         {runStatus?.executing ? (
