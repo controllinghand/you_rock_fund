@@ -412,35 +412,6 @@ export default function ThisWeek() {
             </div>
           )}
 
-          {/* Summary cards — combined CSP + CC top-line (mirrors the Discord plan) */}
-          {(() => {
-            const cspCap  = screener.total_capital ?? 0
-            const cspPrem = screener.total_premium ?? 0
-            const ccCap   = screener.wheel_cc_capital ?? 0
-            const ccPrem  = screener.wheel_cc_premium ?? 0
-            const hasCC   = ccPrem > 0 || ccCap > 0
-            const capital = screener.combined_capital ?? (cspCap + ccCap)
-            const premium = screener.combined_premium ?? (cspPrem + ccPrem)
-            const yield_  = screener.combined_yield ?? 0
-            const split   = (csp, cc) => `CSP $${Math.round(csp).toLocaleString()} + CC $${Math.round(cc).toLocaleString()}`
-            const cards = [
-              { label: 'Capital Deployed', value: `$${Math.round(capital).toLocaleString()}`, sub: hasCC ? split(cspCap, ccCap) : null },
-              { label: 'Est. Premium',     value: `$${Math.round(premium).toLocaleString()}`, accent: 'text-green-400', sub: hasCC ? split(cspPrem, ccPrem) : null },
-              { label: 'Blended Yield',    value: `${yield_.toFixed(2)}%`,                     accent: 'text-blue-400',  sub: hasCC ? 'CSP + CC combined' : null },
-            ]
-            return (
-              <div className="grid grid-cols-3 gap-4">
-                {cards.map(({ label, value, accent = 'text-gray-900 dark:text-white', sub }) => (
-                  <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
-                    <div className="text-gray-500 text-xs mb-2">{label}</div>
-                    <div className={`text-2xl font-bold ${accent}`}>{value}</div>
-                    {sub && <div className="text-gray-400 dark:text-gray-600 text-[11px] mt-1">{sub}</div>}
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
-
           {/* Recovery note — CSPs already open in IBKR that a re-run skips */}
           {(screener.already_open_put_tickers ?? []).length > 0 && (
             <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl px-5 py-3 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
@@ -504,6 +475,37 @@ export default function ThisWeek() {
               <div className="text-gray-500">No positions sized — screener returned 0 qualified targets</div>
             </div>
           )}
+
+          {/* Combined CSP + CC summary — placed BELOW both the Wheel Plan and CSP
+              Targets blocks so it reads as the whole-plan grand total, not CSP-only
+              (mirrors the Discord plan layout). */}
+          {(() => {
+            const cspCap  = screener.total_capital ?? 0
+            const cspPrem = screener.total_premium ?? 0
+            const ccCap   = screener.wheel_cc_capital ?? 0
+            const ccPrem  = screener.wheel_cc_premium ?? 0
+            const hasCC   = ccPrem > 0 || ccCap > 0
+            const capital = screener.combined_capital ?? (cspCap + ccCap)
+            const premium = screener.combined_premium ?? (cspPrem + ccPrem)
+            const yield_  = screener.combined_yield ?? 0
+            const split   = (csp, cc) => `CSP $${Math.round(csp).toLocaleString()} + CC $${Math.round(cc).toLocaleString()}`
+            const cards = [
+              { label: hasCC ? 'Capital Deployed (CSP + CC)' : 'Capital Deployed', value: `$${Math.round(capital).toLocaleString()}`, sub: hasCC ? split(cspCap, ccCap) : null },
+              { label: hasCC ? 'Est. Premium (CSP + CC)'     : 'Est. Premium',     value: `$${Math.round(premium).toLocaleString()}`, accent: 'text-green-400', sub: hasCC ? split(cspPrem, ccPrem) : null },
+              { label: 'Blended Yield',    value: `${yield_.toFixed(2)}%`,                     accent: 'text-blue-400',  sub: hasCC ? 'CSP + CC combined' : null },
+            ]
+            return (
+              <div className="grid grid-cols-3 gap-4">
+                {cards.map(({ label, value, accent = 'text-gray-900 dark:text-white', sub }) => (
+                  <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
+                    <div className="text-gray-500 text-xs mb-2">{label}</div>
+                    <div className={`text-2xl font-bold ${accent}`}>{value}</div>
+                    {sub && <div className="text-gray-400 dark:text-gray-600 text-[11px] mt-1">{sub}</div>}
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
 
           <div className="bg-blue-100 dark:bg-blue-950/30 border border-blue-300 dark:border-blue-900/40 rounded-xl px-5 py-3.5 text-xs text-blue-800 dark:text-blue-300/80 leading-relaxed">
             <span className="font-semibold text-blue-900 dark:text-blue-300">Dry-run preview of Monday — no orders placed.</span>
