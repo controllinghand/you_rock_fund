@@ -267,6 +267,26 @@ def _yield_emoji(yield_pct: float) -> str:
     return "🔴"
 
 
+def wheel_plan_totals(wheel_plan: list) -> tuple:
+    """Sum the capital and premium of the newly-written covered calls in a plan.
+
+    CC capital uses each holding's cost basis (assigned_strike × shares) — the same
+    base the per-holding income % is computed against — so a combined blended yield
+    (CSP + CC) pairs each premium with the capital that actually earned it. Only
+    `cc_opened` rows count: already-covered / deferred / sold holdings contribute no
+    new premium this week, so including their capital would understate the yield.
+    Returns (cc_capital, cc_premium).
+    """
+    cc_capital = 0.0
+    cc_premium = 0.0
+    for a in wheel_plan or []:
+        if a.get("action") != "cc_opened":
+            continue
+        cc_premium += a.get("cc_premium", 0.0) or 0.0
+        cc_capital += (a.get("assigned_strike") or 0.0) * (a.get("shares", 0) or 0)
+    return round(cc_capital, 2), round(cc_premium, 2)
+
+
 def _wheel_plan_lines(wheel_plan: list) -> list:
     """Render wheel-check decisions as Discord lines, mirroring the This Week
     'Monday Wheel Plan' rows (CC opened / deferred / already-covered / sold)."""
@@ -358,13 +378,18 @@ def post_weekly_plan(positions: list, wheel_plan: list = None,
         total_capital += capital_used
         total_premium += premium_total
 
-    blended_yield = (total_premium / total_capital * 100) if total_capital else 0.0
+    # Roll the covered calls into the top-line so the summary is the whole plan
+    # (CSP + CC), not CSP-only. Pure-CSP weeks are unchanged (cc_* = 0).
+    cc_capital, _ = wheel_plan_totals(wheel_plan)
+    combined_capital = total_capital + cc_capital
+    combined_premium = total_premium + cc_premium
+    combined_yield   = (combined_premium / combined_capital * 100) if combined_capital else 0.0
     run_time = now.strftime("%I:%M %p %Z").lstrip("0")
 
     fields = [
-        {"name": "Capital Deployed", "value": f"${total_capital:,.0f}", "inline": True},
-        {"name": "Est. Premium",     "value": f"${total_premium:,.0f}", "inline": True},
-        {"name": "Blended Yield",    "value": f"{blended_yield:.2f}%",  "inline": True},
+        {"name": "Capital Deployed", "value": f"${combined_capital:,.0f}", "inline": True},
+        {"name": "Est. Premium",     "value": f"${combined_premium:,.0f}", "inline": True},
+        {"name": "Blended Yield",    "value": f"{combined_yield:.2f}%",     "inline": True},
     ]
 
     # Monday Wheel Plan — mirrors the This Week dashboard section so Discord

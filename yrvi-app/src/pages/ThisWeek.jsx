@@ -412,19 +412,34 @@ export default function ThisWeek() {
             </div>
           )}
 
-          {/* Summary cards */}
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { label: 'CSP Positions',  value: positions.length },
-              { label: 'Total Premium',  value: `$${(screener.total_premium ?? 0).toLocaleString()}`, accent: 'text-green-400' },
-              { label: 'Blended Yield',  value: `${(screener.blended_yield ?? 0).toFixed(2)}%`,      accent: 'text-blue-400' },
-            ].map(({ label, value, accent = 'text-gray-900 dark:text-white' }) => (
-              <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
-                <div className="text-gray-500 text-xs mb-2">{label}</div>
-                <div className={`text-2xl font-bold ${accent}`}>{value}</div>
+          {/* Summary cards — combined CSP + CC top-line (mirrors the Discord plan) */}
+          {(() => {
+            const cspCap  = screener.total_capital ?? 0
+            const cspPrem = screener.total_premium ?? 0
+            const ccCap   = screener.wheel_cc_capital ?? 0
+            const ccPrem  = screener.wheel_cc_premium ?? 0
+            const hasCC   = ccPrem > 0 || ccCap > 0
+            const capital = screener.combined_capital ?? (cspCap + ccCap)
+            const premium = screener.combined_premium ?? (cspPrem + ccPrem)
+            const yield_  = screener.combined_yield ?? 0
+            const split   = (csp, cc) => `CSP $${Math.round(csp).toLocaleString()} + CC $${Math.round(cc).toLocaleString()}`
+            const cards = [
+              { label: 'Capital Deployed', value: `$${Math.round(capital).toLocaleString()}`, sub: hasCC ? split(cspCap, ccCap) : null },
+              { label: 'Est. Premium',     value: `$${Math.round(premium).toLocaleString()}`, accent: 'text-green-400', sub: hasCC ? split(cspPrem, ccPrem) : null },
+              { label: 'Blended Yield',    value: `${yield_.toFixed(2)}%`,                     accent: 'text-blue-400',  sub: hasCC ? 'CSP + CC combined' : null },
+            ]
+            return (
+              <div className="grid grid-cols-3 gap-4">
+                {cards.map(({ label, value, accent = 'text-gray-900 dark:text-white', sub }) => (
+                  <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
+                    <div className="text-gray-500 text-xs mb-2">{label}</div>
+                    <div className={`text-2xl font-bold ${accent}`}>{value}</div>
+                    {sub && <div className="text-gray-400 dark:text-gray-600 text-[11px] mt-1">{sub}</div>}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )
+          })()}
 
           {/* Recovery note — CSPs already open in IBKR that a re-run skips */}
           {(screener.already_open_put_tickers ?? []).length > 0 && (

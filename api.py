@@ -2299,6 +2299,15 @@ def run_screener():
         total_premium = csp.get("total_premium", 0)
         total_capital = csp.get("total_capital", 0)
 
+        # Roll the Monday covered calls into a combined top-line (CSP + CC) so the
+        # dashboard summary is the whole plan, mirroring the Discord weekly plan.
+        from discord_poster import wheel_plan_totals
+        wheel_activity   = wheel.get("wheel_activity", [])
+        cc_capital, _    = wheel_plan_totals(wheel_activity)
+        cc_premium       = wheel.get("cc_premium", 0.0)
+        combined_capital = total_capital + cc_capital
+        combined_premium = total_premium + cc_premium
+
         # Current holdings (post-plan view comes from wheel_activity below)
         state           = load_state()
         wheel_holdings  = state.get("wheel_holdings", [])
@@ -2309,6 +2318,11 @@ def run_screener():
             "total_premium":      total_premium,
             "total_capital":      total_capital,
             "blended_yield":      round(total_premium / total_capital * 100 if total_capital else 0, 3),
+            # Combined CSP + CC top-line (what the summary cards / Discord show):
+            "combined_capital":   round(combined_capital, 2),
+            "combined_premium":   round(combined_premium, 2),
+            "combined_yield":     round(combined_premium / combined_capital * 100 if combined_capital else 0, 3),
+            "wheel_cc_capital":   cc_capital,
             "budget":               csp.get("effective_budget", 0),
             # Display top-line for the Capital Allocation waterfall. Use the real
             # net liq (account_summary[1]) — NOT account_summary[0], which is
