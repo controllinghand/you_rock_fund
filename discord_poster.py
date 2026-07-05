@@ -386,14 +386,13 @@ def post_weekly_plan(positions: list, wheel_plan: list = None,
     combined_yield   = (combined_premium / combined_capital * 100) if combined_capital else 0.0
     run_time = now.strftime("%I:%M %p %Z").lstrip("0")
 
-    fields = [
-        {"name": "Capital Deployed", "value": f"${combined_capital:,.0f}", "inline": True},
-        {"name": "Est. Premium",     "value": f"${combined_premium:,.0f}", "inline": True},
-        {"name": "Blended Yield",    "value": f"{combined_yield:.2f}%",     "inline": True},
-    ]
+    fields = []
 
-    # Monday Wheel Plan — mirrors the This Week dashboard section so Discord
-    # shows the same CC / defer / sell decisions for held positions.
+    # Monday Wheel Plan first — mirrors the This Week dashboard section (CC / defer
+    # / sell decisions). The CSP legs are already listed in the embed description
+    # above, so emitting the wheel plan here puts BOTH the CSP and CC blocks ahead
+    # of the combined summary below — which is the whole point: the summary reads
+    # as the grand total of the entire plan, not just the CSP section.
     wheel_lines = _wheel_plan_lines(wheel_plan)
     if wheel_lines:
         body = "\n".join(wheel_lines)
@@ -404,6 +403,14 @@ def post_weekly_plan(positions: list, wheel_plan: list = None,
             "value": body,
             "inline": False,
         })
+
+    # Combined CSP + CC totals — placed at the BOTTOM, under both blocks, so it's
+    # unambiguously the total of the whole plan rather than the CSP section alone.
+    fields += [
+        {"name": "Capital Deployed (CSP + CC)", "value": f"${combined_capital:,.0f}", "inline": True},
+        {"name": "Est. Premium (CSP + CC)",     "value": f"${combined_premium:,.0f}", "inline": True},
+        {"name": "Blended Yield",               "value": f"{combined_yield:.2f}%",     "inline": True},
+    ]
 
     fields.append({"name": "​", "value": "Results posted Monday after execution ✅",
                    "inline": False})
