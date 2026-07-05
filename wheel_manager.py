@@ -399,7 +399,23 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
 
     viable = [(s, d, m, iv) for s, d, m, iv in results if d >= CC_DELTA_MIN]
     if not viable:
-        log.info(f"  ❌ No call strike with delta ≥ {CC_DELTA_MIN:.2f} available")
+        # No strike reached CC_DELTA_MIN. When below-cost CCs are allowed (the
+        # DEFAULT), the scan starts near/below the money — where calls have high
+        # delta — so an empty viable set almost always means the near-money greeks
+        # never streamed in (a partial / feed-contended read), NOT a genuine
+        # no-viable-CC. Returning None here makes the caller force-SELL the holding
+        # at market — locking a real loss on bad data, which contradicts the wheel
+        # default ("never force-sell an underwater holding — write a below-cost CC").
+        # So defer and KEEP the shares. Only the explicit force-sell path
+        # (allow_below_assigned=False, scanning strikes >= cost basis that CAN be
+        # legitimately far OTM) still returns None so the caller may sell.
+        if allow_below_assigned:
+            log.warning(f"  ⚠️  {ticker}: {len(results)}/{len(q_pairs)} strikes returned "
+                        f"greeks but none ≥ {CC_DELTA_MIN:.2f} delta — incomplete read; "
+                        f"deferring and KEEPING shares (NOT selling)")
+            return CC_NO_DATA
+        log.info(f"  ❌ No call strike with delta ≥ {CC_DELTA_MIN:.2f} available "
+                 f"(force-sell path — {len(results)}/{len(q_pairs)} strikes read)")
         return None
 
     # Priority 1 — sell at cost basis: the LOWEST viable strike at or above
