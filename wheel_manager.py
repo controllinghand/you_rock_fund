@@ -35,6 +35,17 @@ MARKET_POLL_SECS = 5
 CC_DELTA_MIN     = 0.20   # minimum call delta required to sell a covered call
 MAX_CC_STRIKES   = 25     # max option strikes to evaluate per holding
 
+# Covered-call chain scan waits for option greeks to stream in. A fixed sleep
+# sometimes fired before every strike's greeks had arrived, so the picker saw a
+# PARTIAL chain and chose the wrong strike (or fell back to the $0.50 mid
+# placeholder) — producing different CC results run-to-run off identical frozen
+# data. Instead we poll until all qualified strikes have greeks (or the count
+# settles / a cap is hit), which makes the scan deterministic.
+CC_SCAN_MIN_WAIT      = 2.0   # let the first batch of greeks land before polling
+CC_SCAN_MAX_WAIT      = 12.0  # hard cap — some deep-OTM strikes never populate
+CC_SCAN_POLL_INTERVAL = 0.5   # re-check cadence
+CC_SCAN_STABLE_ROUNDS = 4     # stop once the ready-count is flat this many polls
+
 # Sentinel distinguishing "IBKR returned no greeks at all" (can't price the CC —
 # e.g. market closed during a weekend preview) from a genuine "greeks came back
 # but none reached CC_DELTA_MIN" (None). Only the latter should sell shares.
@@ -305,13 +316,44 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
         log.warning(f"  ⚠️  {ticker}: no call contracts qualified on {expiry}")
         return CC_NO_DATA
 
-    # Open all market data streams simultaneously — one sleep covers all
+    # Open all market data streams simultaneously — one poll covers all
     streams: dict[float, tuple[object, object]] = {}
     for strike, contract in q_pairs:
         data = ib.reqMktData(contract, genericTickList="", snapshot=False)
         streams[strike] = (contract, data)
 
-    ib.sleep(5)
+    # Poll until every strike's greeks have arrived (or the ready-count settles
+    # / the cap is hit), rather than a single fixed sleep that could read a
+    # partial chain. This is what makes the scan deterministic — see the
+    # CC_SCAN_* constants above.
+    def _has_greeks(data) -> bool:
+        for attr in ("modelGreeks", "lastGreeks"):
+            g = getattr(data, attr, None)
+            if g is not None:
+                d = getattr(g, "delta", None)
+                if d is not None and not _is_nan(d):
+                    return True
+        return False
+
+    total   = len(streams)
+    ready   = -1
+    stable  = 0
+    elapsed = 0.0
+    ib.sleep(CC_SCAN_MIN_WAIT)
+    elapsed += CC_SCAN_MIN_WAIT
+    while elapsed < CC_SCAN_MAX_WAIT:
+        now_ready = sum(1 for (_c, d) in streams.values() if _has_greeks(d))
+        if now_ready >= total:
+            ready = now_ready
+            break
+        stable = stable + 1 if now_ready == ready else 0
+        ready  = now_ready
+        if stable >= CC_SCAN_STABLE_ROUNDS:   # no new arrivals — data has settled
+            break
+        ib.sleep(CC_SCAN_POLL_INTERVAL)
+        elapsed += CC_SCAN_POLL_INTERVAL
+    log.info(f"  ⏱️  {ticker}: greeks ready for {ready}/{total} strike(s) "
+             f"after {elapsed:.1f}s")
 
     # Read delta, implied vol and mid from each stream, then cancel
     results: list[tuple[float, float, float | None, float | None]] = []
