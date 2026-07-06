@@ -88,8 +88,10 @@ Each module connects with a distinct client ID to allow concurrent connections:
       "current_cc_strike":  62.00,
       "current_cc_expiry":  "20260501",
       "current_cc_premium": 320.0,
+      "cc_contracts":       8,             // contracts actually covered (shares open under a short call)
+      "cc_contracts_needed": 8,            // shares // 100; when cc_contracts < needed, cc_status = "partial"
       "weeks_held":         1,
-      "cc_status":          "open",  // pending|open|failed|sold_dropped_screener|sold_stop_loss|sold_earnings_this_week|sold_no_viable_cc
+      "cc_status":          "open",  // pending|open|partial|failed|sold_dropped_screener|sold_stop_loss|sold_earnings_this_week|sold_no_viable_cc
       "current_price":      62.50,
       "last_checked":       "ISO timestamp"
     }

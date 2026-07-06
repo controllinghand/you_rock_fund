@@ -517,12 +517,13 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
         return {"ticker": ticker, "option_contracts": num_contracts, "shares": shares,
                 "strike": strike, "status": "filled", "fill_price": ref_mid,
                 "order_type": "dry_run", "premium_collected": premium,
+                "filled_contracts": num_contracts,
                 "timestamp": datetime.now().isoformat(), "dry_run": True}
 
     result = {
         "ticker": ticker, "option_contracts": num_contracts, "shares": shares,
         "strike": strike, "status": "unfilled", "fill_price": None,
-        "order_type": None, "premium_collected": 0.0,
+        "order_type": None, "premium_collected": 0.0, "filled_contracts": 0,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -537,7 +538,8 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
             log.info(f"  ✅ CC filled: {ticker} @ ${fill:.2f}")
             result.update({
                 "status": "filled", "fill_price": fill, "order_type": label,
-                "premium_collected": round(num_contracts * fill * 100, 2)
+                "premium_collected": round(num_contracts * fill * 100, 2),
+                "filled_contracts": num_contracts,
             })
             return True
         log.info(f"  ⏳ {label} unfilled — escalating...")
@@ -567,7 +569,8 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
             log.info(f"  ✅ CC market filled: {ticker} @ ${fill:.2f} in {elapsed}s")
             result.update({
                 "status": "filled", "fill_price": fill, "order_type": "market",
-                "premium_collected": round(filled * fill * 100, 2)
+                "premium_collected": round(filled * fill * 100, 2),
+                "filled_contracts": int(filled),
             })
             return result
         if status == "PartiallyFilled" and filled > 0:
@@ -581,12 +584,35 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
         log.warning(f"  ⚠️  CC partial fill accepted: {final_qty}/{num_contracts} @ ${fill:.2f}")
         result.update({
             "status": "partial_fill", "fill_price": fill, "order_type": "market",
-            "premium_collected": round(final_qty * fill * 100, 2)
+            "premium_collected": round(final_qty * fill * 100, 2),
+            "filled_contracts": int(final_qty),
         })
     else:
         log.error(f"  ❌ CC order failed for {ticker}")
         result["status"] = "failed"
     return result
+
+
+def _set_cc_coverage(h: dict, *, strike, expiry, premium, covered: int, needed: int) -> str:
+    """Record the REAL open-CC state on a holding and return the coverage status.
+
+    Coverage is tracked by contract count, not as a binary flag:
+      - "open"    when covered >= needed (fully covered)
+      - "partial" when 0 < covered < needed (shares still uncovered)
+    Storing cc_contracts / cc_contracts_needed lets the dashboard show "N/needed"
+    and keeps current_cc_* in sync with IBKR instead of going stale.
+    """
+    status = "open" if covered >= needed else "partial"
+    if strike is not None:
+        h["current_cc_strike"] = strike
+    if expiry is not None:
+        h["current_cc_expiry"] = expiry
+    if premium is not None:
+        h["current_cc_premium"] = round(premium, 2)
+    h["cc_contracts"]        = covered
+    h["cc_contracts_needed"] = needed
+    h["cc_status"]           = status
+    return status
 
 
 # ── Public API ─────────────────────────────────────────────────
@@ -635,7 +661,7 @@ def detect_assignments():
     called_away   = []
     for ticker, h in existing_holdings.items():
         cc_expiry = h.get("current_cc_expiry")
-        if (h.get("cc_status") == "open"
+        if (h.get("cc_status") in ("open", "partial")
                 and cc_expiry
                 and cc_expiry <= today_str
                 and ticker not in stock_positions):
@@ -820,6 +846,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     # Recovery reconciliation — what is ALREADY open in IBKR (so a re-run never
     # duplicates). Source of truth is the live account, not state.json.
     open_short_calls       = {}     # (symbol, expiry YYYYMMDD) -> contracts short
+    open_short_call_meta   = {}     # (symbol, expiry YYYYMMDD) -> {contracts, strike, premium}
     open_short_put_tickers = set()  # symbols with an open short put (CSP)
     tickers_with_open_call = set()  # symbols with any open short call (covered)
 
@@ -851,7 +878,16 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             if c.secType == "OPT" and pos < 0:
                 if c.right == "C":
                     key = (c.symbol, c.lastTradeDateOrContractMonth)
-                    open_short_calls[key] = open_short_calls.get(key, 0) + abs(pos)
+                    n   = abs(pos)
+                    open_short_calls[key] = open_short_calls.get(key, 0) + n
+                    # Capture strike + premium so a recovery re-run can record the
+                    # ACTUAL open CC on the holding (not leave stale current_cc_*).
+                    # IBKR option avgCost is per-contract total (price × 100).
+                    m = open_short_call_meta.setdefault(
+                        key, {"contracts": 0, "premium": 0.0, "strike": c.strike})
+                    m["contracts"] += n
+                    m["premium"]   += (p.avgCost or 0.0) * n
+                    m["strike"]     = c.strike
                 elif c.right == "P":
                     open_short_put_tickers.add(c.symbol)
         tickers_with_open_call = {sym for (sym, _exp) in open_short_calls}
@@ -941,21 +977,41 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             # and we never buy back CCs) and must NOT write a second CC. Skip the
             # whole holding before touching weeks_held so the re-run is idempotent.
             if shares > 0 and ticker in tickers_with_open_call:
-                on_this = (ticker, expiry) in open_short_calls
-                exps    = sorted({e for (s, e) in open_short_calls if s == ticker})
-                log.info(f"  ♻️  {ticker}: already covered by open CC (exp {', '.join(exps)}) "
-                         f"— leaving as-is (recovery-safe)")
-                h["cc_status"]    = "open"
+                exps     = sorted({e for (s, e) in open_short_calls if s == ticker})
+                needed   = shares // 100
+                covered  = sum(v for (s, e), v in open_short_calls.items() if s == ticker)
+                # Record the ACTUAL open CC on the holding (fixes stale current_cc_*):
+                # prefer this week's target expiry, else the expiry with the most
+                # contracts. Premium = sum of collected premium across the ticker's
+                # open calls (IBKR avgCost is per-contract total).
+                metas = {e: open_short_call_meta.get((ticker, e), {}) for e in exps}
+                rec_expiry = expiry if (ticker, expiry) in open_short_calls else (
+                    max(metas, key=lambda e: metas[e].get("contracts", 0)) if metas else None)
+                rec = metas.get(rec_expiry, {})
+                rec_premium = sum(m.get("premium", 0.0) for m in metas.values())
+                status = _set_cc_coverage(
+                    h, strike=rec.get("strike"), expiry=rec_expiry,
+                    premium=rec_premium, covered=covered, needed=needed)
                 h["last_checked"] = datetime.now().isoformat()
+                if status == "open":
+                    log.info(f"  ♻️  {ticker}: already covered by open CC "
+                             f"({covered}/{needed}, exp {', '.join(exps)}) — leaving as-is (recovery-safe)")
+                    action = "cc_already_open"
+                else:
+                    log.warning(f"  ⚠️  {ticker}: only {covered}/{needed} contracts covered "
+                                f"({needed - covered} short, exp {', '.join(exps)}) — "
+                                f"leaving as-is (recovery-safe); top up the shortfall manually")
+                    action = "cc_partial"
                 wheel_activity.append({
                     "ticker":    ticker,
-                    "action":    "cc_already_open" if on_this else "held_covered",
-                    "cc_expiry": expiry if on_this else (exps[0] if exps else None),
-                    "contracts": open_short_calls.get((ticker, expiry)),
+                    "action":    action,
+                    "cc_expiry": rec_expiry,
+                    "contracts": covered,
+                    "needed":    needed,
                 })
-                _progress(ticker=ticker, stage="already covered",
-                          result={"ticker": ticker,
-                                  "status": "cc_already_open" if on_this else "held_covered"})
+                _progress(ticker=ticker, stage=f"covered {covered}/{needed}",
+                          result={"ticker": ticker, "status": action,
+                                  "contracts": covered, "needed": needed})
                 continue
 
             weeks_held      = h.get("weeks_held", 0) + 1
@@ -1192,26 +1248,37 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
 
             if order_result["status"] in ("filled", "partial_fill"):
                 prem = order_result["premium_collected"]
+                needed = shares // 100
+                filled = int(order_result.get("filled_contracts") or needed)
                 cc_premium             += prem
-                h["current_cc_strike"]  = cc_strike
-                h["current_cc_expiry"]  = expiry
-                h["current_cc_premium"] = prem
-                h["cc_status"]          = "open"
+                # Record real coverage: a partial fill leaves shares uncovered, so
+                # mark "partial" (not "open") and store the true filled count.
+                status = _set_cc_coverage(
+                    h, strike=cc_strike, expiry=expiry, premium=prem,
+                    covered=filled, needed=needed)
+                partial = status == "partial"
                 wheel_activity.append({
                     "ticker":          ticker,
-                    "action":          "cc_opened",
+                    "action":          "cc_partial" if partial else "cc_opened",
                     "cc_strike":       cc_strike,
                     "cc_delta":        round(cc_delta, 3),
                     "cc_premium":      prem,
                     "cc_expiry":       expiry,
+                    "contracts":       filled,
+                    "needed":          needed,
                     "below_assigned":  below_assigned,
                     "assigned_strike": round(assigned_strike, 2) if assigned_strike else None,
                     "shares":          shares,
                 })
-                _progress(ticker=ticker, stage="CC filled",
-                          result={"ticker": ticker, "status": "cc_opened",
+                _progress(ticker=ticker, stage=f"CC {'partial ' if partial else ''}filled {filled}/{needed}",
+                          result={"ticker": ticker,
+                                  "status": "cc_partial" if partial else "cc_opened",
                                   "cc_strike": cc_strike, "cc_premium": prem,
+                                  "contracts": filled, "needed": needed,
                                   "cc_delta": round(cc_delta, 3), "cc_expiry": expiry})
+                if partial:
+                    log.warning(f"  ⚠️  {ticker}: CC partial fill {filled}/{needed} — "
+                                f"{needed - filled} contracts still uncovered")
                 log.info(f"  💰 CC premium: ${prem:,.0f}")
                 # Capture execution metadata for dashboard enrichment
                 fill_price = order_result.get("fill_price")
@@ -1231,7 +1298,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             "iv_at_entry":          round(cc_iv, 4) if cc_iv is not None else None,
                             "buffer_pct_at_entry":  buffer_pct,
                             "premium_per_contract": fill_price,
-                            "contracts":            shares // 100,
+                            "contracts":            filled,
                             "total_premium":        prem,
                         })
                         log.info(f"  📝 trade_log.json: {ticker} CC recorded")
