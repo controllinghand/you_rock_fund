@@ -593,6 +593,29 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
     return result
 
 
+def _get_option_mid(ib: IB, ticker: str, expiry: str, strike: float):
+    """Quote a single known call strike (used to price a coverage top-up at the
+    SAME strike as the existing open CC). Returns (qualified_contract, mid) — mid
+    is None if no live bid/ask (e.g. market closed); the caller falls back to the
+    existing position's average fill price."""
+    opt = Option(ticker, expiry, strike, "C", "SMART", currency="USD")
+    try:
+        q = ib.qualifyContracts(opt)
+    except Exception as e:
+        log.warning(f"  ⚠️  {ticker}: cannot qualify top-up call ${strike:.2f} {expiry}: {e}")
+        return None, None
+    if not q:
+        return None, None
+    data = ib.reqMktData(q[0], genericTickList="", snapshot=False)
+    ib.sleep(2)
+    bid, ask = data.bid, data.ask
+    mid = round((bid + ask) / 2, 2) \
+          if (not _is_nan(bid) and not _is_nan(ask) and bid > 0 and ask > 0) else None
+    ib.cancelMktData(q[0])
+    ib.sleep(0.3)
+    return q[0], mid
+
+
 def _set_cc_coverage(h: dict, *, strike, expiry, premium, covered: int, needed: int) -> str:
     """Record the REAL open-CC state on a holding and return the coverage status.
 
@@ -833,6 +856,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     retention_market_cap_min  = _s.get("wheel_retention_market_cap_min", 5_000_000_000)
     stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", False)
     stop_loss_pct             = _s.get("stop_loss_pct", 0.10)
+    # Default ON: when a holding is only partially covered, write the shortfall so
+    # every owned share carries a covered call (topped up at the existing CC's
+    # strike/expiry). Turn off to leave partial holdings as-is.
+    cover_all_shares          = _s.get("wheel_cover_all_shares", True)
     # Tickers the user excluded from the wheel — never adopt, never CC, never sell.
     excluded                  = {t.strip().upper() for t in _s.get("excluded_tickers", []) if t and t.strip()}
 
@@ -993,15 +1020,74 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     h, strike=rec.get("strike"), expiry=rec_expiry,
                     premium=rec_premium, covered=covered, needed=needed)
                 h["last_checked"] = datetime.now().isoformat()
+                topup_strike = rec.get("strike")
                 if status == "open":
                     log.info(f"  ♻️  {ticker}: already covered by open CC "
                              f"({covered}/{needed}, exp {', '.join(exps)}) — leaving as-is (recovery-safe)")
                     action = "cc_already_open"
                 else:
-                    log.warning(f"  ⚠️  {ticker}: only {covered}/{needed} contracts covered "
-                                f"({needed - covered} short, exp {', '.join(exps)}) — "
-                                f"leaving as-is (recovery-safe); top up the shortfall manually")
-                    action = "cc_partial"
+                    # Partially covered. Default ON: write the shortfall at the
+                    # EXISTING strike/expiry so it stays one uniform position
+                    # (Phase 1 — no schema change). Never sell covered shares.
+                    shortfall = needed - covered
+                    dropped   = bool(candidate_info) and ticker not in candidate_info
+                    if not cover_all_shares:
+                        log.warning(f"  ⚠️  {ticker}: only {covered}/{needed} covered "
+                                    f"({shortfall} short) — wheel_cover_all_shares off, leaving as-is")
+                        action = "cc_partial"
+                    elif dropped:
+                        log.warning(f"  ⚠️  {ticker}: {covered}/{needed} covered but dropped from "
+                                    f"screener — not topping up (slated for exit)")
+                        action = "cc_partial"
+                    elif not (topup_strike and rec_expiry):
+                        log.warning(f"  ⚠️  {ticker}: {covered}/{needed} covered — cannot resolve "
+                                    f"existing strike/expiry, leaving as-is")
+                        action = "cc_partial"
+                    else:
+                        log.info(f"  ➕ {ticker}: {covered}/{needed} covered — writing {shortfall} "
+                                 f"more @ ${topup_strike:.2f} {rec_expiry} (cover-all)")
+                        _progress(ticker=ticker, stage=f"covering shortfall {shortfall}x ${topup_strike:.0f}")
+                        contract, mid = _get_option_mid(ib, ticker, rec_expiry, topup_strike)
+                        avg_fill = (rec_premium / covered / 100) if covered else 0.0
+                        ref_mid  = mid if mid else (round(avg_fill, 2) or 0.50)
+                        if not contract:
+                            log.warning(f"  ⚠️  {ticker}: could not qualify top-up strike — "
+                                        f"leaving {covered}/{needed}")
+                            action = "cc_partial"
+                        else:
+                            order_result = _sell_cc_with_escalation(
+                                ib, contract, shortfall * 100, ticker,
+                                topup_strike, ref_mid, dry_run=dry_run)
+                            if order_result["status"] in ("filled", "partial_fill"):
+                                filled   = int(order_result.get("filled_contracts") or 0)
+                                add_prem = order_result["premium_collected"]
+                                cc_premium += add_prem
+                                covered   = covered + filled
+                                new_stat  = _set_cc_coverage(
+                                    h, strike=topup_strike, expiry=rec_expiry,
+                                    premium=rec_premium + add_prem, covered=covered, needed=needed)
+                                log.info(f"  ➕ {ticker}: topped up {filled}/{shortfall} @ "
+                                         f"${topup_strike:.2f} — now {covered}/{needed} ({new_stat}); "
+                                         f"premium +${add_prem:,.0f}")
+                                action = "cc_topped_up" if new_stat == "open" else "cc_partial"
+                                if not dry_run and filled > 0:
+                                    try:
+                                        _append_trade_log({
+                                            "symbol":               ticker,
+                                            "expiry":               rec_expiry,
+                                            "strike":               float(topup_strike),
+                                            "right":                "C",
+                                            "entry_date":           datetime.now().isoformat(),
+                                            "premium_per_contract": order_result.get("fill_price"),
+                                            "contracts":            filled,
+                                            "total_premium":        add_prem,
+                                        })
+                                    except Exception as tl_err:
+                                        log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
+                            else:
+                                log.warning(f"  ⚠️  {ticker}: top-up order failed — "
+                                            f"leaving {covered}/{needed}")
+                                action = "cc_partial"
                 wheel_activity.append({
                     "ticker":    ticker,
                     "action":    action,
