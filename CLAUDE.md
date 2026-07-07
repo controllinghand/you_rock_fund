@@ -161,7 +161,10 @@ Step B — run_csp_pipeline(context=wheel_check_result):
 
 All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Limit @ mid (120s) → limit @ bid proxy (120s) → market with 60s polling loop
-- Partial fills accepted and logged
+- Each leg orders only the still-unfilled REMAINDER and accumulates prior legs' fills
+  (incl. a cancelled limit leg's partial), so the market leg can never re-send the full
+  quantity — no over-sell / naked position. Partial fills are recorded honestly (true
+  filled count + gross premium `fill × 100`), never dropped.
 
 ### Key Rules
 

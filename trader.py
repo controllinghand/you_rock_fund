@@ -432,7 +432,37 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             "fill_price": mkt["mid"],
             "order_type": "limit_mid",
             "premium_collected": round(contracts * mkt["mid"] * 100, 2),
+            "filled_contracts": contracts,
             "exec_timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        return result
+
+    # Cumulative fill accounting across escalation legs, so each leg orders only
+    # the still-unfilled remainder and no partial fill is lost — prevents the
+    # market leg from re-sending the full quantity (over-sell) — #72.
+    filled_total  = 0
+    premium_total = 0.0
+
+    def _remaining() -> int:
+        return contracts - filled_total
+
+    def _record_leg(trade, label: str) -> None:
+        nonlocal filled_total, premium_total
+        leg_filled = int(trade.orderStatus.filled or 0)
+        if leg_filled > 0:
+            fill = trade.orderStatus.avgFillPrice or 0.0
+            premium_total += leg_filled * fill * 100
+            filled_total  += leg_filled
+            log.info(f"  ✅ {label}: filled {leg_filled}x {ticker} PUT @ ${fill:.2f} "
+                     f"({filled_total}/{contracts} total)")
+
+    def _finalize(status: str) -> dict:
+        avg = round(premium_total / filled_total / 100, 2) if filled_total else None
+        result.update({
+            "status": status, "fill_price": avg, "order_type": "escalation",
+            "premium_collected": round(premium_total, 2),
+            "filled_contracts": filled_total,
+            "exec_timestamp": datetime.now(timezone.utc).isoformat(),
         })
         return result
 
@@ -453,8 +483,11 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         return False
 
     def try_limit(price: float, label: str, wait: int) -> bool:
-        log.info(f"  📤 {label}: SELL {contracts}x {ticker} PUT @ ${price:.2f}")
-        order = LimitOrder("SELL", contracts, price, account=ACCOUNT, tif="DAY")
+        qty = _remaining()
+        if qty < 1:
+            return True
+        log.info(f"  📤 {label}: SELL {qty}x {ticker} PUT @ ${price:.2f}")
+        order = LimitOrder("SELL", qty, price, account=ACCOUNT, tif="DAY")
         trade = ib.placeOrder(contract, order)
         # Quick early-exit: IBKR permission rejections (Error 201) appear within seconds
         ib.sleep(3)
@@ -463,20 +496,13 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             result["status"] = "failed_permissions"
             return False
         ib.sleep(wait - 3)
-        if trade.orderStatus.status == "Filled":
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ Filled {ticker} @ ${fill:.2f}")
-            result.update({
-                "status": "filled", "fill_price": fill,
-                "order_type": label,
-                "premium_collected": round(contracts * fill * 100, 2),
-                "exec_timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return True
-        log.info(f"  ⏳ {label} unfilled — escalating...")
-        ib.cancelOrder(trade.order)
-        ib.sleep(1)
-        return False
+        if trade.orderStatus.status != "Filled":
+            # Not fully filled — cancel the remainder, then record whatever DID fill.
+            log.info(f"  ⏳ {label} not fully filled — cancelling remainder, escalating...")
+            ib.cancelOrder(trade.order)
+            ib.sleep(1)
+        _record_leg(trade, label)
+        return _remaining() < 1
 
     def try_limit_fok(price: float, label: str) -> bool:
         """FOK limit attempt — fills the full quantity at the limit price or cancels.
@@ -522,66 +548,48 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         return result
 
     if not mkt.get("use_bid_as_limit"):
-        if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return result
+        if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return _finalize("filled")
         if result.get("status") in ("failed_permissions", "failed_funds"): return result
-    if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return result
+    if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return _finalize("filled")
     if result.get("status") in ("failed_permissions", "failed_funds"): return result
 
-    # Market order with polling loop — options can partially fill across multiple exchanges
-    log.info(f"  📤 Market order: SELL {contracts}x {ticker} PUT")
-    order = MarketOrder("SELL", contracts, account=ACCOUNT, tif="DAY")
-    trade = ib.placeOrder(contract, order)
+    # Market order for the REMAINING contracts only (never the full quantity) so a
+    # partial fill on a cancelled limit leg can't lead to an over-sell — #72.
+    qty = _remaining()
+    if qty >= 1:
+        log.info(f"  📤 Market order: SELL {qty}x {ticker} PUT")
+        trade = ib.placeOrder(contract, MarketOrder("SELL", qty, account=ACCOUNT, tif="DAY"))
+        elapsed = 0
+        while elapsed < MARKET_WAIT_SECS:
+            ib.sleep(MARKET_POLL_SECS)
+            elapsed += MARKET_POLL_SECS
+            status      = trade.orderStatus.status
+            filled_qty  = trade.orderStatus.filled
+            remaining   = trade.orderStatus.remaining
+            if status == "Filled" or (remaining == 0 and filled_qty > 0):
+                break
+            if _is_permission_error(trade):
+                log.error(f"  ❌ {ticker} — IBKR rejected: no options trading permissions (Error 201)")
+                _record_leg(trade, "market")
+                result["status"] = "failed_permissions"
+                return result
+            if result.get("status") == "failed_funds":
+                _record_leg(trade, "market")
+                return result
+            if status == "PartiallyFilled" and filled_qty > 0:
+                log.info(f"  ⏳ Partial: {int(filled_qty)}/{qty} filled after {elapsed}s — waiting...")
+            else:
+                log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
+        _record_leg(trade, "market")
 
-    elapsed = 0
-    while elapsed < MARKET_WAIT_SECS:
-        ib.sleep(MARKET_POLL_SECS)
-        elapsed += MARKET_POLL_SECS
-        status      = trade.orderStatus.status
-        filled_qty  = trade.orderStatus.filled
-        remaining   = trade.orderStatus.remaining
-
-        if status == "Filled" or (remaining == 0 and filled_qty > 0):
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ Market order filled {ticker} @ ${fill:.2f} "
-                     f"({filled_qty} contracts in {elapsed}s)")
-            result.update({
-                "status": "filled",
-                "fill_price": fill,
-                "order_type": "market",
-                "premium_collected": round(filled_qty * fill * 100, 2),
-                "exec_timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return result
-
-        if _is_permission_error(trade):
-            log.error(f"  ❌ {ticker} — IBKR rejected: no options trading permissions (Error 201)")
-            result["status"] = "failed_permissions"
-            return result
-        if result.get("status") == "failed_funds":
-            return result
-
-        if status == "PartiallyFilled" and filled_qty > 0:
-            log.info(f"  ⏳ Partial: {filled_qty}/{contracts} filled after {elapsed}s — waiting...")
-        else:
-            log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
-
-    # Accept whatever partial fill arrived before timeout
-    final_qty = trade.orderStatus.filled
-    if final_qty > 0:
-        fill = trade.orderStatus.avgFillPrice
-        log.warning(f"  ⚠️  Partial fill accepted: {final_qty}/{contracts} @ ${fill:.2f}")
-        result.update({
-            "status": "partial_fill",
-            "fill_price": fill,
-            "order_type": "market",
-            "premium_collected": round(final_qty * fill * 100, 2),
-            "exec_timestamp": datetime.now(timezone.utc).isoformat()
-        })
-    else:
-        log.error(f"  ❌ Could not fill {ticker} — manual review needed")
-        result["status"] = "failed"
-
-    return result
+    if filled_total >= contracts:
+        return _finalize("filled")
+    if filled_total > 0:
+        log.warning(f"  ⚠️  {ticker}: partial CSP fill {filled_total}/{contracts} "
+                    f"across legs — accepted")
+        return _finalize("partial_fill")
+    log.error(f"  ❌ Could not fill {ticker} — manual review needed")
+    return _finalize("failed")
 
 
 def execute_positions(sized_positions: list, extra_targets: list = None,

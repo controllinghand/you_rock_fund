@@ -82,6 +82,27 @@ def _append_trade_log(record: dict) -> None:
         json.dump(entries, f, indent=2)
 
 
+def _logged_cc_premium(symbol: str, expiry: str, strike: float):
+    """Gross premium (commission-free: price × 100 × contracts) recorded for an
+    open short call in trade_log.json, or None if not logged. Preferred over IBKR
+    `avgCost`, which bakes in commissions — #73."""
+    try:
+        with open(TRADE_LOG_JSON) as f:
+            entries = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    for e in entries:
+        try:
+            if (e.get("symbol") == symbol and str(e.get("expiry")) == str(expiry)
+                    and e.get("right") == "C"
+                    and abs(float(e.get("strike", -1)) - float(strike)) < 1e-6):
+                p = e.get("total_premium")
+                return float(p) if p is not None else None
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _load_state() -> dict:
     try:
         with open(STATE_FILE) as f:
@@ -503,11 +524,23 @@ def _sell_stock_market(ib: IB, ticker: str, shares: int, reason: str,
 
 def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
                               strike: float, ref_mid: float, dry_run: bool = False) -> dict:
+    """Sell `shares // 100` covered-call contracts via limit-mid → limit-bid →
+    market escalation.
+
+    Every leg orders ONLY the still-unfilled remainder and accumulates whatever
+    filled on prior legs (including a cancelled limit leg's partial fill), so:
+      • the market leg can never re-send the full quantity → no over-sell / naked
+        call (was #72 Bug B),
+      • partial fills are never dropped from the books (was #72 Bug A).
+    `premium_collected` is gross (Σ leg_filled × leg_fill × 100); `fill_price` is
+    the share-weighted average across legs; `filled_contracts` is the true total.
+    """
     num_contracts = shares // 100
     if num_contracts < 1:
         log.warning(f"  ⚠️  {ticker}: {shares} shares < 100 — cannot sell CC")
-        return {"status": "skipped_insufficient_shares", "premium_collected": 0.0,
-                "fill_price": None, "order_type": None}
+        return {"ticker": ticker, "status": "skipped_insufficient_shares",
+                "premium_collected": 0.0, "fill_price": None, "order_type": None,
+                "filled_contracts": 0}
 
     if dry_run:
         # Preview only: simulate a fill at the mid price. No order placed.
@@ -520,77 +553,77 @@ def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
                 "filled_contracts": num_contracts,
                 "timestamp": datetime.now().isoformat(), "dry_run": True}
 
-    result = {
-        "ticker": ticker, "option_contracts": num_contracts, "shares": shares,
-        "strike": strike, "status": "unfilled", "fill_price": None,
-        "order_type": None, "premium_collected": 0.0, "filled_contracts": 0,
-        "timestamp": datetime.now().isoformat()
-    }
+    filled_total  = 0      # contracts filled across all legs
+    premium_total = 0.0    # gross premium collected across all legs
+
+    def remaining() -> int:
+        return num_contracts - filled_total
+
+    def _record_leg(trade, label: str) -> None:
+        """Fold whatever filled on this leg (partial or full) into the totals."""
+        nonlocal filled_total, premium_total
+        leg_filled = int(trade.orderStatus.filled or 0)
+        if leg_filled > 0:
+            fill = trade.orderStatus.avgFillPrice or 0.0
+            premium_total += leg_filled * fill * 100
+            filled_total  += leg_filled
+            log.info(f"  ✅ {label}: filled {leg_filled}x {ticker} CALL ${strike:.2f} "
+                     f"@ ${fill:.2f}  ({filled_total}/{num_contracts} total)")
+
+    def _result(status: str) -> dict:
+        avg_fill = round(premium_total / filled_total / 100, 2) if filled_total else None
+        return {"ticker": ticker, "option_contracts": num_contracts, "shares": shares,
+                "strike": strike, "status": status, "fill_price": avg_fill,
+                "order_type": "escalation", "premium_collected": round(premium_total, 2),
+                "filled_contracts": filled_total, "timestamp": datetime.now().isoformat()}
 
     def try_limit(price: float, label: str, wait: int) -> bool:
-        log.info(f"  📤 {label}: SELL {num_contracts}x {ticker} CALL "
-                 f"${strike:.2f} @ ${price:.2f}")
-        order = LimitOrder("SELL", num_contracts, price, account=ACCOUNT, tif="DAY")
+        qty = remaining()
+        if qty < 1:
+            return True
+        log.info(f"  📤 {label}: SELL {qty}x {ticker} CALL ${strike:.2f} @ ${price:.2f}")
+        order = LimitOrder("SELL", qty, price, account=ACCOUNT, tif="DAY")
         trade = ib.placeOrder(contract, order)
         ib.sleep(wait)
-        if trade.orderStatus.status == "Filled":
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ CC filled: {ticker} @ ${fill:.2f}")
-            result.update({
-                "status": "filled", "fill_price": fill, "order_type": label,
-                "premium_collected": round(num_contracts * fill * 100, 2),
-                "filled_contracts": num_contracts,
-            })
-            return True
-        log.info(f"  ⏳ {label} unfilled — escalating...")
-        ib.cancelOrder(trade.order)
-        ib.sleep(1)
-        return False
+        if trade.orderStatus.status != "Filled":
+            # Not fully filled — cancel the remainder, then record whatever DID
+            # fill (a cancelled limit can still have a partial fill).
+            log.info(f"  ⏳ {label} not fully filled — cancelling remainder, escalating...")
+            ib.cancelOrder(trade.order)
+            ib.sleep(1)
+        _record_leg(trade, label)
+        return remaining() < 1
 
     if try_limit(ref_mid, "limit_mid", MID_WAIT_SECS):
-        return result
-    bid_proxy = round(ref_mid * 0.90, 2)
-    if try_limit(bid_proxy, "limit_bid", BID_WAIT_SECS):
-        return result
+        return _result("filled")
+    if try_limit(round(ref_mid * 0.90, 2), "limit_bid", BID_WAIT_SECS):
+        return _result("filled")
 
-    log.info(f"  📤 Market order: SELL {num_contracts}x {ticker} CALL ${strike:.2f}")
-    order = MarketOrder("SELL", num_contracts, account=ACCOUNT, tif="DAY")
-    trade = ib.placeOrder(contract, order)
+    # Market order for the REMAINING contracts only (never the full quantity).
+    qty = remaining()
+    if qty >= 1:
+        log.info(f"  📤 Market order: SELL {qty}x {ticker} CALL ${strike:.2f}")
+        trade = ib.placeOrder(contract, MarketOrder("SELL", qty, account=ACCOUNT, tif="DAY"))
+        elapsed = 0
+        while elapsed < MARKET_WAIT_SECS:
+            ib.sleep(MARKET_POLL_SECS)
+            elapsed += MARKET_POLL_SECS
+            st  = trade.orderStatus.status
+            rem = trade.orderStatus.remaining
+            fl  = trade.orderStatus.filled
+            if st == "Filled" or (rem == 0 and fl > 0):
+                break
+            log.info(f"  ⏳ market {st}: {int(fl or 0)}/{qty} after {elapsed}s")
+        _record_leg(trade, "market")
 
-    elapsed = 0
-    while elapsed < MARKET_WAIT_SECS:
-        ib.sleep(MARKET_POLL_SECS)
-        elapsed += MARKET_POLL_SECS
-        status    = trade.orderStatus.status
-        remaining = trade.orderStatus.remaining
-        filled    = trade.orderStatus.filled
-        if status == "Filled" or (remaining == 0 and filled > 0):
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ CC market filled: {ticker} @ ${fill:.2f} in {elapsed}s")
-            result.update({
-                "status": "filled", "fill_price": fill, "order_type": "market",
-                "premium_collected": round(filled * fill * 100, 2),
-                "filled_contracts": int(filled),
-            })
-            return result
-        if status == "PartiallyFilled" and filled > 0:
-            log.info(f"  ⏳ Partial CC: {filled}/{num_contracts} after {elapsed}s")
-        else:
-            log.info(f"  ⏳ CC market status: {status} after {elapsed}s")
-
-    final_qty = trade.orderStatus.filled
-    if final_qty > 0:
-        fill = trade.orderStatus.avgFillPrice
-        log.warning(f"  ⚠️  CC partial fill accepted: {final_qty}/{num_contracts} @ ${fill:.2f}")
-        result.update({
-            "status": "partial_fill", "fill_price": fill, "order_type": "market",
-            "premium_collected": round(final_qty * fill * 100, 2),
-            "filled_contracts": int(final_qty),
-        })
-    else:
-        log.error(f"  ❌ CC order failed for {ticker}")
-        result["status"] = "failed"
-    return result
+    if filled_total >= num_contracts:
+        return _result("filled")
+    if filled_total > 0:
+        log.warning(f"  ⚠️  {ticker}: partial CC fill {filled_total}/{num_contracts} "
+                    f"across legs — {remaining()} contracts uncovered")
+        return _result("partial_fill")
+    log.error(f"  ❌ CC order failed for {ticker} (0 of {num_contracts} filled)")
+    return _result("failed")
 
 
 def _set_cc_coverage(h: dict, *, strike, expiry, premium, covered: int, needed: int) -> str:
@@ -890,6 +923,11 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     m["strike"]     = c.strike
                 elif c.right == "P":
                     open_short_put_tickers.add(c.symbol)
+        # Prefer commission-free gross premium from trade_log over IBKR avgCost
+        # (which includes commissions) for the recorded current_cc_premium — #73.
+        for (sym, exp), m in open_short_call_meta.items():
+            gross = _logged_cc_premium(sym, exp, m.get("strike"))
+            m["premium"] = gross if gross is not None else round(m["premium"], 2)
         tickers_with_open_call = {sym for (sym, _exp) in open_short_calls}
         if open_short_calls or open_short_put_tickers:
             calls_str = ", ".join(f"{k[0]} {k[1]}×{v}" for k, v in open_short_calls.items()) or "none"

@@ -18,7 +18,7 @@ plan so the dashboard can show exactly what Monday will do.
 """
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from config import (
@@ -29,6 +29,7 @@ from config import (
 log = logging.getLogger(__name__)
 PST = ZoneInfo("America/Los_Angeles")
 STATE_FILE = "state.json"
+TRADE_LOG_FILE = "trade_log.json"
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -41,6 +42,37 @@ def _load_state() -> dict:
         return {}
 
 
+def _week_premium_from_trade_log(week_monday: str):
+    """(csp_premium, cc_premium) gross, summed from trade_log.json for the week
+    (Mon..Sun of `week_monday`), split by right (P→CSP, C→CC). Durable source of
+    truth so a pipeline RE-RUN can't overwrite the week's real premium with 0 —
+    the accumulator-only path zeroed it on any recovery/Run-Now re-run (#71).
+    Returns (None, None) if the log can't be read/parsed."""
+    try:
+        with open(TRADE_LOG_FILE) as f:
+            entries = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None, None
+    try:
+        wk_start = date.fromisoformat(week_monday)
+    except (TypeError, ValueError):
+        return None, None
+    wk_end = wk_start + timedelta(days=6)
+    csp = cc = 0.0
+    for e in entries:
+        try:
+            ed = date.fromisoformat(str(e.get("entry_date", ""))[:10])
+        except (TypeError, ValueError):
+            continue
+        if wk_start <= ed <= wk_end:
+            prem = e.get("total_premium") or 0.0
+            if e.get("right") == "P":
+                csp += prem
+            elif e.get("right") == "C":
+                cc += prem
+    return round(csp, 2), round(cc, 2)
+
+
 def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
                       net_liq: float = None) -> float:
     """Assemble weekly_pnl from CSP premium + wheel-check context, persist it, and
@@ -48,14 +80,27 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
     'no remaining CSP slots' code paths so P&L is consistent either way."""
     cc_premium      = context.get("cc_premium", 0.0)
     shares_sold_pnl = context.get("shares_sold_pnl", 0.0)
-    total_realized  = round(csp_premium + cc_premium + shares_sold_pnl, 2)
 
     now   = datetime.now(PST)
     # Key the week by its Monday — same convention as reconciler._week_monday —
     # so an off-Monday run (holiday, misfire recovery, manual Run Now) overwrites
     # rather than spawning a second ytd_tracker row the Flex merge then preserves.
     week_monday = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+
+    # Prefer the durable trade_log for premium so a RE-RUN (Run Now / recovery /
+    # off-Monday) — where nothing new is collected — can't zero the week (#71).
+    tl_csp, tl_cc = _week_premium_from_trade_log(week_monday)
+    if tl_csp is not None:
+        csp_premium, cc_premium = tl_csp, tl_cc
+
     state = _load_state()
+    prev  = state.get("weekly_pnl", {})
+    # Likewise don't let a re-run with no new share sales zero a realized stock
+    # P&L already recorded for this same week.
+    if not shares_sold_pnl and prev.get("week_start") == week_monday:
+        shares_sold_pnl = prev.get("shares_sold_pnl", 0.0)
+
+    total_realized  = round(csp_premium + cc_premium + shares_sold_pnl, 2)
     state["weekly_pnl"] = {
         "week_start":      week_monday,
         "csp_premium":     round(csp_premium, 2),
