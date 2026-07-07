@@ -1531,12 +1531,18 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         "open_short_put_tickers": sorted(open_short_put_tickers),
         "updated":                datetime.now().isoformat()
     }
-    if not dry_run:
+    # Gate on orders_dry_run (not the pipeline dry_run). When Settings "Dry Run"
+    # is ON during an otherwise-live run, CC orders are only SIMULATED, so the
+    # simulated _set_cc_coverage mutations must NOT be persisted — otherwise
+    # state.json records phantom coverage the broker doesn't actually have, and
+    # later runs skip the name as already covered (#85). A dry run of either kind
+    # is now fully non-mutating on persisted state.
+    if not orders_dry_run:
         state["wheel_holdings"] = holdings
         state["monday_context"] = monday_context
         _save_state(state)
     else:
-        log.info("  🟡 [DRY RUN] state.json NOT written — preview only")
+        log.info("  🟡 [DRY RUN] state.json NOT written — simulated run")
 
     exits   = [a for a in wheel_activity if "sold" in a["action"]]
     ccs     = [a for a in wheel_activity if a["action"] == "cc_opened"]
