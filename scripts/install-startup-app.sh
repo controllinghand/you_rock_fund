@@ -21,7 +21,9 @@
 set -euo pipefail
 
 APP="/Applications/YRVI Startup.app"
-PROJ="$HOME/you_rock_fund"
+# Honor YRVI_PROJ (setup_docker.sh passes its own $PROJ) so this works even if
+# the repo isn't at ~/you_rock_fund.
+PROJ="${YRVI_PROJ:-$HOME/you_rock_fund}"
 ICON_SRC="$PROJ/assets/YRVI.icns"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -29,10 +31,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # ── 1. The bundle executable: launch the headless launcher, detached ──
 # nohup + background + fd redirection so the launcher survives this process
 # exiting (the app quits immediately, no Dock bouncing, no Terminal).
-cat > "$APP/Contents/MacOS/yrvi_startup" <<'EXEC'
+# Bake the resolved project path in (unquoted heredoc → $PROJ expands now) so the
+# app finds the launcher regardless of $HOME quirks or repo location.
+cat > "$APP/Contents/MacOS/yrvi_startup" <<EXEC
 #!/bin/bash
 # YRVI Startup — runs the headless launcher in the background (no Terminal).
-nohup /bin/bash "$HOME/you_rock_fund/scripts/yrvi-launch.sh" </dev/null >/dev/null 2>&1 &
+export YRVI_PROJ="$PROJ"
+nohup /bin/bash "$PROJ/scripts/yrvi-launch.sh" </dev/null >/dev/null 2>&1 &
 EXEC
 chmod +x "$APP/Contents/MacOS/yrvi_startup"
 

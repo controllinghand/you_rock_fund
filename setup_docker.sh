@@ -347,23 +347,29 @@ echo "────────────────────────�
 
 if [ "$OS" = "Darwin" ]; then
     APP_DEST="/Applications/YRVI Startup.app"
+    NEW_INSTALL=false
+    [ -e "$APP_DEST" ] || NEW_INSTALL=true
 
-    if [ -e "$APP_DEST" ]; then
-        ok "YRVI Startup app already installed — skipping"
+    # Install/update the app UNCONDITIONALLY (idempotent) so it self-heals to the
+    # current headless launcher on every login — the LaunchAgent runs this script
+    # at login, so an upgrade that pulled a newer app definition takes effect on
+    # the next login with no Terminal and no manual step. (The OLD behavior skipped
+    # when the app already existed, which is why boxes were stuck on the legacy
+    # Terminal-opening app.)
+    if YRVI_PROJ="$PROJ" bash "$PROJ/scripts/install-startup-app.sh" >/dev/null 2>&1; then
+        ok "YRVI Startup app up to date (headless)"
     else
-        cp -R "$PROJ/assets/app_template/" "$APP_DEST"
-        mkdir -p "$APP_DEST/Contents/Resources"
-        cp "$PROJ/assets/YRVI.icns" "$APP_DEST/Contents/Resources/YRVI.icns"
-        sed -i '' "s|__PROJ__|$PROJ|g" "$APP_DEST/Contents/MacOS/yrvi_startup"
-        chmod +x "$APP_DEST/Contents/MacOS/yrvi_startup"
-        xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
+        warn "YRVI Startup app refresh skipped (non-fatal)"
+    fi
+
+    # Add to the Dock only on first install — re-adding every login would pile up
+    # duplicate Dock tiles.
+    if $NEW_INSTALL; then
         defaults write com.apple.dock persistent-apps -array-add \
             "<dict><key>tile-data</key><dict><key>file-data</key><dict>\
 <key>_CFURLString</key><string>/Applications/YRVI Startup.app</string>\
 <key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
         killall Dock 2>/dev/null || true
-
-        ok "YRVI Startup app installed"
     fi
 
     # Register yrvi:// URL scheme (idempotent — skips if already registered)
