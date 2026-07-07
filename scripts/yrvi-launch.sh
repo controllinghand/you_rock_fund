@@ -80,16 +80,23 @@ if ! docker info >/dev/null 2>&1; then
     # fails to launch the real /Applications/Docker.app and the daemon never
     # comes up. The full path is unambiguous and matches the -d check above.
     if [ -d "/Applications/Docker.app" ]; then
-        open -a "/Applications/Docker.app"
+        DOCKER_APP="/Applications/Docker.app"
     elif [ -d "/Applications/Rancher Desktop.app" ]; then
-        open -a "/Applications/Rancher Desktop.app"
+        DOCKER_APP="/Applications/Rancher Desktop.app"
     else
         fail "Docker Desktop is not installed. Install it from docker.com, then try again."
     fi
+    open -a "$DOCKER_APP"
     notify "Starting up" "Waiting for Docker to come online…"
-    # Wait up to ~120s for the daemon to accept commands.
-    for _ in $(seq 1 60); do
+    # Wait up to ~120s for the daemon to accept commands, RE-ISSUING the open
+    # every ~12s while it's still down. A single open can silently no-op if it
+    # lands while Docker Desktop is still mid-shutdown (the operator quit it and
+    # immediately launched YRVI) — macOS sees the app as "running" and skips the
+    # relaunch, so without the retry the launcher just waits out the full timeout
+    # and fails. Re-opening an already-starting app is a harmless focus no-op.
+    for i in $(seq 1 60); do
         docker info >/dev/null 2>&1 && break
+        [ $((i % 6)) -eq 0 ] && open -a "$DOCKER_APP" >/dev/null 2>&1 || true
         sleep 2
     done
     docker info >/dev/null 2>&1 || \
