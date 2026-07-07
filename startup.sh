@@ -213,7 +213,10 @@ if   [ "$FAIL" -eq 0 ] && [ "$WARN" -eq 0 ]; then
     echo ""
     printf "  ${BOLD}${BLUE}🌐  YRVI Dashboard: http://localhost:3000${NC}\n"
     echo ""
-    if [ "$(uname -s)" = "Darwin" ]; then
+    if [ "${YRVI_NO_OPEN:-}" = "1" ]; then
+        :   # invoked by the desktop launcher — it opens the browser itself, so
+            # skip here to avoid opening a duplicate tab.
+    elif [ "$(uname -s)" = "Darwin" ]; then
         open http://localhost:3000
     else
         echo "  Open http://localhost:3000"

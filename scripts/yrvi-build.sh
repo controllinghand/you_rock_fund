@@ -479,7 +479,12 @@ else
     else
         # For a single container: inspect health directly (same logic as yrvi-restart.sh)
         while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
+            # Null-safe: containers without a HEALTHCHECK (web, ib_gateway) have a
+            # nil .State.Health. Accessing .State.Health.Status directly makes the Go
+            # template error on newer Docker, which used to fall through to the 60s
+            # timeout. The {{if .State.Health}} guard yields an empty string instead,
+            # which the "no healthcheck" branch below treats as running=success.
+            HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
             STATUS=$(docker inspect --format='{{.State.Status}}'        "$CONTAINER_ID" 2>/dev/null || echo "error")
 
             if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then

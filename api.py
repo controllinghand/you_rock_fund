@@ -77,6 +77,18 @@ ALERTS_FILE = (
     Path("/data/alerts.json") if CONTAINERIZED
     else BASE_DIR / "alerts.json"
 )
+# "Pause Trading" marker (System Control, option A). When present, the operator has
+# intentionally stopped the IB Gateway + scheduler from the dashboard — so the
+# watchdog must NOT try to restart the gateway or page about the gateway/scheduler
+# being down (that's the expected paused state, not an outage). File-backed so it
+# survives an api restart. Cleared by "Resume Trading" and by a full Restart All.
+TRADING_PAUSED_FILE = (
+    Path("/data/trading_paused") if CONTAINERIZED
+    else BASE_DIR / "trading_paused"
+)
+
+def _trading_paused() -> bool:
+    return TRADING_PAUSED_FILE.exists()
 ALERTS_MAX = 200
 _alerts_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
@@ -526,6 +538,25 @@ def _watchdog_check() -> None:
 
     # ── IB Gateway port reachability ─────────────────────────────
     gw_up = _gateway_running(port)
+
+    # ── Trading intentionally paused (System Control → Pause Trading) ──
+    # The gateway + scheduler are down on purpose. Do NOT auto-restart or page —
+    # that would fight the operator and spam Discord. Reset the down-timers so
+    # resuming later doesn't fire a bogus "recovered after N min" message.
+    # Self-correcting: if the gateway is actually UP, the marker is stale (e.g. a
+    # Restart All or a cold start brought everything back) — clear it and resume
+    # normal supervision rather than staying silent forever.
+    if _trading_paused():
+        if not gw_up:
+            for k in ("gateway_down_since", "last_gateway_alert", "gateway_full_restart_at",
+                      "ibkr_down_since", "last_ibkr_alert", "ibkr_soft_restart_at",
+                      "ibkr_full_restart_at", "scheduler_down_since", "last_scheduler_alert"):
+                _watchdog_state[k] = None
+            return
+        try:
+            TRADING_PAUSED_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
     if not gw_up:
         if _watchdog_state["gateway_down_since"] is None:
             _watchdog_state["gateway_down_since"] = now
@@ -1339,6 +1370,25 @@ class FeedbackRequest(BaseModel):
     message: str
 
 
+# Option A — "Pause Trading": stop only the trading engine (gateway +
+# scheduler). api + web + secrets stay up so the dashboard remains reachable
+# and can resume trading from the browser.
+TRADING_CONTAINERS = [
+    "ib_gateway",
+    "yrvi-scheduler-1",
+]
+
+# Option B — "Restart All": bounce every container. api is last so the HTTP
+# response returns (and the other containers finish restarting) before this
+# container restarts itself.
+RESTART_ALL_CONTAINERS = [
+    "yrvi-secrets-1",
+    "ib_gateway",
+    "yrvi-scheduler-1",
+    "yrvi-web-1",
+    "yrvi-api-1",
+]
+
 # Stop order: api is last so the HTTP response can return before this
 # container kills itself.
 SHUTDOWN_CONTAINERS = [
@@ -1371,6 +1421,83 @@ def shutdown_stack(body: ShutdownRequest):
 
     threading.Thread(target=do_shutdown, daemon=True).start()
     return {"success": True, "message": "Shutdown initiated"}
+
+
+@app.post("/api/trading/stop")
+def trading_stop():
+    """Option A — Pause Trading: stop the IB Gateway + scheduler only.
+    api/web/secrets keep running so the dashboard stays reachable and can
+    resume from the browser. No confirmation token: fully reversible in-app."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    # Set the pause marker BEFORE stopping, so the watchdog never sees the
+    # gateway drop as an outage (even if it polls mid-stop).
+    try:
+        TRADING_PAUSED_FILE.write_text(datetime.now(PST).isoformat())
+    except Exception:
+        pass
+
+    stopped, failed = [], []
+    for name in TRADING_CONTAINERS:
+        try:
+            r = subprocess.run(["docker", "stop", name],
+                               capture_output=True, text=True, timeout=40)
+            (stopped if r.returncode == 0 else failed).append(name)
+        except Exception:
+            failed.append(name)
+    return {"success": not failed, "stopped": stopped, "failed": failed,
+            "message": "Trading paused — Gateway and scheduler stopped"
+                       if not failed else f"Some containers failed to stop: {failed}"}
+
+
+@app.post("/api/trading/start")
+def trading_start():
+    """Resume trading — start the IB Gateway + scheduler back up.
+    On live, the Gateway restart triggers an IB Key 2FA push."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    # Clear the pause marker so the watchdog resumes normal gateway/scheduler
+    # supervision once they're back up.
+    try:
+        TRADING_PAUSED_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    started, failed = [], []
+    for name in TRADING_CONTAINERS:
+        try:
+            r = subprocess.run(["docker", "start", name],
+                               capture_output=True, text=True, timeout=40)
+            (started if r.returncode == 0 else failed).append(name)
+        except Exception:
+            failed.append(name)
+    return {"success": not failed, "started": started, "failed": failed,
+            "message": "Trading resumed — Gateway and scheduler starting"
+                       if not failed else f"Some containers failed to start: {failed}"}
+
+
+@app.post("/api/restart-all")
+def restart_all():
+    """Option B — Restart All: bounce every container (a clean reboot without
+    a rebuild). api restarts itself last, so the response returns and the other
+    containers finish restarting first; the dashboard reconnects in ~30–60s."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    def do_restart():
+        time.sleep(1)  # let the HTTP response flush before we start bouncing
+        for name in RESTART_ALL_CONTAINERS:
+            try:
+                subprocess.run(["docker", "restart", name],
+                               capture_output=True, text=True, timeout=60)
+            except Exception:
+                # best-effort — keep going so api (last) still restarts
+                pass
+
+    threading.Thread(target=do_restart, daemon=True).start()
+    return {"success": True, "message": "Restart initiated"}
 
 
 _IBKR_EMPTY: dict = {
@@ -2110,6 +2237,7 @@ def get_status():
         "execution_time":       settings.get("execution_time", "10:00"),
         "wheel_count":          wheel_count,
         "gateway_login_status": _gateway_login_status,
+        "trading_paused":       _trading_paused(),
         **_weekly_token_status(),
     }
 
@@ -2331,6 +2459,8 @@ def run_screener():
             "total_budget":         (account_summary[1] if account_summary else initial_fund_budget),
             "initial_fund_budget":  initial_fund_budget,
             "compound_enabled":     csp.get("compound_enabled", compound_enabled),
+            "cash_account":         csp.get("cash_account", False),
+            "buying_power":         csp.get("buying_power"),
             "reserved_capital":     wheel.get("reserved_capital", 0.0),
             "active_wheel_count":   wheel.get("active_wheel_count", 0),
             "wheel_holdings":       wheel_holdings,
@@ -2372,6 +2502,7 @@ class SettingsUpdate(BaseModel):
     stop_loss_pct:                     Optional[float] = None
     excluded_tickers:                  Optional[list[str]] = None
     compound_enabled:                  Optional[bool]  = None
+    cash_account:                      Optional[bool]  = None
     max_spread_pct:           Optional[float] = None
     min_bid_yield_pct:        Optional[float] = None
     max_spread_hard_cap:      Optional[float] = None

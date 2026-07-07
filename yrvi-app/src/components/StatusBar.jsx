@@ -282,7 +282,12 @@ export default function StatusBar() {
   // Gateway needs recovery (raw signal). Split into two UI states by how long it's
   // been down: within the grace window it's probably just logging in → show a calm
   // "connecting…" hint; past the grace window it's likely wedged → offer the button.
-  const gwUnhealthy = gatewayNeedsRecovery(status)
+  // Operator intentionally paused trading (System Control → Pause Trading). The
+  // gateway + scheduler are down ON PURPOSE, so suppress the "connecting…" hint and
+  // the wedged-gateway recovery button — this is expected, not an outage.
+  const paused = status?.trading_paused === true
+
+  const gwUnhealthy = gatewayNeedsRecovery(status) && !paused
   const gwDownMs    = gwUnhealthy && ibkrDownSince ? Date.now() - ibkrDownSince : 0
   const gwConnecting  = gwUnhealthy && gwDownMs <  RESTART_BTN_GRACE_MS
   const gwShowRestart = gwUnhealthy && gwDownMs >= RESTART_BTN_GRACE_MS
@@ -309,14 +314,21 @@ export default function StatusBar() {
       <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-6 gap-6 shrink-0">
         {/* Status pills */}
         <div className="flex items-center gap-4">
-          <Indicator
-            ok={status?.gateway_running && status?.gateway_login_status !== 'failed' && status?.gateway_login_status !== 'locked'}
-            label={
-              status?.gateway_login_status === 'locked' ? 'Gateway · locked out' :
-              status?.gateway_login_status === 'failed' ? 'Gateway · login failed' :
-              'Gateway'
-            }
-          />
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you (Settings → System Control). The gateway is stopped on purpose — Resume Trading to bring it back.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">Gateway · paused</span>
+            </div>
+          ) : (
+            <Indicator
+              ok={status?.gateway_running && status?.gateway_login_status !== 'failed' && status?.gateway_login_status !== 'locked'}
+              label={
+                status?.gateway_login_status === 'locked' ? 'Gateway · locked out' :
+                status?.gateway_login_status === 'failed' ? 'Gateway · login failed' :
+                'Gateway'
+              }
+            />
+          )}
 
           {/* Logging in — probably just a normal restart/reconnect; let it resolve */}
           {gwConnecting && !gwRestarting && (
@@ -346,19 +358,33 @@ export default function StatusBar() {
             </span>
           )}
 
-          {/* Scheduler with PID-change flash */}
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
-              pidFlash                         ? 'bg-green-300 shadow-[0_0_6px_2px_rgba(74,222,128,0.6)]' :
-              status?.scheduler_pid != null    ? 'bg-green-400' : 'bg-red-500'
-            }`} />
-            <span className={`text-xs transition-colors duration-500 ${
-              pidFlash                         ? 'text-green-400 font-semibold' :
-              status?.scheduler_pid != null    ? 'text-gray-700 dark:text-gray-300' : 'text-red-400'
-            }`}>Scheduler</span>
-          </div>
+          {/* Scheduler with PID-change flash (or a paused state when trading is paused) */}
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you — the scheduler is stopped on purpose.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">Scheduler · paused</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
+                pidFlash                         ? 'bg-green-300 shadow-[0_0_6px_2px_rgba(74,222,128,0.6)]' :
+                status?.scheduler_pid != null    ? 'bg-green-400' : 'bg-red-500'
+              }`} />
+              <span className={`text-xs transition-colors duration-500 ${
+                pidFlash                         ? 'text-green-400 font-semibold' :
+                status?.scheduler_pid != null    ? 'text-gray-700 dark:text-gray-300' : 'text-red-400'
+              }`}>Scheduler</span>
+            </div>
+          )}
 
-          <Indicator ok={status?.ibkr_connected} label="IBKR" />
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you — no IBKR connection while the gateway is stopped.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">IBKR · paused</span>
+            </div>
+          ) : (
+            <Indicator ok={status?.ibkr_connected} label="IBKR" />
+          )}
 
           {/* Version pill — click to check for updates */}
           {versionInfo && (

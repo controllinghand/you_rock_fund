@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
-import { Save, AlertTriangle, CheckCircle, Send, Sun, Moon, Monitor, RefreshCw, Power, RotateCcw, Upload, Download, RotateCw, ExternalLink, KeyRound } from 'lucide-react'
+import { Save, AlertTriangle, CheckCircle, Send, Sun, Moon, Monitor, RefreshCw, Power, RotateCcw, Upload, Download, RotateCw, ExternalLink, KeyRound, Pause, Play } from 'lucide-react'
 import { useThemeContext } from '../ThemeProvider.jsx'
 
 // Earliest allowed execution is 07:00 PST. The wheel check runs 5 min before
@@ -200,6 +200,11 @@ export default function SettingsPage() {
   const [showShutdownModal, setShowShutdownModal] = useState(false)
   const [shuttingDown, setShuttingDown]           = useState(false)
   const [systemOffline, setSystemOffline]         = useState(false)
+  // System Control — Pause/Resume trading (A) + Restart All (B)
+  const [pausing, setPausing]                     = useState(false)
+  const [pauseResult, setPauseResult]             = useState(null)
+  const [showRestartAllModal, setShowRestartAllModal] = useState(false)
+  const [restartingAll, setRestartingAll]         = useState(false)
 
   // Reconciler
   const [reconXml, setReconXml]               = useState('')
@@ -312,6 +317,62 @@ export default function SettingsPage() {
       }
     }
     setTimeout(checkOffline, 2000)
+  }
+
+  // Whether the operator has intentionally paused trading (System Control marker,
+  // surfaced by /api/status). Drives the Pause ↔ Resume toggle. Distinct from a
+  // real gateway outage — a genuine outage leaves trading_paused false so the
+  // watchdog (not this button) handles recovery.
+  const tradingPaused = tokenStatus?.trading_paused === true
+
+  // Option A — pause / resume trading. api + web stay up, so this page never
+  // goes offline; we just flip the button and surface the result inline.
+  const toggleTrading = async () => {
+    const resuming = tradingPaused
+    setPausing(true)
+    setPauseResult(null)
+    try {
+      const res = await axios.post(resuming ? '/api/trading/start' : '/api/trading/stop')
+      setPauseResult({ ok: res.data.success, text: res.data.message })
+      // Refresh status so the Pause ↔ Resume button flips immediately rather
+      // than waiting for the 20s status poll.
+      axios.get('/api/status', { timeout: 4000 }).then(r => setTokenStatus(r.data)).catch(() => {})
+    } catch (err) {
+      setPauseResult({ ok: false, text: err.response?.data?.detail ?? 'Action failed — check logs' })
+    } finally {
+      setPausing(false)
+    }
+  }
+
+  // Option B — restart every container (clean reboot, no rebuild). api restarts
+  // itself last, so we bounce to the offline overlay and poll until it's back.
+  const confirmRestartAll = async () => {
+    setRestartingAll(true)
+    setShowRestartAllModal(false)
+    try {
+      await axios.post('/api/restart-all')
+    } catch (err) {
+      const status = err?.response?.status
+      if (status === 501) {
+        showMsg('error', err.response?.data?.detail ?? 'Restart rejected')
+        setRestartingAll(false)
+        return
+      }
+      // api killing itself mid-request looks like a network error — expected.
+    }
+    // Wait for the API to drop, then come back, then reload the app fresh.
+    let sawDown = false
+    const poll = async () => {
+      try {
+        await axios.get('/api/status', { timeout: 2000 })
+        if (sawDown) { window.location.reload(); return }
+        setTimeout(poll, 1500)
+      } catch {
+        sawDown = true
+        setTimeout(poll, 1500)
+      }
+    }
+    setTimeout(poll, 2500)
   }
 
   const saveTimezone = async () => {
@@ -468,7 +529,7 @@ export default function SettingsPage() {
     earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
     wheel_retention_market_cap_min: 5000000000,
     wheel_sell_when_cc_below_assigned: false,
-    wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true,
+    wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
     min_oi_notional: 1000000, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
@@ -599,6 +660,21 @@ export default function SettingsPage() {
             </p>
           )}
         </div>
+        {settings.compound_enabled !== false && (
+          <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+            <Toggle
+              label="Cash Account (no margin)"
+              sub="Deploy IBKR Buying Power directly as the CSP budget. Only enable on a true cash account — Buying Power is real settled cash and already excludes capital tied up in wheel stock, so reserved capital is not subtracted again."
+              checked={settings.cash_account === true}
+              onChange={v => set('cash_account', v)}
+            />
+            {settings.cash_account === true && (
+              <p className="mt-2 text-xs text-amber-500 dark:text-amber-400">
+                Reserved wheel capital is NOT subtracted from the budget in this mode. Do not enable on a margin account — you'd deploy leverage.
+              </p>
+            )}
+          </div>
+        )}
         <SliderRow label="# Positions"  value={settings.num_positions}    min={1}      max={10}                  format={v => `${v} positions`}           onChange={v => set('num_positions', v)} />
         <SliderRow label="Min Position" value={settings.min_position_size} min={5000}  max={100000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('min_position_size', v)} />
         <SliderRow label="Max Position" value={settings.max_position_size} min={10000} max={200000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('max_position_size', v)} />
@@ -1070,19 +1146,73 @@ export default function SettingsPage() {
         )}
       </Section>
 
-      {/* Shutdown */}
-      <Section title="Shutdown" emoji="⛔">
-        <div className="space-y-3">
-          <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
-            Stop all YRVI containers (scheduler, web, IB Gateway, secrets, api). The api shuts itself down last — this page will become unreachable.
+      {/* System Control */}
+      <Section title="System Control" emoji="⛔">
+        <div className="space-y-4">
+
+          {/* A — Pause / Resume Trading */}
+          <div className="flex items-start justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white flex items-center gap-2">
+                {tradingPaused
+                  ? <><span className="h-2 w-2 rounded-full bg-yellow-400 inline-block" /> Trading is paused</>
+                  : <><span className="h-2 w-2 rounded-full bg-green-500 inline-block" /> Trading is active</>}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                Stops just the IB Gateway + scheduler. The dashboard stays up, so you can resume right here — no desktop icon needed.
+              </div>
+              {pauseResult && (
+                <div className={`mt-1.5 text-xs font-medium ${pauseResult.ok ? 'text-green-500' : 'text-red-400'}`}>
+                  {pauseResult.ok ? '✅' : '❌'} {pauseResult.text}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={toggleTrading}
+              disabled={pausing}
+              className={`flex items-center gap-2 px-4 py-2 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-60 ${
+                tradingPaused ? 'bg-green-600 hover:bg-green-500' : 'bg-yellow-600 hover:bg-yellow-500'}`}
+            >
+              {tradingPaused ? <Play size={14} /> : <Pause size={14} />}
+              {pausing ? 'Working…' : (tradingPaused ? 'Resume Trading' : 'Pause Trading')}
+            </button>
           </div>
-          <button
-            onClick={() => setShowShutdownModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            <Power size={14} />
-            Shut Down YRVI
-          </button>
+
+          {/* B — Restart All */}
+          <div className="flex items-start justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Restart all containers</div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                A clean reboot of every container (no update/rebuild). This page will briefly disconnect and reload automatically (~30–60s).
+              </div>
+            </div>
+            <button
+              onClick={() => setShowRestartAllModal(true)}
+              disabled={restartingAll}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-60"
+            >
+              <RotateCw size={14} className={restartingAll ? 'animate-spin' : ''} />
+              Restart All
+            </button>
+          </div>
+
+          {/* C — Full Shutdown */}
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Full shutdown</div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                Stops <span className="font-medium">everything</span>, including this dashboard. To bring it back, use the YRVI icon on the desktop.
+              </div>
+            </div>
+            <button
+              onClick={() => setShowShutdownModal(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              <Power size={14} />
+              Shut Down
+            </button>
+          </div>
+
         </div>
       </Section>
 
@@ -1471,6 +1601,50 @@ export default function SettingsPage() {
               <p className="text-gray-500 text-sm">Stopping all containers</p>
             </>
           )}
+        </div>
+      )}
+
+      {/* Restart-All overlay — covers page while all containers bounce, then reloads */}
+      {restartingAll && (
+        <div className="fixed inset-0 bg-black/90 flex flex-col items-center justify-center z-[100]">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mb-5" />
+          <h2 className="text-white text-xl font-semibold mb-1">Restarting YRVI…</h2>
+          <p className="text-gray-500 text-sm">Bouncing all containers — this page will reload when it's back (~30–60s)</p>
+        </div>
+      )}
+
+      {/* Restart-All Modal */}
+      {showRestartAllModal && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+          onClick={e => e.target === e.currentTarget && !restartingAll && setShowRestartAllModal(false)}
+        >
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <RotateCw size={22} className="text-blue-400" />
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Restart all containers</h3>
+            </div>
+            <p className="text-gray-600 dark:text-gray-300 text-sm mb-5">
+              This bounces every container (a clean reboot — no update). The dashboard will disconnect briefly and reload itself when it's back.
+              {tokenStatus?.trading_mode === 'live' && ' On live, the Gateway restart will trigger an IB Key approval on your phone.'}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRestartAllModal(false)}
+                disabled={restartingAll}
+                className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRestartAll}
+                disabled={restartingAll}
+                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-60 disabled:cursor-wait"
+              >
+                {restartingAll ? 'Restarting…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
