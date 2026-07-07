@@ -280,10 +280,14 @@ def verify_and_adjust_strike(
     return result
 
 
-def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
+def get_market_data(ib: IB, contract, screener_premium: float,
+                    dry_run: bool = False) -> dict | None:
     """
     Request delayed market data (type 3 — no subscription needed).
     Falls back to screener premium if market is closed.
+
+    dry_run: caller passes the effective Dry Run state so a closed-market
+    simulation only happens when we're actually simulating orders.
     """
     ticker = ib.reqMktData(contract, genericTickList="101", snapshot=False)
     ib.sleep(10)
@@ -299,7 +303,7 @@ def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
     # Market is closed or no delayed data available
     if is_nan(bid) or is_nan(ask) or bid <= 0 or ask <= 0:
         log.warning(f"  ⏰ No market data for {contract.symbol} — market likely closed")
-        if DRY_RUN:
+        if dry_run:
             simulated_bid       = round(screener_premium * 0.90, 2)
             simulated_ask       = round(screener_premium * 1.10, 2)
             simulated_mid       = screener_premium
@@ -414,7 +418,8 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
 
 
 def place_order_with_escalation(ib: IB, contract, contracts: int,
-                                 mkt: dict, ticker: str) -> dict:
+                                 mkt: dict, ticker: str,
+                                 dry_run: bool = False) -> dict:
     result = {
         "ticker": ticker, "contracts": contracts,
         "status": "unfilled", "fill_price": None,
@@ -423,7 +428,7 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    if DRY_RUN:
+    if dry_run:
         tag = " (simulated data)" if mkt.get("simulated") else " (live data)"
         log.info(f"  🧪 DRY RUN{tag} — would sell {contracts}x {ticker} "
                  f"put @ mid ${mkt['mid']:.2f}")
@@ -593,7 +598,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
 
 
 def execute_positions(sized_positions: list, extra_targets: list = None,
-                      target_fills: int = None, status_callback=None) -> list:
+                      target_fills: int = None, status_callback=None,
+                      dry_run: bool = None) -> list:
     """
     Execute up to target_fills fills (defaults to NUM_POSITIONS). If a candidate
     fails qualification, market data, or liquidity, the next-ranked screener target
@@ -602,14 +608,21 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
     extra_targets: full ranked screener list (raw dicts from screener).
     target_fills: how many CSP fills to seek (caller reduces by active wheel count).
+    dry_run: simulate orders instead of placing them. Defaults to None → read the
+      Dry Run toggle FRESH from settings.json at call time. The module-level DRY_RUN
+      is only an import-time snapshot and goes stale in the long-lived scheduler
+      after a UI toggle (it kept simulating fills while Settings said OFF — the
+      Trade History "Dry Run" mismatch). Read live, like check_liquidity does for its
+      thresholds. Callers may pass an explicit bool to force it (e.g. /api/test-run).
     """
     from position_sizer import size_position
 
     _target = target_fills if target_fills is not None else NUM_POSITIONS
+    dry_run = get_settings().get("dry_run", DRY_RUN) if dry_run is None else dry_run
 
     log.info("\n" + "=" * 65)
     log.info(f"🚀 YOU ROCK VOLATILITY INCOME FUND — Execution Start")
-    log.info(f"   Mode: {'🧪 DRY RUN' if DRY_RUN else '🔴 LIVE'}")
+    log.info(f"   Mode: {'🧪 DRY RUN' if dry_run else '🔴 LIVE'}")
     log.info(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log.info(f"   Primary candidates: {len(sized_positions)}  |  "
              f"Fallback pool: {len(extra_targets or [])}  |  "
@@ -719,7 +732,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
 
             _status(ticker=ticker, stage="fetching market data")
-            mkt = get_market_data(ib, contract, screener_premium=premium)
+            mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
             if not mkt:
                 log.info(f"  🔄 {ticker} — no market data, trying next candidate")
                 results.append({"ticker": ticker, "status": "failed_market_data"})
@@ -734,7 +747,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 continue
 
             _status(ticker=ticker, stage="placing order — limit mid")
-            result = place_order_with_escalation(ib, contract, contracts, mkt, ticker)
+            result = place_order_with_escalation(ib, contract, contracts, mkt, ticker, dry_run=dry_run)
         except Exception as e:
             log.error(f"  ❌ {ticker} — IBKR error: {e}")
             results.append({"ticker": ticker, "status": "failed"})

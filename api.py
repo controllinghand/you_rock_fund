@@ -3144,7 +3144,7 @@ def manual_run():
 @app.post("/api/test-run")
 def test_run():
     """Trigger a DRY RUN of the CSP pipeline — no real orders placed. For testing status UI."""
-    import threading, os
+    import threading
 
     if _run_status["executing"]:
         raise HTTPException(status_code=409, detail="A run is already in progress")
@@ -3153,8 +3153,6 @@ def test_run():
         _run_status.update({"executing": True, "started_at": datetime.now().isoformat(),
                             "result": None, "error": None, "ticker_results": [],
                             "current_ticker": None, "current_stage": None})
-        # Temporarily force DRY_RUN on
-        os.environ["DRY_RUN"] = "true"
         try:
             import importlib, sys
             for mod in ["config", "screener", "position_sizer", "trader"]:
@@ -3177,7 +3175,11 @@ def test_run():
                 _run_status["current_stage"]  = stage
                 _run_status["ticker_results"] = list(_ticker_results)
 
-            execute_positions(positions, extra_targets=all_targets, status_callback=_progress)
+            # Force dry_run explicitly — this endpoint always simulates, regardless
+            # of the Settings toggle. (The old os.environ["DRY_RUN"] dance was dead
+            # code: execute_positions reads the toggle from settings.json, not env.)
+            execute_positions(positions, extra_targets=all_targets,
+                              status_callback=_progress, dry_run=True)
             _run_status["current_ticker"] = None
             _run_status["current_stage"]  = None
 
@@ -3188,8 +3190,6 @@ def test_run():
             import logging
             logging.getLogger(__name__).error(f"Test run failed: {e}", exc_info=True)
             _run_status.update({"executing": False, "error": str(e), "result": None})
-        finally:
-            os.environ.pop("DRY_RUN", None)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"success": True, "message": "Dry run started — no real orders will be placed"}
