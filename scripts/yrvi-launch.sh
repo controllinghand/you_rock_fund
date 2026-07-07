@@ -49,6 +49,18 @@ echo "===== $(date '+%Y-%m-%d %H:%M:%S')  yrvi-launch start ====="
 
 notify "Starting up" "Launching the trading system… (about a minute)"
 
+# ── Open the progress splash in the browser RIGHT NOW ─────────
+# Headless launch = no terminal, and Notification Center banners auto-dismiss,
+# so without this the operator stares at nothing for 1–2 min. The splash shows a
+# live spinner + checklist + elapsed timer and, once the API answers, redirects
+# itself to the dashboard (:3000). It owns that redirect, so we do NOT open the
+# dashboard again at the end — that avoids a duplicate tab.
+SPLASH="$PROJ/assets/startup-splash.html"
+SPLASH_SHOWN=false
+if [ -f "$SPLASH" ]; then
+    open "file://$SPLASH" >/dev/null 2>&1 && SPLASH_SHOWN=true
+fi
+
 # ── 1. Ensure the Docker engine is running ────────────────────
 if ! docker info >/dev/null 2>&1; then
     echo "Docker engine not running — launching it…"
@@ -89,10 +101,14 @@ for _ in $(seq 1 24); do
 done
 
 if [ "$API_UP" = true ]; then
-    # startup.sh already opened the dashboard; open again is a harmless no-op
-    # focus in case it didn't (e.g. it hit a NO-GO branch but the API is fine).
-    open "http://localhost:3000" >/dev/null 2>&1 || true
-    notify "Ready" "Dashboard is up — opening it in your browser."
+    # The splash page redirects itself to the dashboard once the API answers, so
+    # we don't open :3000 here (that would spawn a second tab). If the splash
+    # never showed (missing file, or a headless box with no default browser),
+    # fall back to opening the dashboard directly.
+    if [ "$SPLASH_SHOWN" != true ]; then
+        open "http://localhost:3000" >/dev/null 2>&1 || true
+    fi
+    notify "Ready" "Dashboard is ready at http://localhost:3000"
     echo "===== ready ====="
 else
     fail "The dashboard did not come up within ~2 minutes. Open Docker Desktop to check the containers, then start YRVI again."
