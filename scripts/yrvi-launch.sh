@@ -47,6 +47,34 @@ echo "===== $(date '+%Y-%m-%d %H:%M:%S')  yrvi-launch start ====="
 
 [ -d "$PROJ" ] || fail "Project folder not found at $PROJ"
 
+# ── Single-instance guard ─────────────────────────────────────
+# A double-click — or an impatient re-click while nothing yet looks like it's
+# happening — would otherwise spawn a second launcher that races the first:
+# interleaved logs, setup_docker.sh lock contention, and a scary transient
+# NO-GO. Take an atomic mkdir lock. If another launch is already in flight, just
+# bring its splash forward and exit instead of starting a duplicate run.
+SPLASH="$PROJ/assets/startup-splash.html"
+LOCKDIR="${TMPDIR:-/tmp}/yrvi-launch.lock"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+    # Lost the race for the lock. Give the winner a beat to record its PID
+    # (it writes the pid file immediately after mkdir), then decide.
+    sleep 1
+    OTHER_PID=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
+    if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
+        echo "Another launch (pid $OTHER_PID) is already in progress — not starting a duplicate."
+        notify "Already starting" "YRVI is already starting up — see your browser."
+        [ -f "$SPLASH" ] && open "file://$SPLASH" >/dev/null 2>&1 || \
+            open "http://localhost:3000" >/dev/null 2>&1 || true
+        exit 0
+    fi
+    # Lock is stale (previous launcher died without cleanup) — reclaim it.
+    echo "Reclaiming stale launch lock (owner pid ${OTHER_PID:-unknown} not running)."
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR" 2>/dev/null || true
+fi
+echo "$$" > "$LOCKDIR/pid"
+trap 'rm -rf "$LOCKDIR"' EXIT
+
 notify "Starting up" "Launching the trading system… (about a minute)"
 
 # ── Open the progress splash in the browser RIGHT NOW ─────────
@@ -65,7 +93,6 @@ notify "Starting up" "Launching the trading system… (about a minute)"
 # operator case) gives a single clean tab. To minimize it on a given box, set
 # the browser's "On startup → Open the New Tab page" and macOS "Close windows
 # when quitting an application".
-SPLASH="$PROJ/assets/startup-splash.html"
 SPLASH_SHOWN=false
 if [ -f "$SPLASH" ]; then
     open "file://$SPLASH" >/dev/null 2>&1 && SPLASH_SHOWN=true
