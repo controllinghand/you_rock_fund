@@ -208,6 +208,16 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     cash_account     = settings.get("cash_account", False)
     num_positions    = settings.get("num_positions", NUM_POSITIONS)
     fund_budget      = settings.get("fund_budget", TOTAL_FUND_BUDGET)
+    # Default DENY (#82): don't open a NEW CSP on a stock we already hold shares of
+    # — that would create a second tranche at a different strike. Turn on to allow
+    # adding to an existing position.
+    allow_add        = settings.get("wheel_allow_add_to_position", False)
+    if not allow_add:
+        held = [t for t in context.get("held_tickers", []) if t not in skip_tickers]
+        if held:
+            log.info(f"  🚫 One-position-per-ticker (wheel_allow_add_to_position off) — "
+                     f"not opening new CSPs on already-held: {held}")
+        skip_tickers |= set(context.get("held_tickers", []))
 
     # Remaining CSP slots = total − wheel holdings − already-open CSPs
     target_fills = max(0, num_positions - active_wheel_count - open_csp_count)

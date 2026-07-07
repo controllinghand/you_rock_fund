@@ -10,6 +10,7 @@
   "wheel_retention_market_cap_min": 5000000000,
   "wheel_sell_when_cc_below_assigned": false,
   "wheel_cover_all_shares": true,
+  "wheel_allow_add_to_position": false,
   "wheel_stop_loss_enabled": false,
   "stop_loss_pct": 0.10,
   "excluded_tickers": [],

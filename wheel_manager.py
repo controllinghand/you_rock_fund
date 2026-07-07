@@ -1465,6 +1465,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         for h in holdings if h.get("shares", 0) > 0
     ), 2)
     active_wheel_count = sum(1 for h in holdings if h.get("shares", 0) > 0)
+    # Tickers we already hold shares of — so the CSP pipeline can optionally avoid
+    # opening a SECOND position (a new tranche) on the same name (#82).
+    held_tickers       = sorted({h["ticker"] for h in holdings if h.get("shares", 0) > 0})
 
     monday_context = {
         "skip_tickers":           skip_tickers,
@@ -1474,6 +1477,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         "wheel_activity":         wheel_activity,
         "reserved_capital":       reserved_capital,
         "active_wheel_count":     active_wheel_count,
+        "held_tickers":           held_tickers,
         "open_short_put_tickers": sorted(open_short_put_tickers),
         "updated":                datetime.now().isoformat()
     }
@@ -1517,6 +1521,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         "shares_sold_pnl":        shares_sold_pnl,
         "active_wheel_count":     active_wheel_count,
         "wheel_activity":         wheel_activity,
+        "held_tickers":           held_tickers,
         "open_short_put_tickers": sorted(open_short_put_tickers),
     }
 

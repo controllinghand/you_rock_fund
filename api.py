@@ -2499,6 +2499,7 @@ class SettingsUpdate(BaseModel):
     wheel_retention_market_cap_min:    Optional[float] = None
     wheel_sell_when_cc_below_assigned: Optional[bool]  = None
     wheel_cover_all_shares:            Optional[bool]  = None
+    wheel_allow_add_to_position:       Optional[bool]  = None
     wheel_stop_loss_enabled:           Optional[bool]  = None
     stop_loss_pct:                     Optional[float] = None
     excluded_tickers:                  Optional[list[str]] = None
