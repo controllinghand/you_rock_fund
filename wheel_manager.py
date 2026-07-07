@@ -1120,7 +1120,11 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                          f"${topup_strike:.2f} — now {covered}/{needed} ({new_stat}); "
                                          f"premium +${add_prem:,.0f}")
                                 action = "cc_topped_up" if new_stat == "open" else "cc_partial"
-                                if not dry_run and filled > 0:
+                                # Gate on orders_dry_run (not the pipeline dry_run):
+                                # a live run with the Settings "Dry Run" toggle ON
+                                # only SIMULATES the fill, so it must not be recorded
+                                # in trade_log.json as a real trade.
+                                if not orders_dry_run and filled > 0:
                                     try:
                                         _append_trade_log({
                                             "symbol":               ticker,
@@ -1422,7 +1426,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     round(((cc_stock_price - cc_strike) / cc_stock_price) * 100, 2)
                     if cc_stock_price and cc_stock_price > 0 else None
                 )
-                if not dry_run:
+                # Gate on orders_dry_run (not the pipeline dry_run) so a live run
+                # with the Settings "Dry Run" toggle ON — which only simulates the
+                # order — does not record a phantom fill in trade_log.json.
+                if not orders_dry_run:
                     try:
                         _append_trade_log({
                             "symbol":               ticker,
