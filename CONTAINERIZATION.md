@@ -305,7 +305,6 @@ TRADING_MODE=paper
 ACCOUNT_PAPER=DUP_YOUR_PAPER_ACCOUNT_ID
 TWS_USERID_PAPER=your_paper_login_username
 IBKR_PORT=4004
-YRVI_INIT_DRY_RUN=true
 ```
 
 If you want to reserve live credentials for later, fill these too. They are not used by the current paper Gateway:

@@ -216,7 +216,7 @@ cp .env.compose.example .env.compose
 
 `.env.compose` only contains non-secret settings (ports, trading mode, timezone) — no editing required for a default paper-trading setup. Account credentials are entered later via the secrets container UI at `http://localhost:8001` when `setup_docker.sh` runs.
 
-Leave `TRADING_MODE=paper` and `YRVI_INIT_DRY_RUN=true` — these are the safe defaults for a new setup.
+Leave `TRADING_MODE=paper` — the paper account is the safety net for a new setup, so orders route to your paper account (not real money). Dry Run defaults to **off**; enable it in Settings only if you want to simulate without any account fills.
 
 ### Run Paper Trading Setup
 ```bash

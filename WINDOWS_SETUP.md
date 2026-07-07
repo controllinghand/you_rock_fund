@@ -168,7 +168,7 @@ cd you_rock_fund
 cp .env.compose.example .env.compose
 ```
 
-You don't need to edit anything — the `--paper` flag in the next step sets `TRADING_MODE` for you (and points IBKR at the paper port). Just leave `YRVI_INIT_DRY_RUN=true`, which is the safe default for a new setup.
+You don't need to edit anything — the `--paper` flag in the next step sets `TRADING_MODE` for you (and points IBKR at the paper port). The paper account is the safety net for a new setup, so orders route to your paper account (not real money). Dry Run defaults to **off**; enable it in Settings only if you want to simulate without any account fills.
 
 ### Run Paper Trading Setup
 ```bash

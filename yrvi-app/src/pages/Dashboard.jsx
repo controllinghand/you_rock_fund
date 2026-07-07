@@ -368,18 +368,19 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Dry-run callout — fresh installs seed dry_run=true as a safety default,
-          so a new user who forgets to flip it off would see "no trades" and
-          think the app is broken. Make the reason loud and point at the fix. */}
+      {/* Dry-run callout — Dry Run defaults OFF (paper mode is the fresh-install
+          safety net), so this only shows when a user has deliberately turned it on.
+          Make the state loud so "no real trades" is never a surprise, and point at
+          the toggle in case they forgot they enabled it. */}
       {status?.dry_run && (
         <div className="flex items-start gap-3 bg-yellow-100 dark:bg-yellow-900/40 border border-yellow-300 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300 rounded-xl p-4">
           <AlertTriangle size={20} className="shrink-0 mt-0.5" />
           <div className="text-sm">
             <div className="font-semibold">Dry Run is ON — no real orders are being placed.</div>
             <div className="mt-1">
-              YRVI is only <em>simulating</em> trades. This is the safe default for a new
-              install. Any positions below are simulated and won't appear in your IBKR
-              account. When you're ready to trade for real, turn it off in{' '}
+              YRVI is only <em>simulating</em> trades — you turned this on. Any positions
+              below are simulated and won't appear in your IBKR account. When you're ready
+              to trade for real, turn it off in{' '}
               <Link to="/settings" className="font-semibold underline hover:no-underline">
                 Settings → Dry Run
               </Link>.
