@@ -62,9 +62,10 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
     OTHER_PID=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
     if [ -n "$OTHER_PID" ] && kill -0 "$OTHER_PID" 2>/dev/null; then
         echo "Another launch (pid $OTHER_PID) is already in progress — not starting a duplicate."
-        notify "Already starting" "YRVI is already starting up — see your browser."
-        [ -f "$SPLASH" ] && open "file://$SPLASH" >/dev/null 2>&1 || \
-            open "http://localhost:3000" >/dev/null 2>&1 || true
+        # Do NOT open a browser tab here. The winning launch already opened the
+        # splash; a duplicate open would just pile on extra tabs (a triple-click
+        # would spawn three). A quiet notification is enough.
+        notify "Already starting" "YRVI is already starting up…"
         exit 0
     fi
     # Lock is stale (previous launcher died without cleanup) — reclaim it.
