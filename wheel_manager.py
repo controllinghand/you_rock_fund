@@ -151,7 +151,77 @@ def _ensure_tranches(h: dict) -> dict:
             }]
         else:
             h["tranches"] = []
+    for t in h["tranches"]:
+        _ensure_tranche_cc(t)
     return h
+
+
+# ── Per-tranche covered-call model (#68 Phase 2) ───────────────
+# Each assignment tranche is its own wheel position — covered at its OWN cost
+# basis, with its OWN covered call and status — rather than blended into a single
+# average. A tranche carries these CC fields alongside {shares, strike, date}.
+
+_TRANCHE_CC_DEFAULTS = {
+    "cc_strike":    None,    # strike of THIS tranche's covered call
+    "cc_expiry":    None,    # YYYYMMDD
+    "cc_premium":   0.0,     # gross premium collected on this tranche's CC
+    "cc_contracts": 0,       # contracts open against this tranche
+    "cc_status":    "pending",  # pending|open|partial|failed|sold_*
+    "weeks_held":   0,
+}
+
+
+def _ensure_tranche_cc(t: dict) -> dict:
+    """Give a tranche its per-tranche CC-state fields (idempotent)."""
+    for k, v in _TRANCHE_CC_DEFAULTS.items():
+        t.setdefault(k, v)
+    return t
+
+
+def _attribute_calls_to_tranches(tranches: list, calls_by_strike: dict) -> tuple:
+    """Reconcile IBKR's AGGREGATE open short calls back onto individual tranches.
+
+    IBKR reports one option line per (symbol, expiry, strike) — it doesn't know
+    our lots — so we attribute contracts to tranches:
+      1. each tranche is covered first by calls at its OWN recorded cc_strike
+         (the call it wrote), then
+      2. any leftover calls fill still-uncovered tranches, LOWEST cost-basis
+         first (matches the Phase-1 allocation choice).
+    Sets each tranche's cc_contracts (capped at its needed = shares//100).
+    Returns (total_covered, total_needed, leftover_contracts).
+    """
+    pool = {float(s): int(c) for s, c in calls_by_strike.items() if c}
+    total_needed = 0
+    for t in tranches:
+        _ensure_tranche_cc(t)
+        t["cc_contracts"] = 0
+        total_needed += t.get("shares", 0) // 100
+
+    # Pass 1 — a tranche owns the calls at the strike it recorded.
+    for t in tranches:
+        needed = t.get("shares", 0) // 100
+        cs = t.get("cc_strike")
+        cs = float(cs) if cs is not None else None
+        if cs is not None and pool.get(cs, 0) > 0 and needed > 0:
+            take = min(needed, pool[cs])
+            t["cc_contracts"] = take
+            pool[cs] -= take
+
+    # Pass 2 — leftover calls (unrecorded / post-restart) fill uncovered
+    # tranches, lowest cost basis first.
+    remaining = sum(pool.values())
+    for t in sorted(tranches, key=lambda x: x.get("strike", 0.0)):
+        if remaining <= 0:
+            break
+        gap = (t.get("shares", 0) // 100) - t["cc_contracts"]
+        if gap <= 0:
+            continue
+        take = min(gap, remaining)
+        t["cc_contracts"] += take
+        remaining -= take
+
+    total_covered = sum(t["cc_contracts"] for t in tranches)
+    return total_covered, total_needed, remaining
 
 
 # ── IBKR ───────────────────────────────────────────────────────
