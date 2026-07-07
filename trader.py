@@ -1,6 +1,8 @@
 import json
 import logging
 import math
+import os
+import shutil
 import time
 from datetime import datetime, timezone
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder
@@ -833,12 +835,32 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
              f"Total Premium: ${total_premium:,.0f}")
     log.info("=" * 65)
 
-    # Merge with existing state so wheel_holdings and monday_context survive
+    # Merge with existing state so wheel_holdings and monday_context survive.
+    # A MISSING file is a legitimate fresh start ({}). A file that EXISTS but
+    # won't parse is corruption (e.g. a prior crash mid-write): overwriting it
+    # here would silently drop wheel_holdings — real capital-at-risk positions —
+    # which IBKR can't reconstruct as lots. So we make a forensic copy and SKIP
+    # the write rather than clobber. We deliberately do NOT rename state.json:
+    # it's a symlink into the durable /data volume, and moving it would break the
+    # link for every other process. The CSP orders are already placed at IBKR and
+    # Saturday's detection re-adopts holdings from the broker, so the only loss is
+    # this run's execution record — recoverable, unlike wheel_holdings.
     try:
         with open("state.json") as f:
             existing = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         existing = {}
+    except json.JSONDecodeError as e:
+        real = os.path.realpath("state.json")
+        backup = f"{real}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copy2(real, backup)   # copy the real file; leave the symlink intact
+        except OSError:
+            backup = "(forensic copy failed)"
+        log.error(f"❌ state.json is corrupt ({e}); copied to {backup} and SKIPPING "
+                  f"the results write to avoid clobbering wheel_holdings. CSP orders "
+                  f"were placed; reconcile via Saturday detection, then repair state.json.")
+        return results
     existing.update({
         "run_date":      datetime.now().isoformat(),
         "positions":     all_sized,   # includes any fallback candidates that were attempted

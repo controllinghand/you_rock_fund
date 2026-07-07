@@ -2554,78 +2554,11 @@ def toggle_excluded(body: ExcludeToggle):
     save_settings(s)
     return {"excluded_tickers": s["excluded_tickers"]}
 
-class HoldingTranches(BaseModel):
-    ticker:   str
-    tranches: list[dict]   # [{"shares": int>0, "strike": float>0, "date"?: str}]
-
-@app.post("/api/holding-tranches")
-def set_holding_tranches(body: HoldingTranches):
-    """Set the assignment tranches for an existing wheel holding and recompute its
-    true strike-weighted average cost — assigned_strike = Σ(strike×shares)/Σ(shares).
-    This is the premium-free cost basis the wheel uses for covered-call strike
-    selection, stop-loss, and P&L. Because assigned_strike drives money-moving logic
-    (stop-loss → force-sell), input is validated strictly:
-      1. each tranche needs numeric shares>0 (integer) and strike>0, within sane bounds
-      2. at most 50 tranches (junk-payload guard)
-      3. the ticker must already exist in wheel_holdings (edit only, never create)
-      4. Σ(tranche shares) must equal the holding's current share count
-    """
-    sym = body.ticker.strip().upper()
-    if not sym:
-        raise HTTPException(status_code=400, detail="ticker is required")
-    if not body.tranches:
-        raise HTTPException(status_code=400, detail="at least one tranche is required")
-    if len(body.tranches) > 50:
-        raise HTTPException(status_code=400, detail="too many tranches (max 50)")
-
-    # 1. Per-tranche validation — reject anything invalid rather than coercing.
-    clean = []
-    total_shares = 0
-    for i, t in enumerate(body.tranches):
-        try:
-            raw_shares = float(t.get("shares"))
-            strike     = float(t.get("strike"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400,
-                detail=f"tranche {i}: shares and strike must be numeric")
-        # Reject fractional shares rather than silently truncating (e.g. 1000.5).
-        if raw_shares != int(raw_shares):
-            raise HTTPException(status_code=400,
-                detail=f"tranche {i}: shares must be a whole number")
-        shares = int(raw_shares)
-        if shares <= 0 or shares > 1_000_000:
-            raise HTTPException(status_code=400,
-                detail=f"tranche {i}: shares must be an integer 1..1,000,000")
-        if strike <= 0 or strike > 1_000_000:
-            raise HTTPException(status_code=400,
-                detail=f"tranche {i}: strike must be > 0 and < 1,000,000")
-        entry = {"shares": shares, "strike": round(strike, 2)}
-        if t.get("date"):
-            entry["date"] = str(t["date"])[:10]
-        clean.append(entry)
-        total_shares += shares
-
-    # 3. Ticker must already exist in wheel_holdings — edit only.
-    state    = load_state()
-    holdings = state.get("wheel_holdings", [])
-    h = next((x for x in holdings if x.get("ticker", "").upper() == sym), None)
-    if h is None:
-        raise HTTPException(status_code=404,
-            detail=f"{sym} is not a current wheel holding")
-
-    # 4. Share-total sanity check — never silently rewrite the holding's share count.
-    cur_shares = int(h.get("shares", 0))
-    if total_shares != cur_shares:
-        raise HTTPException(status_code=400,
-            detail=f"tranche shares ({total_shares}) must equal the holding's "
-                   f"current shares ({cur_shares})")
-
-    h["tranches"]        = clean
-    h["assigned_strike"] = round(
-        sum(t["strike"] * t["shares"] for t in clean) / total_shares, 2)
-    state["wheel_holdings"] = holdings
-    STATE_FILE.write_text(json.dumps(state, indent=2))
-    return {"ticker": sym, "tranches": clean, "assigned_strike": h["assigned_strike"]}
+# NOTE: the /api/holding-tranches editor was removed when cost basis moved to
+# IBKR avgCost as the source of truth (closed issue #68). A user-set cost basis
+# would just be overwritten by the broker's avgCost on the next detection/wheel
+# check, so hand-editing tranches no longer has any effect. `tranches` remains a
+# read-only assignment-history breadcrumb written by wheel_manager.
 
 @app.get("/api/settings/timezone")
 def get_timezone():

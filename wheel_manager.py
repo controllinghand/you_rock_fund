@@ -116,16 +116,30 @@ def _save_state(state: dict):
         json.dump(state, f, indent=2)
 
 
-# ── Cost basis (true strike-weighted average) ──────────────────
-# When the same ticker is assigned via multiple CSPs at different strikes,
-# `assigned_strike` holds the TRUE strike-weighted average — Σ(strike×shares)/
-# Σ(shares) — NOT IBKR's premium-netted avgCost. `tranches` is the source of
-# truth: one entry per assignment batch. Every downstream read of
-# `assigned_strike` (CC strike selection, stop-loss, P&L) inherits this average.
+# ── Two cost bases: strike (P&L) vs net cost (decisions) ───────
+# A wheeled holding carries TWO cost numbers because they answer different
+# questions (closed issue #68 for the full rationale):
+#
+#   • `assigned_strike` — the true strike-weighted price we were assigned at,
+#     Σ(strike×shares)/Σ(shares) from `tranches`. This is what we PAID for the
+#     shares, so it is the basis for all $ P&L, capital, and "assigned @" display.
+#     Premium is booked separately (csp_premium/cc_premium), so P&L must use the
+#     pure strike or it double-counts the premium.
+#
+#   • `net_cost` — IBKR's premium-netted avgCost (≈ strike − premium collected),
+#     refreshed live from the broker every detection/wheel check. This is our
+#     economic breakeven, so it drives DECISIONS: covered-call strike floor and
+#     stop-loss. Sourcing it from the broker means these decisions survive a
+#     lost/stale state.json (IBKR always has avgCost), and multiple assignments
+#     simply blend into it.
+#
+# `tranches` remains the strike-weighted source for `assigned_strike` (and a
+# display/audit breadcrumb of what strikes we were assigned at).
 
 def _avg_cost(tranches: list) -> float:
-    """Strike-weighted average cost per share across assignment tranches.
-    Σ(strike×shares) / Σ(shares), rounded to 2dp. Returns 0.0 for empty/zero."""
+    """Strike-weighted average price per share across assignment tranches —
+    Σ(strike×shares)/Σ(shares), rounded to 2dp. This is `assigned_strike` (the
+    P&L basis), NOT the premium-netted net cost. Returns 0.0 for empty/zero."""
     total_shares = sum(t.get("shares", 0) for t in tranches)
     if total_shares <= 0:
         return 0.0
@@ -138,9 +152,7 @@ def _avg_cost(tranches: list) -> float:
 def _ensure_tranches(h: dict) -> dict:
     """Lazy migration: legacy holdings predate `tranches`. Synthesize a single
     tranche from the existing assigned_strike/shares so the holding keeps working.
-    NOTE: a holding whose shares were already BLENDED from multiple assignments
-    (e.g. an over-written pre-fix holding) collapses to one tranche at the stale
-    assigned_strike — correct it via the dashboard tranche editor after deploy."""
+    `tranches` is the strike-weighted source for assigned_strike (the P&L basis)."""
     if not h.get("tranches"):
         shares = h.get("shares", 0)
         if shares > 0:
@@ -706,6 +718,14 @@ def detect_assignments():
             for p in ibkr_positions
             if p.contract.secType == "STK" and int(p.position) > 0
         }
+        # IBKR's premium-netted avgCost is the source of truth for cost basis
+        # (see the cost-basis note below). Snapshot it per symbol so a lost/stale
+        # state.json is always reconstructable from the broker on the next run.
+        avg_cost_lookup = {
+            p.contract.symbol: round(p.avgCost, 2)
+            for p in ibkr_positions
+            if p.contract.secType == "STK" and int(p.position) > 0
+        }
     finally:
         ib.disconnect()
 
@@ -751,53 +771,60 @@ def detect_assignments():
             prior_shares = sum(t.get("shares", 0) for t in h["tranches"])
             delta        = shares - prior_shares
             if delta > 0:
-                # New tranche assigned at this week's CSP strike — blend it in.
+                # New tranche assigned at this week's CSP strike — blend it into
+                # the strike-weighted assigned_strike (the P&L basis).
                 new_strike = strike_lookup.get(ticker, 0.0)
                 if new_strike > 0:
                     if delta % 100 != 0:
                         log.warning(
                             f"  ⚠️  {ticker}: assigned share delta {delta} is not a "
                             f"round lot — two assignments may have collapsed into a "
-                            f"single tranche at ${new_strike:.2f}; verify/correct "
-                            f"tranches in the dashboard editor")
+                            f"single tranche at ${new_strike:.2f}; verify in state.json")
                     h["tranches"].append({
                         "shares": delta, "strike": new_strike,
                         "date":   datetime.now().date().isoformat(),
                     })
                     h["assigned_strike"] = _avg_cost(h["tranches"])
                     log.info(f"  ➕ {ticker}: +{delta} shares @ ${new_strike:.2f} "
-                             f"(new tranche) — avg cost now "
+                             f"(new tranche) — assigned_strike now "
                              f"${h['assigned_strike']:.2f} across {shares} shares")
                 else:
                     log.warning(
                         f"  ⚠️  {ticker}: +{delta} shares but no CSP strike in state — "
-                        f"cannot blend tranche; avg cost left at "
+                        f"cannot blend tranche; assigned_strike left at "
                         f"${h.get('assigned_strike', 0.0):.2f}")
             elif delta < 0:
                 log.info(f"  ✅ {ticker}: {shares} shares (down {-delta} — partial "
-                         f"call-away/sale; tranches & avg cost unchanged)")
+                         f"call-away/sale; tranches & assigned_strike unchanged)")
             else:
                 log.info(f"  ✅ {ticker}: {shares} shares (existing — unchanged)")
             h["shares"]       = shares
+            # net_cost = IBKR avgCost (premium-netted), refreshed every detection —
+            # drives CC-floor / stop-loss decisions. Broker-sourced so it survives
+            # a lost/stale state.json.
+            net_cost = avg_cost_lookup.get(ticker, 0.0)
+            if net_cost > 0:
+                h["net_cost"] = net_cost
+                log.info(f"  💰 {ticker}: net cost ${net_cost:.2f} (IBKR avgCost) "
+                         f"vs assigned ${h.get('assigned_strike', 0.0):.2f}")
             h["last_checked"] = datetime.now().isoformat()
         else:
             if ticker.upper() in excluded:
                 log.info(f"  🚫 {ticker}: excluded from the wheel — not adopting "
                          f"as a new assignment (left as a plain hold)")
                 continue
+            # assigned_strike (P&L basis) = the CSP strike we were assigned at.
+            # Fall back to IBKR avgCost only if the strike isn't in state.
             assigned_strike = strike_lookup.get(ticker, 0.0)
             if assigned_strike == 0.0:
-                ibkr_avg_cost = next(
-                    (p.avgCost for p in ibkr_positions
-                     if p.contract.symbol == ticker), 0.0
-                )
-                assigned_strike = round(ibkr_avg_cost, 2)
-                log.warning(f"  ⚠️  {ticker}: strike not in state — "
-                            f"using IBKR avgCost ${assigned_strike:.2f} as assigned_strike")
+                assigned_strike = avg_cost_lookup.get(ticker, 0.0)
+                log.warning(f"  ⚠️  {ticker}: strike not in state — using IBKR "
+                            f"avgCost ${assigned_strike:.2f} as assigned_strike")
             h = {
                 "ticker":             ticker,
                 "shares":             shares,
                 "assigned_strike":    assigned_strike,
+                "net_cost":           avg_cost_lookup.get(ticker, 0.0) or assigned_strike,
                 "tranches":           [{
                     "shares": shares,
                     "strike": assigned_strike,
@@ -941,6 +968,14 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         live_pos      = ib.positions(account=ACCOUNT)
         strike_lookup = {p["ticker"]: p["strike"] for p in state.get("positions", [])}
         known_tickers = {h["ticker"] for h in holdings}
+        # IBKR avgCost is the authoritative cost basis (see the cost-basis note
+        # above). Snapshot it live so Monday's CC/stop-loss decisions use the
+        # broker's number, self-correcting any stale/lost state.json value.
+        avg_cost_lookup = {
+            p.contract.symbol: round(p.avgCost, 2)
+            for p in live_pos
+            if p.contract.secType == "STK" and int(p.position) > 0
+        }
 
         # Snapshot open option positions for recovery dedup
         for p in live_pos:
@@ -979,11 +1014,14 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                              f"into wheel_holdings (left as a plain hold)")
                     continue
                 if sym not in known_tickers:
-                    strike = strike_lookup.get(sym, 0.0)
-                    if strike == 0.0:
-                        strike = round(p.avgCost, 2)
-                        log.warning(f"  ⚠️  {sym}: using IBKR avgCost ${strike:.2f} "
-                                    f"as assigned_strike fallback")
+                    # No state for this holding — assigned_strike (P&L basis) falls
+                    # back to the CSP strike if known, else IBKR avgCost. net_cost
+                    # (decisions) is always the broker's avgCost.
+                    avg = round(p.avgCost, 2)
+                    strike = strike_lookup.get(sym, 0.0) or avg
+                    if strike_lookup.get(sym, 0.0) == 0.0:
+                        log.warning(f"  ⚠️  {sym}: strike not in state — using IBKR "
+                                    f"avgCost ${avg:.2f} as assigned_strike")
                     log.warning(f"⚠️  Untracked stock detected: {sym} "
                                 f"{int(p.position)} shares @ ${strike:.2f} — "
                                 f"adding to wheel_holdings")
@@ -991,6 +1029,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                         "ticker":             sym,
                         "shares":             int(p.position),
                         "assigned_strike":    strike,
+                        "net_cost":           avg or strike,
                         "tranches":           [{
                             "shares": int(p.position),
                             "strike": strike,
@@ -1034,7 +1073,14 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         for h in holdings:
             ticker          = h["ticker"]
             shares          = h.get("shares", 0)
+            # assigned_strike (strike-weighted) is the P&L basis — leave it as the
+            # stored value. net_cost is the premium-netted breakeven that drives
+            # CC-floor / stop-loss decisions: refresh it live from the broker
+            # (source of truth) and cache back, so those decisions self-correct any
+            # stale/lost state.json value.
             assigned_strike = h.get("assigned_strike", 0.0)
+            net_cost        = avg_cost_lookup.get(ticker) or h.get("net_cost") or assigned_strike
+            h["net_cost"]   = net_cost
 
             # ── Excluded from the wheel: leave it alone entirely ──
             # No CC, no sell, no weeks_held bump. The user has opted this name out
@@ -1201,17 +1247,19 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             log.info(f"  ✅ {ticker} on screener — checking stop loss")
 
             # ── Step 1b: Stop-loss check ──────────────────────
-            if stop_loss_enabled and assigned_strike > 0:
+            # Measured vs net_cost (premium-netted breakeven), not the assignment
+            # strike — this is a decision about our economic position.
+            if stop_loss_enabled and net_cost > 0:
                 current_price = _get_stock_price(ib, ticker)
                 if current_price is None:
                     log.warning(f"  ⚠️  {ticker}: price unavailable — skipping stop-loss check")
                 else:
-                    stop_threshold = round(assigned_strike * (1 - stop_loss_pct), 2)
-                    loss_pct       = round((1 - current_price / assigned_strike) * 100, 1)
+                    stop_threshold = round(net_cost * (1 - stop_loss_pct), 2)
+                    loss_pct       = round((1 - current_price / net_cost) * 100, 1)
                     if current_price < stop_threshold:
                         log.warning(
                             f"  🛑 {ticker}: price ${current_price:.2f} is {loss_pct:.1f}% below "
-                            f"assigned strike ${assigned_strike:.2f} "
+                            f"net cost ${net_cost:.2f} "
                             f"(threshold {stop_loss_pct*100:.0f}%) — selling shares"
                         )
                         result = _sell_stock_market(ib, ticker, shares, "stop_loss",
@@ -1303,7 +1351,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             _progress(ticker=ticker, stage="scanning call strikes")
 
             # ── Step 3: Find best CC strike ───────────────────
-            cc_info = _find_cc_strike(ib, ticker, expiry, assigned_strike,
+            # Floor at net_cost (premium-netted breakeven) — a CC at/above our net
+            # cost can't lock an economic loss even if called away.
+            cc_info = _find_cc_strike(ib, ticker, expiry, net_cost,
                                       allow_below_assigned=allow_cc_below_assigned)
 
             # ── Step 4: Decision ──────────────────────────────

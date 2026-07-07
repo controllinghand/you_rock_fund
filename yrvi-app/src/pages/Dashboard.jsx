@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import axios from 'axios'
-import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, Pencil, Plus, X, AlertTriangle } from 'lucide-react'
+import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, AlertTriangle } from 'lucide-react'
 import PositionCard from '../components/PositionCard.jsx'
 import YTDChart from '../components/YTDChart.jsx'
 
@@ -138,112 +138,10 @@ function fmtMktVal(n) {
   return n < 0 ? `-$${abs}` : `$${abs}`
 }
 
-// Inline editor for a holding's assignment tranches (shares @ strike). The true
-// strike-weighted average — Σ(strike×shares)/Σ(shares) — becomes the holding's
-// cost basis (assigned_strike), which the wheel uses for CC selection, stop-loss,
-// and P&L. Needed because IBKR's displayed avg price nets out collected premium.
-function TrancheEditor({ holding, onSaved }) {
-  const [open, setOpen]     = useState(false)
-  const [rows, setRows]     = useState([])
-  const [saving, setSaving] = useState(false)
-  const [error, setError]   = useState(null)
-
-  const startEdit = () => {
-    const existing = holding.tranches?.length
-      ? holding.tranches.map(t => ({ shares: String(t.shares), strike: String(t.strike) }))
-      : [{ shares: String(holding.shares ?? ''), strike: String(holding.assigned_strike ?? '') }]
-    setRows(existing)
-    setError(null)
-    setOpen(true)
-  }
-
-  const setRow = (i, key, val) =>
-    setRows(rows.map((r, j) => (j === i ? { ...r, [key]: val } : r)))
-  const addRow    = () => setRows([...rows, { shares: '', strike: '' }])
-  const removeRow = (i) => setRows(rows.filter((_, j) => j !== i))
-
-  const parsed     = rows.map(r => ({ shares: Number(r.shares), strike: Number(r.strike) }))
-  const totalShares = parsed.reduce((s, r) => s + (Number.isFinite(r.shares) ? r.shares : 0), 0)
-  const allValid    = parsed.every(r => Number.isInteger(r.shares) && r.shares > 0 && r.strike > 0)
-  const avg         = allValid && totalShares > 0
-    ? parsed.reduce((s, r) => s + r.strike * r.shares, 0) / totalShares
-    : null
-  const sharesMatch = totalShares === Number(holding.shares)
-
-  const save = async () => {
-    setSaving(true); setError(null)
-    try {
-      await axios.post('/api/holding-tranches', {
-        ticker: holding.ticker,
-        tranches: parsed.map(r => ({ shares: r.shares, strike: r.strike })),
-      })
-      setOpen(false)
-      onSaved?.()
-    } catch (err) {
-      setError(err?.response?.data?.detail ?? 'Save failed')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  if (!open) {
-    return (
-      <button onClick={startEdit}
-        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-        title="Edit assignment tranches (cost basis)">
-        <Pencil size={14} />
-      </button>
-    )
-  }
-
-  return (
-    <div className="mt-3 p-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950">
-      <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">
-        Assignment tranches — true avg cost basis
-      </div>
-      <div className="space-y-2">
-        {rows.map((r, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <input type="number" min="1" step="1" value={r.shares}
-              onChange={e => setRow(i, 'shares', e.target.value)} placeholder="shares"
-              className="w-24 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white" />
-            <span className="text-gray-400 text-sm">@ $</span>
-            <input type="number" min="0" step="0.01" value={r.strike}
-              onChange={e => setRow(i, 'strike', e.target.value)} placeholder="strike"
-              className="w-24 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white" />
-            {rows.length > 1 && (
-              <button onClick={() => removeRow(i)} className="text-gray-400 hover:text-red-500" title="Remove tranche">
-                <X size={14} />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-      <button onClick={addRow} className="mt-2 flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline">
-        <Plus size={12} /> Add tranche
-      </button>
-      <div className="mt-3 text-xs">
-        <span className="text-gray-500">Avg cost: </span>
-        <span className="font-semibold text-gray-900 dark:text-white">
-          {avg != null ? `$${avg.toFixed(2)}` : '—'}
-        </span>
-        <span className={`ml-3 ${sharesMatch ? 'text-gray-500' : 'text-red-500'}`}>
-          {totalShares} / {holding.shares} shares
-        </span>
-      </div>
-      {error && <div className="mt-2 text-xs text-red-500">{error}</div>}
-      <div className="mt-3 flex items-center gap-2">
-        <button onClick={save} disabled={saving || !allValid || !sharesMatch}
-          className="px-3 py-1 text-xs rounded bg-blue-600 text-white disabled:opacity-40 hover:bg-blue-700">
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-        <button onClick={() => setOpen(false)} className="px-3 py-1 text-xs rounded border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300">
-          Cancel
-        </button>
-      </div>
-    </div>
-  )
-}
+// Cost basis is IBKR avgCost (source of truth) — refreshed from the broker every
+// detection/wheel check — so the old hand-editable tranche editor was removed
+// (closed issue #68). `tranches` remains a read-only assignment-history breadcrumb,
+// surfaced only as the "(N tranches)" hint below.
 
 export default function Dashboard() {
   const [positions, setPositions]     = useState(null)
@@ -661,7 +559,7 @@ export default function Dashboard() {
                                : upnl >= 0   ? 'text-green-400'
                                :               'text-red-400',
                       },
-                      { label: 'Stop Loss',       value: h.assigned_strike ? `$${(h.assigned_strike * 0.9).toFixed(2)}` : '—', accent: 'text-red-400' },
+                      { label: 'Stop Loss',       value: (h.net_cost ?? h.assigned_strike) ? `$${((h.net_cost ?? h.assigned_strike) * 0.9).toFixed(2)}` : '—', accent: 'text-red-400' },
                       { label: 'Week #',          value: h.weeks_held ?? 1 },
                     ].map(({ label, value, accent = 'text-gray-900 dark:text-white' }) => (
                       <div key={label}>
@@ -670,7 +568,6 @@ export default function Dashboard() {
                       </div>
                     ))}
                   </div>
-                  <TrancheEditor holding={h} onSaved={fetchAll} />
                 </div>
               )
             })}
