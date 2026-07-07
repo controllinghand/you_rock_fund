@@ -55,6 +55,16 @@ notify "Starting up" "Launching the trading system… (about a minute)"
 # live spinner + checklist + elapsed timer and, once the API answers, redirects
 # itself to the dashboard (:3000). It owns that redirect, so we do NOT open the
 # dashboard again at the end — that avoids a duplicate tab.
+#
+# NOTE: this opens exactly ONE URL. If the operator's browser was FULLY QUIT,
+# macOS/browser window-restoration reopens the browser's previous windows (an
+# old localhost:3000 tab, or a New Tab page) ALONGSIDE our splash — so a
+# cold-quit browser can briefly show two windows. That's browser/OS session
+# restore, not this script double-opening, and it happens whenever any app
+# opens a URL in a not-running browser. Leaving the browser open (the normal
+# operator case) gives a single clean tab. To minimize it on a given box, set
+# the browser's "On startup → Open the New Tab page" and macOS "Close windows
+# when quitting an application".
 SPLASH="$PROJ/assets/startup-splash.html"
 SPLASH_SHOWN=false
 if [ -f "$SPLASH" ]; then
