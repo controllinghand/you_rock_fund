@@ -205,6 +205,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # live 9:55 run all size against the same num_positions / fund_budget.
     settings         = get_settings()
     compound_enabled = settings.get("compound_enabled", True)
+    cash_account     = settings.get("cash_account", False)
     num_positions    = settings.get("num_positions", NUM_POSITIONS)
     fund_budget      = settings.get("fund_budget", TOTAL_FUND_BUDGET)
 
@@ -242,24 +243,38 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     all_targets = get_top_targets(10)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
 
-    net_liq = None  # captured below for the weekly account-value goal post
+    net_liq = None       # captured below for the weekly account-value goal post
+    buying_power = None   # captured below for the cash-account budget display
     if compound_enabled:
         if account_summary is not None:
             buying_power, net_liq = account_summary
         else:
             buying_power, net_liq = _fetch_account_summary(fund_budget)
-        # Exclude capital already tied up in wheel holdings. buying_power is
-        # min(BuyingPower, NetLiq): for cash/Roth accounts BuyingPower already
-        # excludes wheel stock, but on margin/paper accounts it resolves to
-        # NetLiq, which INCLUDES the wheel stock — so without this cap we'd
-        # secure new CSPs with capital that's already deployed. Capping at
-        # net_liq − reserved removes that double-count; min() keeps whichever
-        # basis is tighter, and it's a no-op when there are no wheel holdings.
-        capped_budget    = min(buying_power, net_liq - reserved_capital)
-        effective_budget = capped_budget + freed_capital
-        log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
-                 f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f}  "
-                 f"effective=${effective_budget:,.0f}  (compounding ON)")
+        if cash_account:
+            # Cash (non-margin) account: IBKR BuyingPower IS real settled cash and
+            # already excludes capital converted to wheel stock (that cash left the
+            # account at assignment). Subtracting reserved on top would double-count
+            # and — because reserved is cost basis — go falsely negative when the
+            # holdings are underwater. Deploy BuyingPower directly. This can NEVER
+            # exceed settled cash: a cash account's BuyingPower has no margin/leverage
+            # component, and each CSP is still fully secured (strike×100) by the sizer.
+            effective_budget = max(0.0, buying_power) + freed_capital
+            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
+                     f"freed=${freed_capital:,.0f}  effective=${effective_budget:,.0f}  "
+                     f"(cash account — reserved not subtracted)")
+        else:
+            # Exclude capital already tied up in wheel holdings. buying_power is
+            # min(BuyingPower, NetLiq): for cash/Roth accounts BuyingPower already
+            # excludes wheel stock, but on margin/paper accounts it resolves to
+            # NetLiq, which INCLUDES the wheel stock — so without this cap we'd
+            # secure new CSPs with capital that's already deployed. Capping at
+            # net_liq − reserved removes that double-count; min() keeps whichever
+            # basis is tighter, and it's a no-op when there are no wheel holdings.
+            capped_budget    = min(buying_power, net_liq - reserved_capital)
+            effective_budget = capped_budget + freed_capital
+            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
+                     f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f}  "
+                     f"effective=${effective_budget:,.0f}  (compounding ON)")
     else:
         effective_budget = fund_budget + freed_capital - reserved_capital
         log.info(f"  📊 Budget: base=${fund_budget:,.0f}  freed=${freed_capital:,.0f}  "
@@ -282,6 +297,8 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
         "total_premium":           total_premium,
         "total_capital":           total_capital,
         "compound_enabled":        compound_enabled,
+        "cash_account":            cash_account,
+        "buying_power":            buying_power,
         "already_open_put_tickers": already_open_puts,
     }
 

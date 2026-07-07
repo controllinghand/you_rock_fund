@@ -297,19 +297,36 @@ export default function ThisWeek() {
             <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
               <div className="text-gray-900 dark:text-white font-semibold text-sm mb-3">Capital Allocation</div>
               <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">
-                    {screener.compound_enabled ? 'Effective Budget (net liq)' : 'Fund Budget'}
-                  </span>
-                  <span className="text-gray-900 dark:text-white font-mono">${(screener.total_budget ?? 0).toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between text-red-400">
-                  <span>
-                    Reserved ({screener.active_wheel_count} wheel holding{screener.active_wheel_count !== 1 ? 's' : ''})
-                    {(screener.wheel_holdings ?? []).filter(h => h.shares > 0).map(h => ` · ${h.ticker}`).join('')}
-                  </span>
-                  <span className="font-mono">− ${(screener.reserved_capital ?? 0).toLocaleString()}</span>
-                </div>
+                {screener.cash_account ? (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Buying Power (cash)</span>
+                      <span className="text-gray-900 dark:text-white font-mono">${(screener.buying_power ?? screener.budget ?? 0).toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-500 dark:text-gray-600">
+                      <span>
+                        Wheel stock ({screener.active_wheel_count} holding{screener.active_wheel_count !== 1 ? 's' : ''})
+                        {(screener.wheel_holdings ?? []).filter(h => h.shares > 0).map(h => ` · ${h.ticker}`).join('')} — cash already spent, not re-subtracted
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">
+                        {screener.compound_enabled ? 'Effective Budget (net liq)' : 'Fund Budget'}
+                      </span>
+                      <span className="text-gray-900 dark:text-white font-mono">${(screener.total_budget ?? 0).toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between text-red-400">
+                      <span>
+                        Reserved ({screener.active_wheel_count} wheel holding{screener.active_wheel_count !== 1 ? 's' : ''})
+                        {(screener.wheel_holdings ?? []).filter(h => h.shares > 0).map(h => ` · ${h.ticker}`).join('')}
+                      </span>
+                      <span className="font-mono">− ${(screener.reserved_capital ?? 0).toLocaleString()}</span>
+                    </div>
+                  </>
+                )}
                 <div className="border-t border-gray-200 dark:border-gray-800 pt-2 flex justify-between font-semibold">
                   <span className="text-gray-900 dark:text-white">Available for CSPs</span>
                   <span className="text-green-400 font-mono">${(screener.budget ?? 0).toLocaleString()}</span>
