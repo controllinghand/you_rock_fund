@@ -74,10 +74,15 @@ fi
 # ── 1. Ensure the Docker engine is running ────────────────────
 if ! docker info >/dev/null 2>&1; then
     echo "Docker engine not running — launching it…"
+    # Open by FULL PATH, not by name. `open -a "Docker"` resolves the app via
+    # LaunchServices, which can point at a stale registration — e.g. a leftover
+    # /Volumes/Docker/Docker.app from a past installer DMG mount — so it silently
+    # fails to launch the real /Applications/Docker.app and the daemon never
+    # comes up. The full path is unambiguous and matches the -d check above.
     if [ -d "/Applications/Docker.app" ]; then
-        open -a "Docker"
+        open -a "/Applications/Docker.app"
     elif [ -d "/Applications/Rancher Desktop.app" ]; then
-        open -a "Rancher Desktop"
+        open -a "/Applications/Rancher Desktop.app"
     else
         fail "Docker Desktop is not installed. Install it from docker.com, then try again."
     fi
