@@ -528,7 +528,7 @@ export default function SettingsPage() {
     max_position_size: 70000, max_delta: 0.21, min_buffer_pct: 0.05,
     earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
     wheel_retention_market_cap_min: 5000000000,
-    wheel_sell_when_cc_below_assigned: false,
+    wheel_sell_when_cc_below_assigned: false, wheel_cover_all_shares: true,
     wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
     min_oi_notional: 1000000, excluded_tickers: [],
@@ -715,6 +715,14 @@ export default function SettingsPage() {
             sub="Default OFF: an underwater holding with no CC at/above cost writes a 20-delta CC below cost (keeps shares + premium). Turn ON to force-sell those shares at market instead, like the old behavior."
             checked={!!settings.wheel_sell_when_cc_below_assigned}
             onChange={v => set('wheel_sell_when_cc_below_assigned', v)}
+          />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <Toggle
+            label="Cover All Owned Shares"
+            sub="Default ON: when a holding is only partially covered (e.g. a covered-call order that only partly filled), automatically write the shortfall at the existing strike/expiry so every owned share carries a CC. Turn OFF to leave partial holdings as-is."
+            checked={!!settings.wheel_cover_all_shares}
+            onChange={v => set('wheel_cover_all_shares', v)}
           />
         </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
