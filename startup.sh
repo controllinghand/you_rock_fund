@@ -59,6 +59,11 @@ if [ ! -f ".env.compose" ]; then
 else
     PS_OUT=$(docker compose --env-file .env.compose ps 2>/dev/null || true)
     ALL_UP=true
+    # Remember each service's first-pass verdict so the post-setup re-check only
+    # reverses the counter it actually incremented. (Blanket ((FAIL--)) per
+    # now-up container drove FAIL negative when a container was up/warned — not
+    # failed — at first check, yielding a bogus "-3 failed / NO-GO".)
+    FAILED_SVCS=" "; WARNED_SVCS=" "
 
     for svc in ib_gateway api scheduler web; do
         SVC_LINE=$(echo "$PS_OUT" | grep -i "$svc" | head -1 || true)
@@ -67,9 +72,11 @@ else
             pass "Container $svc — $STATUS"
         elif [ -z "$SVC_LINE" ]; then
             fail "Container $svc — not found"
+            FAILED_SVCS="${FAILED_SVCS}${svc} "
             ALL_UP=false
         else
             warn "Container $svc — $(echo "$SVC_LINE" | awk '{print $NF}')"
+            WARNED_SVCS="${WARNED_SVCS}${svc} "
             ALL_UP=false
         fi
     done
@@ -89,16 +96,27 @@ else
         bash "$PROJ/setup_docker.sh" "$_MODE_FLAG"
         echo ""
 
-        # Re-check containers after setup and correct the counters
+        # Re-check containers after setup and correct the counters. Only reverse
+        # the counter this service actually contributed at first check: a service
+        # that was already Up stays a plain pass (no double-count); one that was
+        # FAILED or WARNED flips to pass by decrementing that exact counter.
         PS_OUT=$(docker compose --env-file .env.compose ps 2>/dev/null || true)
         for svc in ib_gateway api scheduler web; do
             SVC_LINE=$(echo "$PS_OUT" | grep -i "$svc" | head -1 || true)
             if echo "$SVC_LINE" | grep -qiE "Up|running|healthy"; then
-                # Was counted as a failure above — flip to pass
-                ((FAIL--)) || true
-                ((PASS++)) || true
                 STATUS=$(echo "$SVC_LINE" | grep -oiE "Up [^[:space:]].*|running|healthy" | head -1 || echo "Up")
-                pass "Container $svc — $STATUS  (started by setup)"
+                case "$FAILED_SVCS" in
+                    *" $svc "*)
+                        ((FAIL--)) || true; ((PASS++)) || true
+                        pass "Container $svc — $STATUS  (started by setup)" ;;
+                    *)
+                        case "$WARNED_SVCS" in
+                            *" $svc "*)
+                                ((WARN--)) || true; ((PASS++)) || true
+                                pass "Container $svc — $STATUS  (started by setup)" ;;
+                            # already Up at first check — leave counters as-is
+                        esac ;;
+                esac
             fi
         done
 
