@@ -720,8 +720,8 @@ export default function SettingsPage() {
         </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
-            label="Cover All Owned Shares"
-            sub="Default ON: when a holding is only partially covered (e.g. a covered-call order that only partly filled), automatically write the shortfall at the existing strike/expiry so every owned share carries a CC. Turn OFF to leave partial holdings as-is."
+            label="Auto-Cover Uncovered Shares"
+            sub="Default ON: automatically finishes covering any shares that don't yet have a covered call (e.g. when a CC order only partly filled), selling the remaining calls at the same strike and expiry. Turn OFF to leave partially-covered holdings as they are."
             checked={!!settings.wheel_cover_all_shares}
             onChange={v => set('wheel_cover_all_shares', v)}
           />
