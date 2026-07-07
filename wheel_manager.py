@@ -869,6 +869,17 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     # Tickers the user excluded from the wheel — never adopt, never CC, never sell.
     excluded                  = {t.strip().upper() for t in _s.get("excluded_tickers", []) if t and t.strip()}
 
+    # Order-placement gate. Simulate CC/stock-sale orders when EITHER this is a
+    # preview run (pipeline dry_run) OR the Settings "Dry Run" toggle is ON — read
+    # LIVE here, so the long-running scheduler honors a UI toggle without a restart
+    # (the same stale-snapshot fix applied to CSP execution in trader.py). Kept
+    # separate from the pipeline `dry_run` so a live-market run with Dry Run ON still
+    # writes monday_context/Discord and still prices CCs on real greeks (type-4 switch
+    # below stays on `dry_run`) — it just simulates the fills instead of placing them.
+    orders_dry_run            = dry_run or _s.get("dry_run", False)
+    if orders_dry_run and not dry_run:
+        log.info("  🧪 Settings Dry Run is ON — wheel orders will be simulated (no real CC/stock orders)")
+
     freed_capital   = 0.0
     skip_tickers    = []
     cc_premium      = 0.0
@@ -1069,7 +1080,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 log.warning(f"  🚫 {ticker}: dropped from screener — selling shares")
                 _progress(ticker=ticker, stage="dropped screener — selling")
                 result = _sell_stock_market(ib, ticker, shares, "dropped_screener",
-                                               assigned_strike=assigned_strike, dry_run=dry_run)
+                                               assigned_strike=assigned_strike, dry_run=orders_dry_run)
                 if result["status"] == "filled":
                     proceeds = result["proceeds"]
                     realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1113,7 +1124,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             f"(threshold {stop_loss_pct*100:.0f}%) — selling shares"
                         )
                         result = _sell_stock_market(ib, ticker, shares, "stop_loss",
-                                                    assigned_strike=assigned_strike, dry_run=dry_run)
+                                                    assigned_strike=assigned_strike, dry_run=orders_dry_run)
                         if result["status"] == "filled":
                             proceeds = result["proceeds"]
                             realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1168,7 +1179,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     log.warning(f"  🚨 {ticker}: earnings in {dte_int} day(s) — "
                                  f"selling shares to avoid earnings risk")
                     result = _sell_stock_market(ib, ticker, shares, "earnings_this_week",
-                                                   assigned_strike=assigned_strike, dry_run=dry_run)
+                                                   assigned_strike=assigned_strike, dry_run=orders_dry_run)
                     if result["status"] == "filled":
                         proceeds = result["proceeds"]
                         realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1227,7 +1238,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 log.warning(f"  ❌ {ticker}: no call strike with delta ≥ "
                              f"{CC_DELTA_MIN:.2f} — selling shares")
                 result = _sell_stock_market(ib, ticker, shares, "no_viable_cc",
-                                               assigned_strike=assigned_strike, dry_run=dry_run)
+                                               assigned_strike=assigned_strike, dry_run=orders_dry_run)
                 if result["status"] == "filled":
                     proceeds = result["proceeds"]
                     realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1281,7 +1292,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             ref_mid      = cc_mid if (cc_mid and cc_mid > 0) else 0.50
             _progress(ticker=ticker, stage=f"selling CC ${cc_strike:.0f} (δ{cc_delta:.2f})")
             order_result = _sell_cc_with_escalation(
-                ib, qualified[0], shares, ticker, cc_strike, ref_mid, dry_run=dry_run
+                ib, qualified[0], shares, ticker, cc_strike, ref_mid, dry_run=orders_dry_run
             )
 
             if order_result["status"] in ("filled", "partial_fill"):
