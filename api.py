@@ -1356,8 +1356,8 @@ def start_view_gateway():
     return {
         "success": True,
         "port": host_port,
-        "message": (f"View Gateway is running — opening it now. You'll be asked for the "
-                    f"VNC password (the vnc_server_password secret; default ibgateway123!test)."),
+        "message": ("View Gateway is running — opening it now. Pick view-only (default) or "
+                    "control; the password auto-fills from the vnc_server_password secret."),
     }
 
 
