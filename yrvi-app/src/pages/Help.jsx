@@ -217,15 +217,7 @@ function WordsOfEncouragement() {
         <div className="text-sm text-gray-400 dark:text-gray-500 italic">Loading today's verse…</div>
       )}
       <div className="text-[11px] text-gray-400 dark:text-gray-600 pt-1">
-        Powered by{' '}
-        <a
-          href="https://www.ourmanna.com/"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline hover:text-gray-600 dark:hover:text-gray-400"
-        >
-          OurManna.com
-        </a>
+        World English Bible (public domain)
       </div>
     </div>
   )

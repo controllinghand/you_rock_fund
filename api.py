@@ -91,16 +91,6 @@ def _trading_paused() -> bool:
     return TRADING_PAUSED_FILE.exists()
 ALERTS_MAX = 200
 _alerts_lock = threading.Lock()
-# "Words of Encouragement" — a daily Bible verse on the Help page. We fetch
-# OurManna's Verse of the Day (free, no API key, public-domain friendly) once per
-# calendar day and cache it here so every dashboard load that day is instant and
-# survives the external API being slow or down. Keyless by design — nothing to
-# configure per box, no credentials on disk.
-VOTD_CACHE_FILE = (
-    Path("/data/verse_of_the_day.json") if CONTAINERIZED
-    else BASE_DIR / "verse_of_the_day.json"
-)
-_votd_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
 # Feedback webhook — defaults to the shared You Rock Club feedback channel so every
 # box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
@@ -2290,81 +2280,147 @@ def clear_alerts():
 # OurManna fetch fails AND there's no cached verse to fall back to — i.e. a
 # brand-new box during a prolonged outage. Rotated by day-of-year so it still
 # changes daily instead of showing one verse forever.
-_VOTD_FALLBACK_POOL = [
-    ("I can do all things through Christ who strengthens me.", "Philippians 4:13"),
-    ("Be strong and courageous. Do not be afraid; do not be discouraged, for the Lord your God will be with you wherever you go.", "Joshua 1:9"),
-    ("The Lord is my shepherd; I shall not want.", "Psalm 23:1"),
-    ("Trust in the Lord with all your heart, and lean not on your own understanding.", "Proverbs 3:5"),
-    ("Cast all your anxiety on him because he cares for you.", "1 Peter 5:7"),
-    ("But those who wait on the Lord shall renew their strength; they shall mount up with wings like eagles.", "Isaiah 40:31"),
-    ("And we know that all things work together for good to those who love God.", "Romans 8:28"),
-    ("The Lord is my light and my salvation; whom shall I fear?", "Psalm 27:1"),
-    ("Peace I leave with you, my peace I give to you; let not your heart be troubled, neither let it be afraid.", "John 14:27"),
-    ("Have I not commanded you? Be strong and of good courage; do not be afraid, nor be dismayed.", "Joshua 1:9"),
-    ("This is the day which the Lord has made; we will rejoice and be glad in it.", "Psalm 118:24"),
-    ("For I know the plans I have for you, declares the Lord, plans to prosper you and not to harm you.", "Jeremiah 29:11"),
-    ("Let us not grow weary while doing good, for in due season we shall reap if we do not lose heart.", "Galatians 6:9"),
-    ("The joy of the Lord is your strength.", "Nehemiah 8:10"),
-    ("Give thanks to the Lord, for he is good; his love endures forever.", "Psalm 107:1"),
+# ── Words of Encouragement ──────────────────────────────────────────────────
+# A daily Bible verse on the Help page. Fully self-contained: a hand-curated set
+# of encouraging verses (World English Bible — public domain, so no attribution
+# required) rotated by day-of-year. No external API, no cache, no credentials,
+# no network — it can't go stale, get "stuck," or fail offline. The list cycles
+# about every four months.
+_VERSES = [
+    ("Haven’t I commanded you? Be strong and courageous. Don’t be afraid, neither be dismayed: for the Lord your God is with you wherever you go.", "Joshua 1:9"),
+    ("Be strong and courageous. Don’t be afraid or scared of them; for the Lord your God himself is who goes with you. He will not fail you nor forsake you.", "Deuteronomy 31:6"),
+    ("The Lord himself is who goes before you. He will be with you. He will not fail you nor forsake you. Don’t be afraid. Don’t be discouraged.", "Deuteronomy 31:8"),
+    ("Seek the Lord and his strength. Seek his face forever more.", "1 Chronicles 16:11"),
+    ("The Lord is my shepherd: I shall lack nothing.", "Psalm 23:1"),
+    ("Even though I walk through the valley of the shadow of death, I will fear no evil, for you are with me. Your rod and your staff, they comfort me.", "Psalm 23:4"),
+    ("The Lord is my light and my salvation. Whom shall I fear? The Lord is the strength of my life. Of whom shall I be afraid?", "Psalm 27:1"),
+    ("The Lord is my strength and my shield. My heart has trusted in him, and I am helped. Therefore my heart greatly rejoices. With my song I will thank him.", "Psalm 28:7"),
+    ("The Lord will give strength to his people. The Lord will bless his people with peace.", "Psalm 29:11"),
+    ("For his anger is but for a moment. His favor is for a lifetime. Weeping may stay for the night, but joy comes in the morning.", "Psalm 30:5"),
+    ("Be strong, and let your heart take courage, all you who hope in the Lord.", "Psalm 31:24"),
+    ("I will instruct you and teach you in the way which you shall go. I will counsel you with my eye on you.", "Psalm 32:8"),
+    ("I sought the Lord, and he answered me, and delivered me from all my fears.", "Psalm 34:4"),
+    ("Oh taste and see that the Lord is good. Blessed is the man who takes refuge in him.", "Psalm 34:8"),
+    ("The righteous cry, and the Lord hears, and delivers them out of all their troubles.", "Psalm 34:17"),
+    ("The Lord is near to those who have a broken heart, and saves those who have a crushed spirit.", "Psalm 34:18"),
+    ("Also delight yourself in the Lord, and he will give you the desires of your heart.", "Psalm 37:4"),
+    ("Commit your way to the Lord. Trust also in him, and he will do this.", "Psalm 37:5"),
+    ("I waited patiently for the Lord. He turned to me, and heard my cry.", "Psalm 40:1"),
+    ("Why are you in despair, my soul? Why are you disturbed within me? Hope in God! For I shall still praise him, the saving help of my countenance, and my God.", "Psalm 42:11"),
+    ("God is our refuge and strength, a very present help in trouble.", "Psalm 46:1"),
+    ("Be still, and know that I am God. I will be exalted among the nations. I will be exalted in the earth.", "Psalm 46:10"),
+    ("Cast your burden on the Lord, and he will sustain you. He will never allow the righteous to be moved.", "Psalm 55:22"),
+    ("When I am afraid, I will put my trust in you.", "Psalm 56:3"),
+    ("My soul rests in God alone. My salvation is from him.", "Psalm 62:1"),
+    ("My flesh and my heart fails, but God is the strength of my heart and my portion forever.", "Psalm 73:26"),
+    ("He who dwells in the secret place of the Most High will rest in the shadow of the Almighty.", "Psalm 91:1"),
+    ("I will say of the Lord, He is my refuge and my fortress; my God, in whom I trust.", "Psalm 91:2"),
+    ("In the multitude of my thoughts within me, your comforts delight my soul.", "Psalm 94:19"),
+    ("Praise the Lord, my soul, and don’t forget all his benefits.", "Psalm 103:2"),
+    ("The Lord is on my side. I will not be afraid. What can man do to me?", "Psalm 118:6"),
+    ("This is the day that the Lord has made. We will rejoice and be glad in it!", "Psalm 118:24"),
+    ("Your word is a lamp to my feet, and a light for my path.", "Psalm 119:105"),
+    ("My help comes from the Lord, who made heaven and earth.", "Psalm 121:2"),
+    ("In the day that I called, you answered me. You encouraged me with strength in my soul.", "Psalm 138:3"),
+    ("I will give thanks to you, for I am fearfully and wonderfully made. Your works are wonderful. My soul knows that very well.", "Psalm 139:14"),
+    ("Cause me to hear your loving kindness in the morning, for I trust in you. Cause me to know the way in which I should walk, for I lift up my soul to you.", "Psalm 143:8"),
+    ("He heals the broken in heart, and binds up their wounds.", "Psalm 147:3"),
+    ("Trust in the Lord with all your heart, and don’t lean on your own understanding.", "Proverbs 3:5"),
+    ("In all your ways acknowledge him, and he will make your paths straight.", "Proverbs 3:6"),
+    ("The Lord’s name is a strong tower: the righteous run to him, and are safe.", "Proverbs 18:10"),
+    ("You will keep whoever’s mind is steadfast in perfect peace, because he trusts in you.", "Isaiah 26:3"),
+    ("Haven’t you known? Haven’t you heard? The everlasting God, the Lord, The Creator of the ends of the earth, doesn’t faint. He isn’t weary. His understanding is unsearchable.", "Isaiah 40:28"),
+    ("He gives power to the weak. He increases the strength of him who has no might.", "Isaiah 40:29"),
+    ("But those who wait for the Lord will renew their strength. They will mount up with wings like eagles. They will run, and not be weary. They will walk, and not faint.", "Isaiah 40:31"),
+    ("Don’t you be afraid, for I am with you. Don’t be dismayed, for I am your God. I will strengthen you. Yes, I will help you. Yes, I will uphold you with the right hand of my righteousness.", "Isaiah 41:10"),
+    ("For I, the Lord your God, will hold your right hand, saying to you, Don’t be afraid. I will help you.", "Isaiah 41:13"),
+    ("But now thus says the Lord who created you, Jacob, and he who formed you, Israel: Don’t be afraid, for I have redeemed you. I have called you by your name. You are mine.", "Isaiah 43:1"),
+    ("When you pass through the waters, I will be with you; and through the rivers, they will not overflow you. When you walk through the fire, you will not be burned, and flame will not scorch you.", "Isaiah 43:2"),
+    ("and even to old age I am he, and even to gray hairs will I carry you. I have made, and I will bear; yes, I will carry, and will deliver.", "Isaiah 46:4"),
+    ("For the mountains may depart, and the hills be removed; but my loving kindness shall not depart from you, neither shall my covenant of peace be removed, says the Lord who has mercy on you.", "Isaiah 54:10"),
+    ("For you shall go out with joy, and be led out with peace: the mountains and the hills shall break out before you into singing; and all the trees of the fields shall clap their hands.", "Isaiah 55:12"),
+    ("and the Lord will guide you continually, and satisfy your soul in dry places, and make strong your bones; and you shall be like a watered garden, and like a spring of water, whose waters don’t fail.", "Isaiah 58:11"),
+    ("For I know the thoughts that I think toward you, says the Lord, thoughts of peace, and not of evil, to give you hope and a future.", "Jeremiah 29:11"),
+    ("The Lord appeared of old to me, saying, Yes, I have loved you with an everlasting love: therefore with loving kindness have I drawn you.", "Jeremiah 31:3"),
+    ("Call to me, and I will answer you, and will show you great things, and difficult, which you don’t know.", "Jeremiah 33:3"),
+    ("Ah Lord GOD! Behold, you have made the heavens and the earth by your great power and by your outstretched arm; there is nothing too hard for you.", "Jeremiah 32:17"),
+    ("It is because of the Lord’s loving kindnesses that we are not consumed, because his compassion doesn’t fail.", "Lamentations 3:22"),
+    ("They are new every morning; great is your faithfulness.", "Lamentations 3:23"),
+    ("Don’t rejoice against me, my enemy. When I fall, I will arise. When I sit in darkness, the Lord will be a light to me.", "Micah 7:8"),
+    ("The Lord is good, a stronghold in the day of trouble; and he knows those who take refuge in him.", "Nahum 1:7"),
+    ("The Lord, your God, is in your midst, a mighty one who will save. He will rejoice over you with joy. He will calm you in his love. He will rejoice over you with singing.", "Zephaniah 3:17"),
+    ("See the birds of the sky, that they don’t sow, neither do they reap, nor gather into barns. Your heavenly Father feeds them. Aren’t you of much more value than they?", "Matthew 6:26"),
+    ("Therefore don’t be anxious for tomorrow, for tomorrow will be anxious for itself. Each day’s own evil is sufficient.", "Matthew 6:34"),
+    ("Come to me, all you who labor and are heavily burdened, and I will give you rest.", "Matthew 11:28"),
+    ("Take my yoke upon you, and learn from me, for I am gentle and lowly in heart; and you will find rest for your souls.", "Matthew 11:29"),
+    ("For my yoke is easy, and my burden is light.", "Matthew 11:30"),
+    ("But Jesus, when he heard the message spoken, immediately said to the ruler of the synagogue, Don’t be afraid, only believe.", "Mark 5:36"),
+    ("For everything spoken by God is possible.", "Luke 1:37"),
+    ("Don’t be afraid, little flock, for it is your Father’s good pleasure to give you the Kingdom.", "Luke 12:32"),
+    ("For God so loved the world, that he gave his one and only Son, that whoever believes in him should not perish, but have eternal life.", "John 3:16"),
+    ("Don’t let your heart be troubled. Believe in God. Believe also in me.", "John 14:1"),
+    ("Peace I leave with you. My peace I give to you; not as the world gives, give I to you. Don’t let your heart be troubled, neither let it be fearful.", "John 14:27"),
+    ("I have told you these things, that in me you may have peace. In the world you have oppression; but cheer up! I have overcome the world.", "John 16:33"),
+    ("We know that all things work together for good for those who love God, to those who are called according to his purpose.", "Romans 8:28"),
+    ("What then shall we say about these things? If God is for us, who can be against us?", "Romans 8:31"),
+    ("No, in all these things, we are more than conquerors through him who loved us.", "Romans 8:37"),
+    ("rejoicing in hope; enduring in troubles; continuing steadfastly in prayer.", "Romans 12:12"),
+    ("Now may the God of hope fill you with all joy and peace in believing, that you may abound in hope, in the power of the Holy Spirit.", "Romans 15:13"),
+    ("No temptation has taken you except what is common to man. God is faithful, who will not allow you to be tempted above what you are able, but will with the temptation also make the way of escape, that you may be able to endure it.", "1 Corinthians 10:13"),
+    ("But now faith, hope, and love remain—these three. The greatest of these is love.", "1 Corinthians 13:13"),
+    ("Therefore, my beloved brothers, be steadfast, immovable, always abounding in the Lord’s work, because you know that your labor is not in vain in the Lord.", "1 Corinthians 15:58"),
+    ("Watch! Stand firm in the faith! Be courageous! Be strong!", "1 Corinthians 16:13"),
+    ("Therefore we don’t faint, but though our outward man is decaying, yet our inward man is renewed day by day.", "2 Corinthians 4:16"),
+    ("For our light affliction, which is for the moment, works for us more and more exceedingly an eternal weight of glory.", "2 Corinthians 4:17"),
+    ("for we walk by faith, not by sight.", "2 Corinthians 5:7"),
+    ("And God is able to make all grace abound to you, that you, always having all sufficiency in everything, may abound to every good work.", "2 Corinthians 9:8"),
+    ("He has said to me, My grace is sufficient for you, for my power is made perfect in weakness. Most gladly therefore I will rather glory in my weaknesses, that the power of Christ may rest on me.", "2 Corinthians 12:9"),
+    ("Let us not be weary in doing good, for we will reap in due season, if we don’t give up.", "Galatians 6:9"),
+    ("Now to him who is able to do exceedingly abundantly above all that we ask or think, according to the power that works in us.", "Ephesians 3:20"),
+    ("being confident of this very thing, that he who began a good work in you will complete it until the day of Jesus Christ.", "Philippians 1:6"),
+    ("In nothing be anxious, but in everything, by prayer and petition with thanksgiving, let your requests be made known to God.", "Philippians 4:6"),
+    ("And the peace of God, which surpasses all understanding, will guard your hearts and your thoughts in Christ Jesus.", "Philippians 4:7"),
+    ("Finally, brothers, whatever things are true, whatever things are honorable, whatever things are just, whatever things are pure, whatever things are lovely, whatever things are of good report; if there is any virtue, and if there is any praise, think about these things.", "Philippians 4:8"),
+    ("I can do all things through Christ, who strengthens me.", "Philippians 4:13"),
+    ("My God will supply every need of yours according to his riches in glory in Christ Jesus.", "Philippians 4:19"),
+    ("And let the peace of God rule in your hearts, to which also you were called in one body; and be thankful.", "Colossians 3:15"),
+    ("And whatever you do, work heartily, as for the Lord, and not for men.", "Colossians 3:23"),
+    ("Therefore exhort one another, and build each other up, even as you also do.", "1 Thessalonians 5:11"),
+    ("Rejoice always.", "1 Thessalonians 5:16"),
+    ("Pray without ceasing.", "1 Thessalonians 5:17"),
+    ("In everything give thanks, for this is the will of God in Christ Jesus toward you.", "1 Thessalonians 5:18"),
+    ("Now may the Lord of peace himself give you peace at all times in all ways. The Lord be with you all.", "2 Thessalonians 3:16"),
+    ("For God didn’t give us a spirit of fear, but of power, love, and self-control.", "2 Timothy 1:7"),
+    ("Let us therefore draw near with boldness to the throne of grace, that we may receive mercy, and may find grace for help in time of need.", "Hebrews 4:16"),
+    ("let us hold fast the confession of our hope without wavering; for he who promised is faithful.", "Hebrews 10:23"),
+    ("Now faith is assurance of things hoped for, proof of things not seen.", "Hebrews 11:1"),
+    ("Therefore let us also, seeing we are surrounded by so great a cloud of witnesses, lay aside every weight and the sin which so easily entangles us, and let us run with patience the race that is set before us.", "Hebrews 12:1"),
+    ("Be free from the love of money, content with such things as you have, for he has said, I will in no way leave you, neither will I in any way forsake you.", "Hebrews 13:5"),
+    ("So that with good courage we say, The Lord is my helper. I will not fear. What can man do to me?", "Hebrews 13:6"),
+    ("Jesus Christ is the same yesterday, today, and forever.", "Hebrews 13:8"),
+    ("But if any of you lacks wisdom, let him ask of God, who gives to all liberally and without reproach; and it will be given to him.", "James 1:5"),
+    ("Blessed is the man who endures temptation, for when he has been approved, he will receive the crown of life, which the Lord promised to those who love him.", "James 1:12"),
+    ("Draw near to God, and he will draw near to you. Cleanse your hands, you sinners; and purify your hearts, you double-minded.", "James 4:8"),
+    ("Humble yourselves therefore under the mighty hand of God, that he may exalt you in due time.", "1 Peter 5:6"),
+    ("casting all your worries on him, because he cares for you.", "1 Peter 5:7"),
+    ("But may the God of all grace, who called you to his eternal glory by Christ Jesus, after you have suffered a little while, perfect, establish, strengthen, and settle you.", "1 Peter 5:10"),
+    ("You are of God, little children, and have overcome them; because greater is he who is in you than he who is in the world.", "1 John 4:4"),
+    ("There is no fear in love; but perfect love casts out fear, because fear has punishment. He who fears is not made perfect in love.", "1 John 4:18"),
+    ("He will wipe away from them every tear from their eyes. Death will be no more; neither will there be mourning, nor crying, nor pain, any more. The first things have passed away.", "Revelation 21:4"),
 ]
-
-
-def _votd_fallback(today: str) -> dict:
-    """Pick an offline fallback verse that rotates by day-of-year."""
-    idx = datetime.now(PST).timetuple().tm_yday % len(_VOTD_FALLBACK_POOL)
-    text, reference = _VOTD_FALLBACK_POOL[idx]
-    return {"text": text, "reference": reference, "date": today}
 
 
 @app.get("/api/verse-of-the-day")
 def get_verse_of_the_day():
     """Daily 'Words of Encouragement' verse for the Help page.
 
-    Fetches OurManna's Verse of the Day (free, no API key) at most once per
-    calendar day and caches it to disk. Never raises — three tiers of fallback:
-    fresh cache for today → refetch → last cached verse → a local rotating pool
-    (offline-safe), so the card always renders something.
+    Deterministic and fully self-contained: the verse is chosen by day-of-year
+    from the curated public-domain (WEB) list above. Same verse all day, a new
+    one each day, identical across restarts — no external dependency, no cache.
     """
-    today = datetime.now(PST).strftime("%Y-%m-%d")
-
-    with _votd_lock:
-        cached = None
-        if VOTD_CACHE_FILE.exists():
-            try:
-                cached = json.loads(VOTD_CACHE_FILE.read_text())
-            except Exception:
-                cached = None
-
-        # Fresh cache for today — serve it.
-        if cached and cached.get("date") == today and cached.get("text"):
-            return {"text": cached["text"], "reference": cached.get("reference", ""), "date": today}
-
-        # Stale or missing — try to refresh from OurManna.
-        try:
-            import requests as req
-            resp = req.get(
-                "https://beta.ourmanna.com/api/v1/get/",
-                params={"format": "json"},
-                timeout=8,
-            )
-            resp.raise_for_status()
-            details = resp.json()["verse"]["details"]
-            verse = {
-                "date":      today,
-                "text":      details["text"].strip(),
-                "reference": details["reference"].strip(),
-            }
-            tmp = VOTD_CACHE_FILE.with_name(VOTD_CACHE_FILE.name + ".tmp")
-            tmp.write_text(json.dumps(verse))
-            tmp.replace(VOTD_CACHE_FILE)
-            return verse
-        except Exception as e:
-            print(f"[api/verse-of-the-day] fetch failed: {e}")
-            # Fall back to whatever we last had, else the local rotating pool.
-            if cached and cached.get("text"):
-                return {"text": cached["text"], "reference": cached.get("reference", ""),
-                        "date": cached.get("date", today)}
-            return _votd_fallback(today)
+    now = datetime.now(PST)
+    text, reference = _VERSES[now.timetuple().tm_yday % len(_VERSES)]
+    return {"text": text, "reference": reference, "date": now.strftime("%Y-%m-%d")}
 
 
 @app.get("/api/status")
