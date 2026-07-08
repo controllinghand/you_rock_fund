@@ -2410,6 +2410,34 @@ _VERSES = [
 ]
 
 
+# Blue Letter Bible book codes for the books used in _VERSES, so each verse can
+# link back to the source (WEB) for verification. All codes verified against
+# blueletterbible.org/web/<code>/<ch>/<v>/. Only the books we actually use.
+_BLB_CODES = {
+    "Joshua": "jos", "Deuteronomy": "deu", "1 Chronicles": "1ch", "Psalm": "psa",
+    "Proverbs": "pro", "Isaiah": "isa", "Jeremiah": "jer", "Lamentations": "lam",
+    "Micah": "mic", "Nahum": "nah", "Zephaniah": "zep", "Matthew": "mat",
+    "Mark": "mar", "Luke": "luk", "John": "jhn", "Romans": "rom",
+    "1 Corinthians": "1co", "2 Corinthians": "2co", "Galatians": "gal",
+    "Ephesians": "eph", "Philippians": "php", "Colossians": "col",
+    "1 Thessalonians": "1th", "2 Thessalonians": "2th", "2 Timothy": "2ti",
+    "Hebrews": "heb", "James": "jas", "1 Peter": "1pe", "1 John": "1jo",
+    "Revelation": "rev",
+}
+
+
+def _blb_url(reference: str) -> str:
+    """Build a Blue Letter Bible (WEB) verse URL from a 'Book C:V' reference."""
+    m = re.match(r"^(.*?)\s+(\d+):(\d+)$", reference.strip())
+    if not m:
+        return ""
+    book, chapter, verse = m.group(1), m.group(2), m.group(3)
+    code = _BLB_CODES.get(book)
+    if not code:
+        return ""
+    return f"https://www.blueletterbible.org/web/{code}/{chapter}/{verse}/"
+
+
 @app.get("/api/verse-of-the-day")
 def get_verse_of_the_day():
     """Daily 'Words of Encouragement' verse for the Help page.
@@ -2417,10 +2445,16 @@ def get_verse_of_the_day():
     Deterministic and fully self-contained: the verse is chosen by day-of-year
     from the curated public-domain (WEB) list above. Same verse all day, a new
     one each day, identical across restarts — no external dependency, no cache.
+    Includes a Blue Letter Bible link so the verse can be verified at the source.
     """
     now = datetime.now(PST)
     text, reference = _VERSES[now.timetuple().tm_yday % len(_VERSES)]
-    return {"text": text, "reference": reference, "date": now.strftime("%Y-%m-%d")}
+    return {
+        "text": text,
+        "reference": reference,
+        "date": now.strftime("%Y-%m-%d"),
+        "source_url": _blb_url(reference),
+    }
 
 
 @app.get("/api/status")

@@ -209,7 +209,21 @@ function WordsOfEncouragement() {
           </blockquote>
           {verse.reference && (
             <figcaption className="text-sm font-medium text-rose-600 dark:text-rose-400">
-              — {verse.reference}
+              —{' '}
+              {verse.source_url ? (
+                <a
+                  href={verse.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Verify at Blue Letter Bible"
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  {verse.reference}
+                  <ExternalLink size={11} className="opacity-70" />
+                </a>
+              ) : (
+                verse.reference
+              )}
             </figcaption>
           )}
         </figure>
