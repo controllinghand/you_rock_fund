@@ -392,15 +392,9 @@ echo ""
 echo "  Wait for IB Gateway to log in (watch for 'Login has completed'):"
 echo "    docker compose --env-file .env.compose logs -f ib_gateway"
 echo ""
-echo "  VNC (if IBKR shows a dialog at first login):"
-echo "    1. Set the VNC password at http://localhost:8001 (or use default)"
-echo "    2. docker compose --env-file .env.compose up -d --force-recreate ib_gateway"
-echo "    3. Connect a VNC client to localhost:5900"
-if $IS_WINDOWS || $IS_WSL; then
-echo "    Windows: install RealVNC Viewer (free) → https://www.realvnc.com/en/connect/download/viewer/"
-else
-echo "    macOS: open vnc://localhost:5900 in Finder → Go → Connect to Server"
-fi
+echo "  See the IB Gateway screen (if IBKR shows a dialog at first login):"
+echo "    Open the dashboard → Help → System Diagnostics → View Gateway"
+echo "    (built-in viewer, no VNC client to install; password auto-fills)"
 echo ""
 echo "  Pre-flight check anytime:"
 echo "    bash startup.sh"

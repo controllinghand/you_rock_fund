@@ -154,11 +154,11 @@ Setup polls silently until the browser form is submitted, then auto-proceeds —
 
 > **Note:** The `docker/secrets/` directory holds empty placeholder files for the file-based fallback path; it's git-ignored and the real values never live there.
 
-#### VNC / macOS Screen Sharing
+#### Viewing the IB Gateway screen (built-in View Gateway)
 
-The IB Gateway container serves its own VNC on `127.0.0.1:5900` (IPv4) for 2FA/dialogs. macOS Screen Sharing also uses port 5900 but on different addresses (LAN IP + IPv6 `::1`), so **the two coexist** — you can leave Screen Sharing on to view the Mac's desktop from another Mac.
+To check the Gateway's screen — a login, 2FA prompt, error dialog, or just its status — use the **View Gateway** viewer built into the dashboard. No VNC client to download: open **Help → System Diagnostics → View Gateway**, then **👁 Open viewer (view-only)** (the password auto-fills). See [docs/view-gateway.md](docs/view-gateway.md).
 
-> **Always connect a VNC client to the gateway via `127.0.0.1:5900` — never `localhost:5900`.** On macOS `localhost` resolves to IPv6 `::1`, which Screen Sharing answers, giving an "authentication failed" against the wrong server.
+> Earlier versions told you to install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed. The raw VNC port still exists on `127.0.0.1:5900` (IPv4) as an optional external-client fallback; on macOS always use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost` resolves to IPv6 `::1`, which macOS Screen Sharing answers → "authentication failed" against the wrong server).
 
 > If `docker compose up` ever fails with *"address already in use"* on 5900, turn Screen Sharing off (**System Settings → General → Sharing → Screen Sharing → OFF**) or set `IB_GATEWAY_VNC_PORT` to a free port in `.env.compose`. For remote terminal access, use SSH (**Remote Login → On**).
 
@@ -229,7 +229,7 @@ Docker Desktop's WSL2 integration makes the `docker` CLI available inside Ubuntu
 
 > **Auto-start after reboot:** The script registers a Windows Task Scheduler job so containers restart automatically on every login. If the registration fails, rerun your terminal as Administrator and run `bash setup_docker.sh --paper` again.
 
-> **VNC for 2FA:** Windows has no built-in VNC viewer. If IBKR requires 2FA on first login, install [TigerVNC](https://tigervnc.org/) (free, no account) and connect to `127.0.0.1:5900`. Most first-time logins complete automatically without needing VNC.
+> **Viewing the Gateway for 2FA:** If IBKR requires 2FA on first login, use the built-in **View Gateway** viewer — **Help → System Diagnostics → View Gateway** in the dashboard (no VNC client to install). Most first-time logins complete automatically without needing it. See [docs/view-gateway.md](docs/view-gateway.md).
 
 #### Verifying secrets
 

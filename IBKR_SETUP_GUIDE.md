@@ -278,7 +278,7 @@ Without this, YRVI will connect, get market data, size positions — and then si
 **Docker setup:** This is handled automatically via `ibc_config.ini` (`BypassOrderPrecautions=yes`) — no manual step needed.
 
 **Legacy/manual setup:** You must set this once in the IB Gateway GUI:
-1. Open IB Gateway and connect via TigerVNC at `127.0.0.1:5900` (literal IPv4, not `localhost`)
+1. Open the Gateway screen with the built-in **View Gateway** viewer — dashboard **Help → System Diagnostics → View Gateway**, then **⚠️ Enable keyboard / mouse control** (you need input to change this setting). No VNC client required. (Fallback: an external VNC client to `127.0.0.1:5900` — literal IPv4, not `localhost`.)
 2. Click **Configure → API → Precautions**
 3. Check **✅ Bypass Order Precautions for API Orders**
 4. Click **Apply → OK**

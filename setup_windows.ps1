@@ -443,17 +443,15 @@ Write-Host "    docker compose --env-file .env.compose logs -f scheduler" -Foreg
 Write-Host "    docker compose --env-file .env.compose ps" -ForegroundColor Cyan
 Write-Host ""
 
-# VNC is informational — most first-time logins complete automatically
+# Viewing the Gateway is informational — most first-time logins complete automatically
 Write-Host "  ==================================================="
-Write-Host "  2FA / VNC INFO FOR WINDOWS USERS:"
+Write-Host "  2FA / VIEWING THE IB GATEWAY SCREEN:"
 Write-Host "  Most first-time logins complete automatically."
 Write-Host "  If IBKR requires 2FA or shows a login dialog,"
-Write-Host "  you will need a VNC client to complete it."
-Write-Host "  Windows does NOT have a built-in VNC viewer."
-Write-Host "  Recommended: RealVNC Viewer (free)"
-Write-Host "  https://www.realvnc.com/en/connect/download/viewer/"
-Write-Host "  Connect to: localhost:5900"
-Write-Host "  Password: the VNC_SERVER_PASSWORD set in .env.compose"
+Write-Host "  use the built-in View Gateway viewer:"
+Write-Host "    Dashboard -> Help -> System Diagnostics -> View Gateway"
+Write-Host "  No VNC client to install; the password auto-fills."
+Write-Host "  Details: docs/view-gateway.md"
 Write-Host "  Most users won't need this on first install."
 Write-Host "  ==================================================="
 

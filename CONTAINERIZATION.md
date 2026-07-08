@@ -211,24 +211,13 @@ curl -X POST http://127.0.0.1:3000/api/settings `
 
 Do not disable `dry_run` until you have confirmed `trading_mode: paper` and that IB Gateway is connected to the paper account, not a live account.
 
-### VNC on Windows (informational — most users won't need this)
+### Viewing the IB Gateway screen (informational — most users won't need this)
 
-Most first-time IB Gateway logins complete automatically without any VNC interaction. VNC is only needed if IBKR presents a 2FA challenge, a device-authorization dialog, or a credential error during the initial login.
+Most first-time IB Gateway logins complete automatically without any interaction. You only need to see the screen if IBKR presents a 2FA challenge, a device-authorization dialog, or a credential error during the initial login.
 
-Windows does not have a built-in VNC viewer. If you do need VNC:
+Use the built-in **View Gateway** viewer — dashboard **Help → System Diagnostics → View Gateway** (view-only by default; enable control to click through a dialog). It runs a noVNC + websockify sidecar (`view-gateway`, opt-in `viewer` compose profile) that bridges the Gateway's VNC display to the browser at `127.0.0.1:6080`, and the password auto-fills from the `vnc_server_password` secret. No VNC client to install on any OS. See [docs/view-gateway.md](docs/view-gateway.md).
 
-1. Install [TigerVNC](https://tigervnc.org/) (free, open-source, no account) — run `vncviewer64.exe`.
-2. Set `VNC_SERVER_PASSWORD` in `.env.compose` (keep it **≤ 8 characters** — classic VNC auth truncates the rest).
-3. Recreate the gateway container:
-
-   ```powershell
-   docker compose --env-file .env.compose up -d --force-recreate ib_gateway
-   ```
-
-4. Connect TigerVNC to `127.0.0.1:5900` (literal IPv4, not `localhost`) using the password from step 2.
-5. Complete the IBKR dialog in the VNC session.
-
-The VNC port is bound to `127.0.0.1` only.
+> **Fallback — external VNC client.** The raw VNC port is still exposed on the container at `127.0.0.1:5900` (bound to loopback only). If you'd rather use an external client (e.g. [TigerVNC](https://tigervnc.org/), free, no account): set `VNC_SERVER_PASSWORD` in `.env.compose` (**≤ 8 characters** — classic VNC auth truncates the rest), recreate the gateway (`docker compose --env-file .env.compose up -d --force-recreate ib_gateway`), and connect to `127.0.0.1:5900` (literal IPv4, not `localhost`).
 
 ### Windows Filesystem Reminder
 
@@ -394,8 +383,8 @@ image: ghcr.io/gnzsnz/ib-gateway:${IB_GATEWAY_TAG:-latest}
 container_name: ib_gateway
 ```
 
-For first login or 2FA recovery, set a temporary `VNC_SERVER_PASSWORD` (**≤ 8 chars**) in `.env.compose`, recreate `ib_gateway`, and connect to `127.0.0.1:5900` with a VNC client:
-[NOTE: Use TigerVNC (free, no account) on any OS — `brew install --cask tigervnc` on macOS, or the installer from tigervnc.org on Windows. macOS's built-in Screen Sharing can't connect to the local gateway. Always use the literal `127.0.0.1:5900`, never `localhost` (which resolves to IPv6 ::1 → macOS Screen Sharing).]
+For first login or 2FA recovery, open the built-in **View Gateway** viewer — dashboard **Help → System Diagnostics → View Gateway** (no VNC client to install; password auto-fills). See [docs/view-gateway.md](docs/view-gateway.md).
+[NOTE: Fallback — the raw VNC port is still on `127.0.0.1:5900`. To use an external client, set a temporary `VNC_SERVER_PASSWORD` (≤ 8 chars) in `.env.compose`, recreate `ib_gateway`, and connect with e.g. TigerVNC (free, no account) to the literal `127.0.0.1:5900`, never `localhost` (which resolves to IPv6 ::1 → macOS Screen Sharing).]
 
 ```bash
 docker compose --env-file .env.compose up -d --force-recreate ib_gateway
@@ -753,14 +742,14 @@ If `localhost:8000/api/status` works but `localhost:3000/api/status` fails, the 
 docker compose --env-file .env.compose restart web
 ```
 
-If `ibkr_connected` is false, check `ib_gateway` logs and use VNC if needed:
-[NOTE: Use TigerVNC (free, no account) on any OS — `brew install --cask tigervnc` on macOS, or the installer from tigervnc.org on Windows. Always connect to the literal `127.0.0.1:5900`, never `localhost`.]
+If `ibkr_connected` is false, check `ib_gateway` logs and open the built-in **View Gateway** viewer (dashboard **Help → System Diagnostics → View Gateway**) to see the screen if needed:
+[NOTE: No VNC client required — View Gateway bridges the Gateway display to `127.0.0.1:6080` in the browser. Fallback external client still works against the raw `127.0.0.1:5900` (literal IPv4, never `localhost`).]
 
 ```bash
 docker compose --env-file .env.compose logs -f ib_gateway
 ```
 
-Set `VNC_SERVER_PASSWORD` (**≤ 8 chars**) in `.env.compose`, recreate `ib_gateway`, and connect to `127.0.0.1:5900` if IBKR needs 2FA, a warning confirmation, or credential correction.
+If IBKR needs 2FA, a warning confirmation, or credential correction, open the built-in **View Gateway** viewer (dashboard **Help → System Diagnostics → View Gateway**) to see and act on the screen — no VNC client needed. (Fallback: set `VNC_SERVER_PASSWORD` (**≤ 8 chars**) in `.env.compose`, recreate `ib_gateway`, and connect an external client to `127.0.0.1:5900`.)
 
 If IB Gateway shows a growing number of API client tabs, check the API logs:
 

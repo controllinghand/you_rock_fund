@@ -318,19 +318,19 @@ docker compose --env-file .env.compose up -d --build
 | Dashboard shows Gateway red | Run `docker compose --env-file .env.compose logs -f ib_gateway` and check for errors |
 | Task Scheduler job not registered | Rerun `bash setup_docker.sh --paper` from Git Bash opened as Administrator |
 | `docker` not found in Git Bash | Docker Desktop isn't running. Open it and wait for the engine indicator to go green. |
-| IB Gateway needs 2FA or shows a login dialog | Connect via TigerVNC (see below) |
+| IB Gateway needs 2FA or shows a login dialog | Open the built-in **View Gateway** viewer (see below) |
 
-### Connecting via VNC (2FA / login dialogs)
+### Viewing the IB Gateway screen (2FA / login dialogs)
 
-The IB Gateway runs headless inside Docker but exposes a VNC session on `127.0.0.1:5900`. Windows does not have a built-in VNC viewer — use **TigerVNC** (free, open-source, no account):
+There's a **View Gateway** viewer built into the dashboard — no VNC client to download.
 
-1. Download the Windows installer from [tigervnc.org](https://tigervnc.org/) (or the [GitHub releases](https://github.com/TigerVNC/tigervnc/releases)) and run `vncviewer64.exe`.
-2. Connect to: **`127.0.0.1:5900`** (leave Username blank).
-3. Password: `ibgateway123!test` (default — its first 8 chars, `ibgatewa`, are what count; change it via `http://localhost:8001`, keeping it **≤ 8 characters**).
+1. Open the dashboard (**http://localhost:3000**) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway**. A new browser tab opens.
+3. Click **👁 Open viewer (view-only)** to watch, or **⚠️ Enable keyboard / mouse control** to click through a 2FA/login dialog.
 
-You'll see the IB Gateway GUI and can dismiss any dialog that's blocking login.
+The password auto-fills from your `vnc_server_password` secret — nothing to type. You'll see the IB Gateway GUI and can dismiss any dialog that's blocking login. See [docs/view-gateway.md](docs/view-gateway.md).
 
-> We switched from RealVNC because its current viewer forces you to create an account before it will connect. TigerVNC connects directly.
+> Older versions had you install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port on `127.0.0.1:5900` still works with an external client like [TigerVNC](https://tigervnc.org/) if you ever want a fallback.)
 
 ---
 

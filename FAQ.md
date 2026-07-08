@@ -27,15 +27,15 @@ Alternatively, turn Screen Sharing off (**System Settings → General → Sharin
 
 ### Q: I need to check the IB Gateway screen (e.g. it's stuck on a 2FA or confirmation dialog)
 
-**A:** The IB Gateway runs headless inside Docker but exposes a VNC session on `127.0.0.1:5900`. macOS's built-in Screen Sharing won't work for this — it refuses to connect to your own machine ("you cannot control your own screen"). Use **TigerVNC** (free, open-source, no account) instead:
+**A:** There's now a **View Gateway** viewer built into the dashboard — no VNC client to download.
 
-1. Install: `brew install --cask tigervnc` (macOS) — or grab the Windows installer from https://tigervnc.org/
-2. Launch TigerVNC and connect to: **`127.0.0.1:5900`** — use the literal IPv4, **not `localhost`** (on macOS `localhost` → IPv6 `::1` → hits Screen Sharing → "authentication failed" against the wrong server).
-3. Leave **Username blank**. Password: `ibgateway123!test` (truncated to its first 8 chars, `ibgatewa`) unless you set a custom VNC Password in secrets — keep custom ones **≤ 8 characters**.
+1. Open the dashboard (**http://localhost:3000**) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway**. A new browser tab opens.
+3. Click **👁 Open viewer (view-only)** to watch the screen, or **⚠️ Enable keyboard / mouse control** if you need to click through a 2FA/confirmation dialog.
 
-You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it.
+The password auto-fills from your `vnc_server_password` secret, so there's nothing to type. You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it. See [docs/view-gateway.md](docs/view-gateway.md) for details.
 
-> We switched from RealVNC because its current viewer forces an account/trial before it will connect. TigerVNC doesn't.
+> Older versions told you to install RealVNC or TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port is still there at `127.0.0.1:5900` if you ever want an external client as a fallback; on macOS use the literal `127.0.0.1`, never `localhost`.)
 
 ---
 

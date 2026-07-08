@@ -335,43 +335,34 @@ docker compose --env-file .env.compose restart ib_gateway
 | Containers don't start after reboot | Open Docker Desktop manually and wait for "Engine running", then run `./setup_docker.sh --paper` |
 | Dashboard shows Gateway red | Run `docker compose --env-file .env.compose logs -f ib_gateway` and check for errors |
 | Secret files missing error | Run `./setup_docker.sh --paper` — secrets are re-fetched from the secrets container |
-| IB Gateway needs 2FA | Set the VNC password at `http://localhost:8001` (**≤ 8 characters**), recreate the gateway, then connect a VNC client (TigerVNC — see below) to **`127.0.0.1:5900`**. |
+| IB Gateway needs 2FA | Open the built-in **View Gateway** viewer — dashboard **Help → System Diagnostics → View Gateway** (see below). No VNC client needed. |
 
-### Remote Access to the IB Gateway Screen (TigerVNC)
+### Viewing the IB Gateway Screen (built-in View Gateway)
 
-The IB Gateway **container** serves its own VNC on **`127.0.0.1:5900`** — that's how you
-reach the login/2FA screen. Use **TigerVNC** (free, open-source, no account) as the client.
+To reach the login/2FA screen, use the **View Gateway** viewer built into the dashboard —
+there's nothing to install.
 
-> We switched away from RealVNC: its current "RealVNC Connect Viewer" forces you to create
-> an account and start a trial before it will connect to anything. TigerVNC just connects.
+1. Open the dashboard (**http://localhost:3000** on the mini) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway** → **👁 Open viewer (view-only)**,
+   or **⚠️ Enable keyboard / mouse control** to complete an IB Key 2FA (live) or confirm the
+   auto-login (paper).
 
-> ✅ This is **client-side only** — you are *connecting to* the container's VNC, not running
-> a VNC **server** on the Mac, so it coexists with macOS Screen Sharing (see Phase 2).
+The password auto-fills from the `vnc_server_password` secret — nothing to type. See
+[docs/view-gateway.md](docs/view-gateway.md).
 
-**Install TigerVNC:**
-- **macOS:** `brew install --cask tigervnc`
-- **Windows:** download the installer from [tigervnc.org](https://tigervnc.org/) (or the
-  [GitHub releases](https://github.com/TigerVNC/tigervnc/releases)) and run `vncviewer64.exe`.
+**From another machine (LAN/VPN):** open an SSH tunnel to the dashboard and browse locally —
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 6080:127.0.0.1:6080 <user>@<mini-ip>
+```
+then open `http://localhost:3000` and use View Gateway as above (it opens the viewer on
+`localhost:6080`, which the tunnel forwards).
 
-**Connect:**
-1. Set the gateway's VNC password once at `http://localhost:8001` (on the mini). Keep it
-   **≤ 8 characters** — classic VNC auth silently truncates anything longer, which looks
-   like a wrong password.
-2. Launch TigerVNC and connect to:
-   - **On the mini itself:** **`127.0.0.1:5900`**  ← literal IPv4, **never `localhost`**
-   - **From another machine (LAN/VPN):** open an SSH tunnel first, then connect locally —
-     ```bash
-     ssh -L 5901:127.0.0.1:5900 <user>@<mini-ip>
-     ```
-     then point TigerVNC at `127.0.0.1:5901`. (You can't reach the gateway via
-     `<mini-ip>:5900` directly — that address is macOS Screen Sharing, not the gateway.)
-3. Leave **Username blank**, enter the VNC password. You'll see the gateway desktop —
-   complete the IB Key 2FA there (live) or confirm the auto-login (paper).
-
-> ⚠️ **Always `127.0.0.1:5900`, never `localhost:5900`.** On macOS `localhost` resolves to
-> IPv6 `::1`, which macOS Screen Sharing answers — connecting there fails authentication
-> against the wrong server. The literal IPv4 address always lands on the gateway. Recommended
-> on **both minis**.
+> We used to recommend installing RealVNC/TigerVNC and connecting an external client to
+> `127.0.0.1:5900`. That's **no longer needed** — View Gateway is built in. The raw VNC port
+> is still exposed on the container at `127.0.0.1:5900` if you ever want an external client as
+> a fallback; on macOS use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost`
+> resolves to IPv6 `::1`, which macOS Screen Sharing answers → auth fails against the wrong
+> server).
 
 ---
 
