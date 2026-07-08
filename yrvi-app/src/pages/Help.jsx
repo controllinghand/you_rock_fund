@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import axios from 'axios'
-import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw } from 'lucide-react'
+import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw, Monitor } from 'lucide-react'
 
 const FAQ_URL = 'https://github.com/controllinghand/you_rock_fund/blob/main/FAQ.md'
 
@@ -198,6 +198,30 @@ export default function Help() {
   const [gwRestarting, setGwRestarting] = useState(false)
   const [gwRestartMsg, setGwRestartMsg] = useState(null)  // {ok, text}
 
+  const [viewStarting, setViewStarting] = useState(false)
+  const [viewMsg, setViewMsg]           = useState(null)  // {ok, text}
+
+  const openViewGateway = async () => {
+    setViewStarting(true)
+    setViewMsg(null)
+    // Open the tab synchronously within the click gesture so popup blockers don't
+    // eat it; we redirect it once the viewer is up, or close it on failure.
+    const tab = window.open('', '_blank')
+    try {
+      const res  = await axios.post('/api/view-gateway/start')
+      const port = res.data.port ?? '6080'
+      const url  = `${window.location.protocol}//${window.location.hostname}:${port}`
+      if (tab) tab.location = url
+      else window.open(url, '_blank', 'noopener')
+      setViewMsg({ ok: true, text: res.data.message })
+    } catch (err) {
+      if (tab) tab.close()
+      setViewMsg({ ok: false, text: err.response?.data?.detail ?? err.message ?? 'Could not start View Gateway' })
+    } finally {
+      setViewStarting(false)
+    }
+  }
+
   const restartGateway = async () => {
     if (!window.confirm(
       'Restart the IB Gateway?\n\n' +
@@ -260,6 +284,9 @@ export default function Help() {
           and live SPY market data (stock price + options bid/ask/delta).
           No trades are placed — read-only. Takes ~10–40 seconds when the gateway is running
           (it waits for the delayed options feed to populate, like the trader does).
+          <span className="block mt-1"><strong>View Gateway</strong> opens a browser window
+          showing the live IB Gateway screen (view-only) so you can see a login, 2FA prompt,
+          or error dialog directly.</span>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -281,6 +308,16 @@ export default function Help() {
             <RotateCcw size={13} className={gwRestarting ? 'animate-spin' : ''} />
             {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
           </button>
+
+          <button
+            onClick={openViewGateway}
+            disabled={viewStarting}
+            title="Open a browser window showing the live IB Gateway screen (view-only)"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-wait text-sm font-medium rounded-lg transition-colors"
+          >
+            <Monitor size={13} className={viewStarting ? 'animate-pulse' : ''} />
+            {viewStarting ? 'Starting…' : 'View Gateway'}
+          </button>
         </div>
 
         {gwRestartMsg && (
@@ -291,6 +328,17 @@ export default function Help() {
           }`}>
             <RotateCcw size={14} className="shrink-0" />
             {gwRestartMsg.text}
+          </div>
+        )}
+
+        {viewMsg && (
+          <div className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border ${
+            viewMsg.ok
+              ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-400'
+              : 'bg-red-900/30 border-red-800 text-red-400'
+          }`}>
+            <Monitor size={14} className="shrink-0" />
+            {viewMsg.text}
           </div>
         )}
 

@@ -129,6 +129,36 @@ services:
     ports:
       - "127.0.0.1:${YRVI_WEB_PORT:-3000}:80"
 
+  # Browser-accessible, VIEW-ONLY window into the IB Gateway GUI. Bridges the
+  # Gateway's existing x11vnc display (ib_gateway:5900) to noVNC over websockify.
+  # Opt-in: only starts under the "viewer" profile, so the normal stack is
+  # unaffected — see docs/view-gateway.md. Bound to 127.0.0.1 (local-only).
+  view-gateway:
+    build:
+      context: ./docker/view-gateway
+    container_name: yrvi-view-gateway
+    profiles: ["viewer"]
+    restart: unless-stopped
+    depends_on:
+      ib_gateway:
+        condition: service_started
+      secrets:
+        condition: service_healthy
+    environment:
+      GATEWAY_VNC_HOST: ib_gateway
+      GATEWAY_VNC_PORT: "5900"
+      VIEW_GATEWAY_INTERNAL_PORT: "6080"
+      # Where to fetch the vnc_server_password secret to auto-fill the viewer.
+      SECRETS_BASE: http://secrets:8001/secret
+    ports:
+      - "127.0.0.1:${VIEW_GATEWAY_PORT:-6080}:6080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:6080/vnc.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
 volumes:
   ib_gateway_settings:
   yrvi_data:
