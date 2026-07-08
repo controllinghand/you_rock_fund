@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
-import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw, Monitor } from 'lucide-react'
+import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw, Monitor, Heart } from 'lucide-react'
 
 const FAQ_URL = 'https://github.com/controllinghand/you_rock_fund/blob/main/FAQ.md'
 
@@ -185,6 +185,52 @@ function SettingsGroup({ group }) {
   )
 }
 
+function WordsOfEncouragement() {
+  const [verse, setVerse] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    axios.get('/api/verse-of-the-day')
+      .then(res => { if (alive) setVerse(res.data) })
+      .catch(() => { /* endpoint always returns a fallback; ignore */ })
+    return () => { alive = false }
+  }, [])
+
+  return (
+    <div className="bg-gradient-to-br from-rose-50 to-indigo-50 dark:from-rose-950/30 dark:to-indigo-950/30 border border-rose-200 dark:border-rose-900/50 rounded-xl p-5 space-y-3">
+      <div className="text-gray-900 dark:text-white font-semibold text-sm flex items-center gap-2">
+        <Heart size={15} className="text-rose-500" />
+        Words of Encouragement
+      </div>
+      {verse ? (
+        <figure className="space-y-2">
+          <blockquote className="text-gray-700 dark:text-gray-200 text-base leading-relaxed italic">
+            &ldquo;{verse.text}&rdquo;
+          </blockquote>
+          {verse.reference && (
+            <figcaption className="text-sm font-medium text-rose-600 dark:text-rose-400">
+              — {verse.reference}
+            </figcaption>
+          )}
+        </figure>
+      ) : (
+        <div className="text-sm text-gray-400 dark:text-gray-500 italic">Loading today's verse…</div>
+      )}
+      <div className="text-[11px] text-gray-400 dark:text-gray-600 pt-1">
+        Powered by{' '}
+        <a
+          href="https://www.ourmanna.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline hover:text-gray-600 dark:hover:text-gray-400"
+        >
+          OurManna.com
+        </a>
+      </div>
+    </div>
+  )
+}
+
 export default function Help() {
   const [running, setRunning]     = useState(false)
   const [results, setResults]     = useState(null)
@@ -276,6 +322,9 @@ export default function Help() {
         <h1 className="text-xl font-bold text-gray-900 dark:text-white mb-1">Help</h1>
         <div className="text-gray-500 text-sm">Diagnostics, documentation, and support</div>
       </div>
+
+      {/* ── Words of Encouragement ──────────────────────────── */}
+      <WordsOfEncouragement />
 
       {/* ── System Diagnostics ──────────────────────────────── */}
       <Section icon={Activity} title="System Diagnostics">

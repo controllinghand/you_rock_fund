@@ -91,6 +91,16 @@ def _trading_paused() -> bool:
     return TRADING_PAUSED_FILE.exists()
 ALERTS_MAX = 200
 _alerts_lock = threading.Lock()
+# "Words of Encouragement" — a daily Bible verse on the Help page. We fetch
+# OurManna's Verse of the Day (free, no API key, public-domain friendly) once per
+# calendar day and cache it here so every dashboard load that day is instant and
+# survives the external API being slow or down. Keyless by design — nothing to
+# configure per box, no credentials on disk.
+VOTD_CACHE_FILE = (
+    Path("/data/verse_of_the_day.json") if CONTAINERIZED
+    else BASE_DIR / "verse_of_the_day.json"
+)
+_votd_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
 # Feedback webhook — defaults to the shared You Rock Club feedback channel so every
 # box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
@@ -2274,6 +2284,87 @@ def clear_alerts():
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Could not clear alerts: {e}")
     return {"success": True}
+
+
+# Local, offline fallback pool (public-domain WEB/KJV text). Used only when the
+# OurManna fetch fails AND there's no cached verse to fall back to — i.e. a
+# brand-new box during a prolonged outage. Rotated by day-of-year so it still
+# changes daily instead of showing one verse forever.
+_VOTD_FALLBACK_POOL = [
+    ("I can do all things through Christ who strengthens me.", "Philippians 4:13"),
+    ("Be strong and courageous. Do not be afraid; do not be discouraged, for the Lord your God will be with you wherever you go.", "Joshua 1:9"),
+    ("The Lord is my shepherd; I shall not want.", "Psalm 23:1"),
+    ("Trust in the Lord with all your heart, and lean not on your own understanding.", "Proverbs 3:5"),
+    ("Cast all your anxiety on him because he cares for you.", "1 Peter 5:7"),
+    ("But those who wait on the Lord shall renew their strength; they shall mount up with wings like eagles.", "Isaiah 40:31"),
+    ("And we know that all things work together for good to those who love God.", "Romans 8:28"),
+    ("The Lord is my light and my salvation; whom shall I fear?", "Psalm 27:1"),
+    ("Peace I leave with you, my peace I give to you; let not your heart be troubled, neither let it be afraid.", "John 14:27"),
+    ("Have I not commanded you? Be strong and of good courage; do not be afraid, nor be dismayed.", "Joshua 1:9"),
+    ("This is the day which the Lord has made; we will rejoice and be glad in it.", "Psalm 118:24"),
+    ("For I know the plans I have for you, declares the Lord, plans to prosper you and not to harm you.", "Jeremiah 29:11"),
+    ("Let us not grow weary while doing good, for in due season we shall reap if we do not lose heart.", "Galatians 6:9"),
+    ("The joy of the Lord is your strength.", "Nehemiah 8:10"),
+    ("Give thanks to the Lord, for he is good; his love endures forever.", "Psalm 107:1"),
+]
+
+
+def _votd_fallback(today: str) -> dict:
+    """Pick an offline fallback verse that rotates by day-of-year."""
+    idx = datetime.now(PST).timetuple().tm_yday % len(_VOTD_FALLBACK_POOL)
+    text, reference = _VOTD_FALLBACK_POOL[idx]
+    return {"text": text, "reference": reference, "date": today}
+
+
+@app.get("/api/verse-of-the-day")
+def get_verse_of_the_day():
+    """Daily 'Words of Encouragement' verse for the Help page.
+
+    Fetches OurManna's Verse of the Day (free, no API key) at most once per
+    calendar day and caches it to disk. Never raises — three tiers of fallback:
+    fresh cache for today → refetch → last cached verse → a local rotating pool
+    (offline-safe), so the card always renders something.
+    """
+    today = datetime.now(PST).strftime("%Y-%m-%d")
+
+    with _votd_lock:
+        cached = None
+        if VOTD_CACHE_FILE.exists():
+            try:
+                cached = json.loads(VOTD_CACHE_FILE.read_text())
+            except Exception:
+                cached = None
+
+        # Fresh cache for today — serve it.
+        if cached and cached.get("date") == today and cached.get("text"):
+            return {"text": cached["text"], "reference": cached.get("reference", ""), "date": today}
+
+        # Stale or missing — try to refresh from OurManna.
+        try:
+            import requests as req
+            resp = req.get(
+                "https://beta.ourmanna.com/api/v1/get/",
+                params={"format": "json"},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            details = resp.json()["verse"]["details"]
+            verse = {
+                "date":      today,
+                "text":      details["text"].strip(),
+                "reference": details["reference"].strip(),
+            }
+            tmp = VOTD_CACHE_FILE.with_name(VOTD_CACHE_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(verse))
+            tmp.replace(VOTD_CACHE_FILE)
+            return verse
+        except Exception as e:
+            print(f"[api/verse-of-the-day] fetch failed: {e}")
+            # Fall back to whatever we last had, else the local rotating pool.
+            if cached and cached.get("text"):
+                return {"text": cached["text"], "reference": cached.get("reference", ""),
+                        "date": cached.get("date", today)}
+            return _votd_fallback(today)
 
 
 @app.get("/api/status")
