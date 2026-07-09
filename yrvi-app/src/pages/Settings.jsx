@@ -535,7 +535,7 @@ export default function SettingsPage() {
     min_oi_notional: 1000000, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
-    auto_update_enabled: false,
+    auto_update_enabled: false, show_verse_of_the_day: true,
   }
 
   const resetToDefaults = () => {
@@ -1070,6 +1070,14 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
+        </div>
+        <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+          <Toggle
+            label="Words of Encouragement"
+            sub="Show a daily Bible verse on the Help page"
+            checked={settings.show_verse_of_the_day !== false}
+            onChange={v => set('show_verse_of_the_day', v)}
+          />
         </div>
       </Section>
 

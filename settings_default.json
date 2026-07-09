@@ -28,5 +28,6 @@
   "timezone": "America/Los_Angeles",
   "auto_restart_time": "11:59 PM",
   "auto_restart_suppress_mins": 30,
-  "auto_update_enabled": false
+  "auto_update_enabled": false,
+  "show_verse_of_the_day": true
 }

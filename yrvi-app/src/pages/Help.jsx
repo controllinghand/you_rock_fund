@@ -187,14 +187,27 @@ function SettingsGroup({ group }) {
 
 function WordsOfEncouragement() {
   const [verse, setVerse] = useState(null)
+  const [enabled, setEnabled] = useState(null)  // null = not yet known
 
   useEffect(() => {
+    let alive = true
+    axios.get('/api/settings')
+      .then(res => { if (alive) setEnabled(res.data?.show_verse_of_the_day !== false) })
+      .catch(() => { if (alive) setEnabled(true) })  // default on
+    return () => { alive = false }
+  }, [])
+
+  useEffect(() => {
+    if (enabled !== true) return
     let alive = true
     axios.get('/api/verse-of-the-day')
       .then(res => { if (alive) setVerse(res.data) })
       .catch(() => { /* endpoint always returns a fallback; ignore */ })
     return () => { alive = false }
-  }, [])
+  }, [enabled])
+
+  // Hidden by the setting, or not yet resolved — render nothing (avoids a flash).
+  if (enabled !== true) return null
 
   return (
     <div className="bg-gradient-to-br from-rose-50 to-indigo-50 dark:from-rose-950/30 dark:to-indigo-950/30 border border-rose-200 dark:border-rose-900/50 rounded-xl p-5 space-y-3">
