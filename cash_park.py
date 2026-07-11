@@ -201,18 +201,34 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     # Simulate (no real order) on a preview OR when the Settings Dry Run toggle is on.
     orders_dry_run = dry_run or bool(s.get("dry_run", False))
 
+    def _finish(result: dict) -> dict:
+        """Attach common fields, persist the last decision (live runs only, under a
+        SEPARATE key so an open position block is never clobbered), and return it.
+        This is what makes the outcome visible on the dashboard — even a skip."""
+        result.setdefault("instrument", instrument)
+        result["dry_run"]      = orders_dry_run
+        result["evaluated_at"] = datetime.now().isoformat()
+        if not orders_dry_run:
+            try:
+                st = _load_state()
+                st["cash_park_last_eval"] = result
+                _save_state(st)
+            except Exception as e:
+                log.warning(f"could not persist cash_park_last_eval: {e}")
+        return result
+
     # ── Guard 1: every intended option slot must be filled ──────
     # On a preview nothing executed, so use the sized count as the fill proxy.
     fills  = len(csp_outcome.get("positions", [])) if dry_run else csp_outcome.get("fills", 0)
     target = csp_outcome.get("target_fills", 0)
     if fills < target:
-        msg = (f"⏸️ **YRVI** Cash sweep skipped — only {fills}/{target} CSP slots "
-               f"filled this week. Leftover cash left as-is (may indicate a partial "
-               f"Monday run — check before parking).")
-        log.warning(msg)
+        log.warning(f"  ⏸️  Cash sweep skipped — only {fills}/{target} option slots filled")
         if not orders_dry_run:
-            _discord_alert(msg)
-        return {"status": "skipped_slots_unfilled", "fills": fills, "target": target}
+            _discord_alert(f"⏸️ **YRVI** Cash sweep skipped — only {fills}/{target} CSP slots "
+                           f"filled this week. Leftover cash left as-is (may indicate a partial "
+                           f"Monday run — check before parking).")
+        return _finish({"status": "skipped_slots_unfilled", "fills": fills, "target": target,
+                        "message": f"Skipped — only {fills}/{target} option slots filled this week"})
 
     # ── Base amount: undeployed remainder (+ this week's premium if opted in) ──
     remainder = max(0.0, csp_outcome.get("effective_budget", 0.0)
@@ -224,7 +240,8 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
 
     if base < MIN_BUY_USD:
         log.info(f"  💤 No meaningful remainder to park (${base:,.2f}) — skipping")
-        return {"status": "skipped_no_cash", "base": round(base, 2)}
+        return _finish({"status": "skipped_no_cash", "base": round(base, 2),
+                        "message": "No leftover cash to sweep this week"})
 
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
@@ -238,29 +255,40 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         log.info(f"  🅿️  Cash sweep: base=${base:,.2f}  cash=${cash_cap:,.2f}  "
                  f"10%netliq=${netliq_cap:,.2f}  → buy=${buy_amount:,.2f} of {instrument}")
 
+        caps = {"base": round(base, 2), "settled_cash": round(total_cash, 2) if total_cash is not None else None,
+                "netliq_cap": round(netliq_cap, 2), "buy_amount": buy_amount}
+
         if buy_amount < MIN_BUY_USD:
-            log.info(f"  💤 Nothing to park after caps (${buy_amount:,.2f}) — skipping")
-            return {"status": "skipped_no_cash", "buy_amount": buy_amount}
+            if total_cash is not None and total_cash <= 0:
+                reason = f"no settled cash (${total_cash:,.0f}) — would require margin"
+            else:
+                reason = (f"remainder ${base:,.0f} capped by settled cash ${cash_cap:,.0f} "
+                          f"/ 10% net-liq ${netliq_cap:,.0f}")
+            log.info(f"  💤 Nothing to park after caps (${buy_amount:,.2f}) — {reason}")
+            return _finish({"status": "skipped_no_cash", **caps,
+                            "message": f"No cash swept — {reason}"})
 
         # ── Reconcile: don't double-buy if a prior park never sold ──
         state = _load_state()
         existing = state.get("cash_park")
         if existing and existing.get("status") == "open" and existing.get("shares"):
-            msg = (f"⚠️ **YRVI** Cash sweep: a prior {existing.get('instrument')} park "
-                   f"({existing.get('shares')} sh) is still OPEN — not buying again. "
-                   f"It will be sold on the next end-of-week job.")
-            log.warning(msg)
+            log.warning(f"  ⚠️  Prior {existing.get('instrument')} park still open — not buying again")
             if not orders_dry_run:
-                _discord_alert(msg)
-            return {"status": "skipped_existing_open", "existing": existing}
+                _discord_alert(f"⚠️ **YRVI** Cash sweep: a prior {existing.get('instrument')} park "
+                               f"({existing.get('shares')} sh) is still OPEN — not buying again. "
+                               f"It will be sold on the next end-of-week job.")
+            return _finish({"status": "skipped_existing_open", **caps,
+                            "message": f"{existing.get('instrument')} position from a prior week "
+                                       f"still open — not buying again"})
 
         if orders_dry_run:
             _, px = _price(ib, instrument)
             sh    = round(buy_amount / px, 4) if px else None
             log.info(f"  🟡 [DRY RUN] would BUY ~${buy_amount:,.2f} of {instrument}"
                      + (f" (~{sh} sh @ ${px:.2f})" if px else ""))
-            return {"status": "dry_run", "instrument": instrument,
-                    "buy_amount": buy_amount, "est_shares": sh, "est_price": px}
+            return _finish({"status": "dry_run", **caps, "est_shares": sh, "est_price": px,
+                            "message": f"[Preview] Would park ${buy_amount:,.0f} in {instrument}"
+                                       + (f" (~{sh} sh @ ${px:.2f})" if px else " (price unavailable — market closed)")})
 
         # ── Live buy: fractional via cashQty (spend the exact dollars) ──
         contract = Stock(instrument, "SMART", "USD")
@@ -268,7 +296,8 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         if not q:
             log.error(f"  ❌ Cannot qualify {instrument} — sweep aborted")
             _discord_alert(f"❌ **YRVI** Cash sweep: could not qualify {instrument} — no park this week.")
-            return {"status": "failed_qualify", "instrument": instrument}
+            return _finish({"status": "failed_qualify", **caps,
+                            "message": f"Failed — could not qualify {instrument}"})
 
         order = Order(action="BUY", orderType="MKT", cashQty=buy_amount,
                       tif="DAY", account=ACCOUNT)
@@ -278,7 +307,8 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
             log.error(f"  ❌ {instrument} buy did not fill in {MARKET_WAIT_SECS}s")
             _discord_alert(f"❌ **YRVI** Cash sweep: {instrument} BUY (${buy_amount:,.0f}) "
                            f"did not fill — MANUAL CHECK.")
-            return {"status": "failed_no_fill", "instrument": instrument}
+            return _finish({"status": "failed_no_fill", **caps,
+                            "message": f"Failed — {instrument} buy did not fill"})
 
         shares = round(float(trade.orderStatus.filled or 0.0), 4)
         fill   = round(float(trade.orderStatus.avgFillPrice or 0.0), 4)
@@ -300,12 +330,13 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         log.info(f"  ✅ Parked ${cost:,.2f}: {shares} {instrument} @ ${fill:.2f}")
         _discord_alert(f"🅿️ **YRVI** Cash sweep — parked **${cost:,.0f}** in "
                        f"**{instrument}** ({shares} sh @ ${fill:.2f}). Sells end of week.")
-        return {"status": "bought", "instrument": instrument, "shares": shares,
-                "buy_price": fill, "cost_basis": cost}
+        return _finish({"status": "bought", **caps, "shares": shares,
+                        "buy_price": fill, "cost_basis": cost,
+                        "message": f"Parked ${cost:,.0f} in {instrument} ({shares} sh @ ${fill:.2f})"})
     except Exception as e:
         log.error(f"❌ Cash sweep buy error: {e}", exc_info=True)
         _discord_alert(f"❌ **YRVI** Cash sweep buy failed: `{type(e).__name__}: {e}`")
-        return {"status": "error", "error": str(e)}
+        return _finish({"status": "error", "error": str(e), "message": f"Error: {type(e).__name__}"})
     finally:
         if owns is not None:
             owns.disconnect()

@@ -486,6 +486,36 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Cash Sweep status (only when enabled) */}
+      {status?.cash_park_enabled && (() => {
+        const open = status.cash_park?.status === 'open' ? status.cash_park : null
+        const ev   = status.cash_park_last_eval
+        const usd  = v => `$${Math.round(v ?? 0).toLocaleString()}`
+        let emoji = '🅿️', line
+        if (open) {
+          line = `Holding ${open.shares} ${open.instrument} (${usd(open.cost_basis)}) — sells end of week`
+        } else if (ev) {
+          emoji = ev.status === 'bought' ? '🅿️'
+                : ev.status === 'skipped_no_cash' ? '💤'
+                : ev.status === 'skipped_slots_unfilled' ? '⏸️'
+                : ev.status?.startsWith('failed') || ev.status === 'error' ? '⚠️' : '💤'
+          line = ev.message || ev.status
+        } else {
+          emoji = '💤'; line = 'Enabled — no sweep evaluated yet'
+        }
+        return (
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-gray-900 dark:text-white font-semibold text-sm">🅿️ Cash Sweep</div>
+              <div className="text-gray-500 dark:text-gray-600 text-xs">{open?.instrument || ev?.instrument || ''}</div>
+            </div>
+            <div className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <span>{emoji}</span><span>{line}</span>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Open positions */}
       {openPositions.length > 0 && (
         <div>

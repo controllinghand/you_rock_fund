@@ -2483,6 +2483,11 @@ def get_status():
         "wheel_count":          wheel_count,
         "gateway_login_status": _gateway_login_status,
         "trading_paused":       _trading_paused(),
+        # Cash sweep visibility: the open parked position (if any) + the last live
+        # decision (buy or skip-with-reason) so the dashboard can show what happened.
+        "cash_park":            state.get("cash_park"),
+        "cash_park_last_eval":  state.get("cash_park_last_eval"),
+        "cash_park_enabled":    settings.get("cash_park_enabled", False),
         **_weekly_token_status(),
     }
 
@@ -2667,6 +2672,7 @@ def run_screener():
         outcome = run_monday(dry_run=True, account_summary=account_summary)
         wheel   = outcome.get("wheel", {})
         csp     = outcome.get("csp", {})
+        cash_park_eval = outcome.get("cash_park")
 
         positions     = csp.get("positions", [])
         total_premium = csp.get("total_premium", 0)
@@ -2717,6 +2723,8 @@ def run_screener():
             # Recovery reconciliation — positions already open in IBKR that a re-run skips:
             "already_open_put_tickers": csp.get("already_open_put_tickers", []),
             "target_fills":         csp.get("target_fills", 0),
+            # Cash sweep decision for this plan (buy / skip + reason), or None when off:
+            "cash_park":            cash_park_eval,
             "dry_run":              True,
             "run_at":               datetime.now(PST).isoformat(),
         }

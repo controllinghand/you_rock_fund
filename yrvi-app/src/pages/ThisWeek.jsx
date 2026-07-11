@@ -429,6 +429,38 @@ export default function ThisWeek() {
             </div>
           )}
 
+          {/* Cash Sweep decision (preview of the QQQ/SGOV park) */}
+          {screener.cash_park && (() => {
+            const cp = screener.cash_park
+            const emoji = cp.status === 'bought' || cp.status === 'dry_run' ? '🅿️'
+                        : cp.status === 'skipped_no_cash' ? '💤'
+                        : cp.status === 'skipped_slots_unfilled' ? '⏸️'
+                        : cp.status === 'skipped_existing_open' ? '♻️' : '⚠️'
+            const usd = v => `$${Math.round(v ?? 0).toLocaleString()}`
+            return (
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+                  <div className="text-gray-900 dark:text-white font-semibold text-sm">🅿️ Cash Sweep</div>
+                  <div className="text-gray-500 dark:text-gray-600 text-xs">{cp.instrument}</div>
+                </div>
+                <div className="px-5 py-3 space-y-2">
+                  <div className="flex items-start gap-2 text-sm">
+                    <span>{emoji}</span>
+                    <span className="text-gray-700 dark:text-gray-300">{cp.message}</span>
+                  </div>
+                  {cp.base != null && (
+                    <div className="text-xs text-gray-500 dark:text-gray-500 pl-6">
+                      Remainder {usd(cp.base)} · Settled cash {cp.settled_cash == null ? '—' : usd(cp.settled_cash)} · 10% net-liq cap {usd(cp.netliq_cap)} · Would park {usd(cp.buy_amount)}
+                    </div>
+                  )}
+                </div>
+                <div className="px-5 py-2 text-xs text-gray-400 dark:text-gray-600 border-t border-gray-100 dark:border-gray-800/50">
+                  Buys only real settled cash (never margin), capped at 10% of net-liquidation, and only when every option slot filled.
+                </div>
+              </div>
+            )
+          })()}
+
           {/* Recovery note — CSPs already open in IBKR that a re-run skips */}
           {(screener.already_open_put_tickers ?? []).length > 0 && (
             <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl px-5 py-3 text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
