@@ -510,7 +510,8 @@ export default function Dashboard() {
               <div className="text-gray-500 dark:text-gray-600 text-xs">{open?.instrument || ev?.instrument || ''}</div>
             </div>
             <div className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-              <span>{emoji}</span><span>{line}</span>
+              <span>{emoji}</span>
+              <span>{line}{!open && ev?.dry_run && <span className="ml-1 text-xs text-amber-500 dark:text-amber-400">(dry run — simulated)</span>}</span>
             </div>
           </div>
         )

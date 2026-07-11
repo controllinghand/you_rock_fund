@@ -202,13 +202,20 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     orders_dry_run = dry_run or bool(s.get("dry_run", False))
 
     def _finish(result: dict) -> dict:
-        """Attach common fields, persist the last decision (live runs only, under a
-        SEPARATE key so an open position block is never clobbered), and return it.
-        This is what makes the outcome visible on the dashboard — even a skip."""
+        """Attach common fields, persist the last decision under a SEPARATE key (so
+        an open position block is never clobbered), and return it. This is what makes
+        the outcome visible on the dashboard — even a skip.
+
+        Persist on any NON-preview run — i.e. Run Now / the scheduled Monday job —
+        even when the Settings 'Dry Run' toggle is on (`orders_dry_run`), so the
+        dashboard reflects a simulated Run Now the same way the wheel/CSP paths write
+        simulated state. Only the true preview (`dry_run`, Run Screener) stays
+        side-effect-free — it surfaces the result in-band via the API response.
+        The `dry_run` flag on the result marks a simulated decision."""
         result.setdefault("instrument", instrument)
         result["dry_run"]      = orders_dry_run
         result["evaluated_at"] = datetime.now().isoformat()
-        if not orders_dry_run:
+        if not dry_run:
             try:
                 st = _load_state()
                 st["cash_park_last_eval"] = result
