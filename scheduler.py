@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
 from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, get_settings, MODE_LABEL
 from secrets_client import get_secret
-from market_calendar import is_first_trading_day_of_week, is_market_holiday
+from market_calendar import is_first_trading_day_of_week, is_market_holiday, is_last_trading_day_of_week
 
 logging.basicConfig(
     level=logging.INFO,
@@ -397,6 +397,15 @@ def run_pipeline():
                  f"CSP ${outcome.get('csp_premium', 0):,.0f}  "
                  f"Total realized ${outcome.get('total_realized', 0):,.0f}")
 
+        # ── Step 3: cash sweep — park the week's undeployed remainder ──
+        # No-op unless enabled in Settings. Self-guarded (all slots filled, 10%
+        # net-liq cap, no margin) and never raises into the run.
+        try:
+            from cash_park import maybe_buy_park
+            maybe_buy_park(outcome, context, dry_run=False)
+        except Exception as e:
+            log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
+
     except Exception as e:
         log.error(f"❌ Monday run error: {e}", exc_info=True)
         _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
@@ -479,6 +488,33 @@ def run_risk_monitor():
         loop.close()
 
 
+# ── Thu/Fri 12:30PM — cash-sweep end-of-week sell ─────────────
+# Scheduled on BOTH Thursday and Friday; the job only actually sells on whichever
+# is the week's last trading day (Friday normally, Thursday when Friday is a market
+# holiday such as Good Friday). sell_park() itself no-ops when there's nothing
+# parked, so a Thursday firing in a normal week is a cheap check.
+
+def run_cash_park_sell():
+    loop = _new_loop()
+    now  = datetime.now(PST)
+    if not is_last_trading_day_of_week(now.date()):
+        log.info(f"⏭️  CASH SWEEP SELL skipped — {now.strftime('%A %Y-%m-%d')} is not "
+                 f"the last trading day of the week")
+        loop.close()
+        return
+    log.info("\n" + "=" * 65)
+    log.info(f"💵 CASH SWEEP SELL — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info("=" * 65)
+    try:
+        from cash_park import sell_park
+        sell_park(dry_run=False)
+    except Exception as e:
+        log.error(f"❌ Cash sweep sell error: {e}", exc_info=True)
+        _discord_alert(f"🚨 **YRVI** Cash sweep sell job failed: `{type(e).__name__}: {e}`")
+    finally:
+        loop.close()
+
+
 # ── Scheduler main ─────────────────────────────────────────────
 
 def main():
@@ -529,6 +565,14 @@ def main():
         trigger="cron", day_of_week="tue,wed,thu", hour=9, minute=0,
         id="daily_risk_monitor", name="Daily Risk Monitor"
     )
+    # Cash-sweep sell — fires Thu+Fri; run_cash_park_sell only acts on the week's
+    # last trading day (Friday, or Thursday when Friday is a holiday). 12:30 PM PST
+    # leaves ample liquidity and clears the position well before the close.
+    scheduler.add_job(
+        run_cash_park_sell,
+        trigger="cron", day_of_week="thu,fri", hour=12, minute=30,
+        id="cash_park_sell", name="Cash Sweep End-of-Week Sell"
+    )
     scheduler.add_job(
         run_auto_update,
         trigger="cron", day_of_week="wed,thu,fri", hour=3, minute=0,
@@ -549,6 +593,7 @@ def main():
     log.info(f"   • Mon/Tue*  {fmt(prev_h, prev_m):>11}  — Discord preview (if webhook set)")
     log.info(f"   • Mon/Tue*  {fmt(wheel_h, wheel_m):>11}  — wheel check (stop loss + CCs) → CSP execution  ← configured {fmt(exec_h, exec_m)}")
     log.info("   • Tue–Thu    9:00 AM PST  — daily risk monitor (skipped on holidays)")
+    log.info("   • Thu/Fri   12:30 PM PST  — cash-sweep sell (last trading day only; if enabled)")
     log.info("   • Wed–Fri    3:00 AM PST  — auto-update check (if enabled in settings)")
     log.info("   * Shifts to Tuesday when Monday is a market holiday")
     log.info("   Press Ctrl+C to stop")

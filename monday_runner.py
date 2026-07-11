@@ -100,12 +100,18 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
     if not shares_sold_pnl and prev.get("week_start") == week_monday:
         shares_sold_pnl = prev.get("shares_sold_pnl", 0.0)
 
-    total_realized  = round(csp_premium + cc_premium + shares_sold_pnl, 2)
+    # Carry forward the cash-sweep realized P&L: it's booked later in the week by
+    # cash_park.sell_park(), so a Monday re-run for the SAME week must not drop it.
+    # A new week starts fresh at 0 (the ETF for that week hasn't been sold yet).
+    park_pnl = prev.get("park_pnl", 0.0) if prev.get("week_start") == week_monday else 0.0
+
+    total_realized  = round(csp_premium + cc_premium + shares_sold_pnl + park_pnl, 2)
     state["weekly_pnl"] = {
         "week_start":      week_monday,
         "csp_premium":     round(csp_premium, 2),
         "cc_premium":      round(cc_premium, 2),
         "shares_sold_pnl": round(shares_sold_pnl, 2),
+        "park_pnl":        round(park_pnl, 2),
         "total_realized":  total_realized,
         "last_updated":    datetime.now().isoformat(),
     }
@@ -364,4 +370,14 @@ def run_monday(dry_run: bool = False, progress_callback=None,
                              progress_callback=progress_callback,
                              account_summary=account_summary)
 
-    return {"dry_run": dry_run, "wheel": wheel, "csp": csp}
+    # Cash sweep — park the week's undeployed remainder (no-op unless enabled in
+    # Settings). On a dry run it only reports what it would do. Mirrors the
+    # scheduler's live path so Run Now behaves identically. Never breaks the run.
+    park = None
+    try:
+        from cash_park import maybe_buy_park
+        park = maybe_buy_park(csp, wheel, dry_run=dry_run)
+    except Exception as e:
+        log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
+
+    return {"dry_run": dry_run, "wheel": wheel, "csp": csp, "cash_park": park}

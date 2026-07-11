@@ -45,6 +45,7 @@ cat state.json               # Full system state (see schema below)
 | Saturday 6:00PM | Screener preview | `screener` + `position_sizer` |
 | Monday 9:55AM | Wheel check → CSP pipeline (one chained job): stop loss sells + covered calls, then screen → size → execute | `scheduler.run_pipeline()` → `wheel_manager.run_wheel_check()` + `trader.execute_positions()` |
 | Tue–Thu 9:00AM | Daily risk monitor | `risk_manager.run_daily_monitor()` |
+| Thu/Fri 12:30PM | Cash-sweep sell (last trading day only) | `cash_park.sell_park()` |
 
 ## Architecture
 
@@ -55,7 +56,8 @@ position_sizer.py  → Allocates capital across up to 5 positions (accepts budge
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
 wheel_manager.py   → Assignment detection, screener-based exits, ~0.20-delta covered call execution (prefers nearest strike ≥ cost basis; writes below-cost CC instead of force-selling underwater holdings; keeps holdings through earnings by default)
 risk_manager.py    → Daily price checks, stop loss alerts, weekly P&L tracking
-scheduler.py       → APScheduler orchestration for all 5 jobs
+cash_park.py       → Optional cash sweep: Monday buys the week's undeployed remainder in QQQ/SGOV (fractional via cashQty; capped at settled cash + 10% net-liq; only when all option slots filled), sells it on the week's last trading day
+scheduler.py       → APScheduler orchestration for all jobs
 state.json         → Persisted system state (see schema below)
 ```
 
@@ -116,9 +118,22 @@ Each module connects with a distinct client ID to allow concurrent connections:
     "csp_premium":          4088,
     "cc_premium":           320,
     "shares_sold_pnl":      -4800,
-    "total_realized":       -392,
+    "park_pnl":             45,       // cash-sweep realized P&L (0 until sold Fri)
+    "total_realized":       -347,
     "unrealized_stock_pnl": 2000,
     "grand_total":          1608
+  },
+
+  "cash_park": {                      // optional weekly cash sweep (cash_park.py)
+    "instrument":   "QQQ",
+    "shares":       12.3456,          // fractional (bought via IBKR cashQty)
+    "buy_price":    470.10,
+    "cost_basis":   5804.00,
+    "buy_date":     "2026-04-27T10:20:00",
+    "status":       "open",           // open|sold
+    "sell_price":   473.75,           // null until sold
+    "realized_pnl": 45.06,            // proceeds − cost_basis (folds into weekly_pnl.park_pnl)
+    "last_checked": "ISO timestamp"
   }
 }
 ```
@@ -181,6 +196,11 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Freed capital from share sales is added to that week's CSP deployment budget
 - Sold tickers are skipped in the same week's CSP screener
 - Daily monitor (Tue–Thu) alerts if a ticker drops from screener mid-week
+- Cash sweep (opt-in, default OFF) parks the week's undeployed remainder in QQQ (default) or SGOV
+  after the Monday option workflow, then sells it on the week's last trading day (Fri, or Thu when
+  Fri is a holiday). Buy = min(remainder [+ this week's premium if enabled], settled cash, 10% net-liq)
+  — the settled-cash cap means it NEVER uses margin. Skipped (with a Discord alert) if any option slot
+  went unfilled that week, so a broken Monday run isn't masked by parking idle cash. Fractional via cashQty.
 - All operational alerts are persisted in-app (/data/alerts.json) AND sent to Discord via the single
   _send_discord_alert chokepoint in api.py; the dashboard bell reads GET /api/alerts (per-box, standalone)
 

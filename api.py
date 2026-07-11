@@ -2764,6 +2764,9 @@ class SettingsUpdate(BaseModel):
     auto_restart_suppress_mins:    Optional[int]   = None
     auto_update_enabled:           Optional[bool]  = None
     show_verse_of_the_day:         Optional[bool]  = None
+    cash_park_enabled:             Optional[bool]  = None
+    cash_park_instrument:          Optional[str]   = None
+    cash_park_include_premiums:    Optional[bool]  = None
 
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdate):

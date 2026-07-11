@@ -536,6 +536,7 @@ export default function SettingsPage() {
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
     auto_update_enabled: false, show_verse_of_the_day: true,
+    cash_park_enabled: false, cash_park_instrument: 'QQQ', cash_park_include_premiums: false,
   }
 
   const resetToDefaults = () => {
@@ -681,6 +682,51 @@ export default function SettingsPage() {
         <SliderRow label="Max Position" value={settings.max_position_size} min={10000} max={200000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('max_position_size', v)} />
         {settings.compound_enabled !== false && (
           <p className="mt-1 text-xs text-amber-500 dark:text-amber-400">Max Position ignored in compound mode — each slot is sized by net balance ÷ # positions.</p>
+        )}
+      </Section>
+
+      {/* Cash Sweep */}
+      <Section title="Cash Sweep" emoji="🅿️">
+        <Toggle
+          label="Park leftover cash each week"
+          sub="After Monday's option workflow, buy the instrument below with the undeployed remainder, then sell it on the week's last trading day — so idle cash keeps working."
+          checked={!!settings.cash_park_enabled}
+          onChange={v => set('cash_park_enabled', v)}
+        />
+        {settings.cash_park_enabled && (
+          <>
+            <div>
+              <div className="text-gray-700 dark:text-gray-300 text-sm">Instrument</div>
+              <div className="text-gray-500 dark:text-gray-600 text-xs mt-0.5 mb-2">
+                QQQ for growth exposure. SGOV (T-bill ETF) is near-zero-risk — mainly useful for accounts under ~$10K, since IBKR already pays interest on idle cash above that.
+              </div>
+              <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                {['QQQ', 'SGOV'].map(sym => (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => set('cash_park_instrument', sym)}
+                    className={`px-4 py-1.5 text-sm font-mono transition-colors ${
+                      (settings.cash_park_instrument || 'QQQ') === sym
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    }`}
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <Toggle
+              label="Also park this week's premiums"
+              sub="Include the CSP + covered-call premium collected this week on top of the leftover cash. Off = remainder cash only."
+              checked={!!settings.cash_park_include_premiums}
+              onChange={v => set('cash_park_include_premiums', v)}
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-600">
+              Capped at 10% of net-liquidation and at settled cash (never uses margin). Skipped automatically if any option slot went unfilled that week.
+            </p>
+          </>
         )}
       </Section>
 
