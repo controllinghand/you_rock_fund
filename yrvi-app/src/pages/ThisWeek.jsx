@@ -450,12 +450,14 @@ export default function ThisWeek() {
                   </div>
                   {cp.base != null && (
                     <div className="text-xs text-gray-500 dark:text-gray-500 pl-6">
-                      Remainder {usd(cp.base)} · Settled cash {cp.settled_cash == null ? '—' : usd(cp.settled_cash)} · 10% net-liq cap {usd(cp.netliq_cap)} · Would park {usd(cp.buy_amount)}
+                      Idle cash {usd(cp.idle ?? cp.base)} · Settled cash {cp.settled_cash == null ? '—' : usd(cp.settled_cash)}
+                      {' · '}{cp.all_slots_filled ? 'no 10% cap (all slots filled)' : `10% net-liq cap ${usd(cp.netliq_cap)}`}
+                      {' · '}Would park {usd(cp.buy_amount)}
                     </div>
                   )}
                 </div>
                 <div className="px-5 py-2 text-xs text-gray-400 dark:text-gray-600 border-t border-gray-100 dark:border-gray-800/50">
-                  Buys only real settled cash (never margin), capped at 10% of net-liquidation, and only when every option slot filled.
+                  Buys real settled cash only (never margin). When all option slots are filled it parks the full idle amount; the 10% net-liq cap is a safety that only applies if some slots went unfilled.
                 </div>
               </div>
             )

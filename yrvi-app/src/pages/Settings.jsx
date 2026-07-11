@@ -724,7 +724,7 @@ export default function SettingsPage() {
               onChange={v => set('cash_park_include_premiums', v)}
             />
             <p className="text-xs text-gray-500 dark:text-gray-600">
-              Capped at 10% of net-liquidation and at settled cash (never uses margin). Skipped automatically if any option slot went unfilled that week.
+              Parks idle settled cash only (never margin). When all option slots are filled it uses the full idle amount; a 10% net-liq safety cap applies only if some slots went unfilled that week.
             </p>
           </>
         )}

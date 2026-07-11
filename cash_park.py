@@ -12,12 +12,13 @@ Two entry points, both driven by settings (feature is OFF by default):
   sell_park(dry_run, ...)                               — end of week (Thu/Fri job)
 
 Design guards (see the buy path):
-  • Only sweeps when every intended option slot was filled — if the Monday run
-    broke and left CSP slots empty, that idle cash SHOULD have gone to options, so
-    we alert instead of masking it by parking.
-  • Buy amount = min(remainder(+premium), settled cash, 10% of net-liq). The
-    settled-cash cap means it can NEVER reach into margin; the 10% cap bounds the
-    parked slice if idle cash is abnormally high.
+  • Idle-cash basis = IBKR Buying Power (real settled cash on a cash account; a live
+    run reads it AFTER the CSPs execute, a preview subtracts the planned CSP capital).
+  • Buy amount = min(idle(+premium), settled cash [, 10% of net-liq]). The
+    settled-cash cap means it can NEVER reach into margin. The 10% net-liq cap is a
+    SAFETY that only applies when some option slots went unfilled (partial/broken
+    run) — when every slot is filled the idle cash is genuinely free, so the FULL
+    amount is parked.
   • Fractional via IBKR cashQty (spend the exact dollar amount).
   • Reconciles an already-open position so a failed prior sell isn't double-bought
     or stranded.
@@ -117,22 +118,27 @@ def _connect(client_id: int = None) -> IB:
     raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
 
 
-def _account_cash_netliq(ib: IB) -> tuple:
-    """(total_settled_cash, net_liquidation) in account currency. Both None on error.
-    TotalCashValue is real cash (no margin/leverage component), so capping the buy at
-    it guarantees the sweep never borrows on margin."""
+def _account_summary(ib: IB) -> tuple:
+    """(total_settled_cash, net_liquidation, buying_power). All None on error.
+
+    - BuyingPower drives the idle-cash basis: on a cash account it's real settled
+      cash and already excludes capital tied up in wheel stock + reserved collateral
+      (same figure the 'Cash Account' mode deploys as the CSP budget).
+    - TotalCashValue is the no-margin cap: max(0, it) blocks any margin account (it
+      goes negative when the account is borrowing), so the sweep never uses leverage."""
     try:
         summary = ib.accountSummary(ACCOUNT)
         by_tag  = {}
         for v in summary:
-            if v.tag in ("TotalCashValue", "NetLiquidation"):
+            if v.tag in ("TotalCashValue", "NetLiquidation", "BuyingPower"):
                 # Prefer the base-currency / USD row; accountSummary may repeat tags.
                 if v.tag not in by_tag or v.currency in ("USD", "BASE", ""):
                     by_tag[v.tag] = float(v.value)
-        return by_tag.get("TotalCashValue"), by_tag.get("NetLiquidation")
+        return (by_tag.get("TotalCashValue"), by_tag.get("NetLiquidation"),
+                by_tag.get("BuyingPower"))
     except Exception as e:
         log.warning(f"⚠️  Could not read account summary: {e}")
-        return None, None
+        return None, None, None
 
 
 def _price(ib: IB, ticker: str):
@@ -181,13 +187,14 @@ def _poll_fill(ib: IB, trade) -> bool:
 
 def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                    client_id: int = None, ib: IB = None) -> dict | None:
-    """Buy the configured instrument with the week's undeployed remainder.
+    """Buy the configured instrument with the account's idle settled cash.
 
-    csp_outcome: return of run_csp_pipeline (effective_budget, total_capital,
-                 target_fills, fills, csp_premium, positions).
+    csp_outcome: return of run_csp_pipeline (total_capital, target_fills, fills,
+                 csp_premium, positions).
     context:     wheel-check result (cc_premium).
     dry_run:     True on a preview (Run Screener) — no real fills exist yet, so the
-                 sized position count is used as the fill proxy.
+                 sized position count is used as the fill proxy and the planned CSP
+                 capital is subtracted from Buying Power to estimate the leftover.
 
     Returns a small result dict (status + details) or None when the feature is off.
     Never raises into the caller — a sweep failure must not break the Monday run.
@@ -224,54 +231,58 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                 log.warning(f"could not persist cash_park_last_eval: {e}")
         return result
 
-    # ── Guard 1: every intended option slot must be filled ──────
-    # On a preview nothing executed, so use the sized count as the fill proxy.
+    # Fill status — used ONLY to pick the safety cap below, NOT to skip. When every
+    # slot is filled the idle cash is genuinely leftover (park the full amount); if
+    # some slots went unfilled (partial/broken run) the 10% net-liq cap kicks in as a
+    # safety. On a preview nothing executed, so use the sized count as the proxy.
     fills  = len(csp_outcome.get("positions", [])) if dry_run else csp_outcome.get("fills", 0)
     target = csp_outcome.get("target_fills", 0)
-    if fills < target:
-        log.warning(f"  ⏸️  Cash sweep skipped — only {fills}/{target} option slots filled")
-        if not orders_dry_run:
-            _discord_alert(f"⏸️ **YRVI** Cash sweep skipped — only {fills}/{target} CSP slots "
-                           f"filled this week. Leftover cash left as-is (may indicate a partial "
-                           f"Monday run — check before parking).")
-        return _finish({"status": "skipped_slots_unfilled", "fills": fills, "target": target,
-                        "message": f"Skipped — only {fills}/{target} option slots filled this week"})
-
-    # ── Base amount: undeployed remainder (+ this week's premium if opted in) ──
-    remainder = max(0.0, csp_outcome.get("effective_budget", 0.0)
-                    - csp_outcome.get("total_capital", 0.0))
-    base = remainder
-    if include_prem:
-        base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
-              + (context.get("cc_premium", 0.0) or 0.0)
-
-    if base < MIN_BUY_USD:
-        log.info(f"  💤 No meaningful remainder to park (${base:,.2f}) — skipping")
-        return _finish({"status": "skipped_no_cash", "base": round(base, 2),
-                        "message": "No leftover cash to sweep this week"})
+    all_filled = fills >= target
 
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
     try:
-        # ── Guard 2: cap at settled cash (no margin) and 10% of net-liq ──
-        total_cash, net_liq = _account_cash_netliq(ib)
-        cash_cap    = max(0.0, total_cash) if total_cash is not None else base
-        netliq_cap  = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
-        buy_amount  = round(min(base, cash_cap, netliq_cap), 2)
+        # ── Idle-cash basis: IBKR Buying Power = real settled cash on a cash account
+        # (already excludes wheel stock + reserved collateral). On a preview the CSPs
+        # aren't placed yet, so subtract the run's planned CSP capital to estimate the
+        # post-deployment leftover; on a LIVE run the sweep executes AFTER the CSPs, so
+        # Buying Power already reflects them and no subtraction is needed.
+        total_cash, net_liq, buying_power = _account_summary(ib)
+        planned_csp = csp_outcome.get("total_capital", 0.0) if dry_run else 0.0
+        idle = max(0.0, (buying_power or 0.0) - planned_csp)
+        base = idle
+        if include_prem:
+            base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
+                  + (context.get("cc_premium", 0.0) or 0.0)
 
-        log.info(f"  🅿️  Cash sweep: base=${base:,.2f}  cash=${cash_cap:,.2f}  "
-                 f"10%netliq=${netliq_cap:,.2f}  → buy=${buy_amount:,.2f} of {instrument}")
+        # Caps: settled cash ALWAYS (no margin — blocks a borrowing account at $0).
+        # The 10% net-liq cap is ONLY a safety for a partial run — when every slot is
+        # filled the idle cash is genuinely free, so park the whole amount.
+        cash_cap   = max(0.0, total_cash) if total_cash is not None else base
+        netliq_cap = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
+        buy_amount = round(min(base, cash_cap) if all_filled
+                           else min(base, cash_cap, netliq_cap), 2)
 
-        caps = {"base": round(base, 2), "settled_cash": round(total_cash, 2) if total_cash is not None else None,
-                "netliq_cap": round(netliq_cap, 2), "buy_amount": buy_amount}
+        log.info(f"  🅿️  Cash sweep: idle=${idle:,.2f}  base=${base:,.2f}  cash=${cash_cap:,.2f}  "
+                 f"10%netliq=${netliq_cap:,.2f}  slots={fills}/{target} "
+                 f"{'(all filled → full)' if all_filled else '(partial → 10% cap)'}  "
+                 f"→ buy=${buy_amount:,.2f} of {instrument}")
+
+        caps = {"base": round(base, 2), "idle": round(idle, 2),
+                "settled_cash": round(total_cash, 2) if total_cash is not None else None,
+                "buying_power": round(buying_power, 2) if buying_power is not None else None,
+                "netliq_cap": round(netliq_cap, 2), "all_slots_filled": all_filled,
+                "fills": fills, "target": target, "buy_amount": buy_amount}
 
         if buy_amount < MIN_BUY_USD:
             if total_cash is not None and total_cash <= 0:
                 reason = f"no settled cash (${total_cash:,.0f}) — would require margin"
+            elif idle < MIN_BUY_USD:
+                reason = "no idle cash after this week's deployment"
             else:
-                reason = (f"remainder ${base:,.0f} capped by settled cash ${cash_cap:,.0f} "
-                          f"/ 10% net-liq ${netliq_cap:,.0f}")
-            log.info(f"  💤 Nothing to park after caps (${buy_amount:,.2f}) — {reason}")
+                reason = (f"idle ${idle:,.0f} capped by settled cash ${cash_cap:,.0f}"
+                          + ("" if all_filled else f" / 10% net-liq ${netliq_cap:,.0f} (partial run)"))
+            log.info(f"  💤 Nothing to park (${buy_amount:,.2f}) — {reason}")
             return _finish({"status": "skipped_no_cash", **caps,
                             "message": f"No cash swept — {reason}"})
 
