@@ -457,6 +457,12 @@ export default function StatusBar() {
           )}
           <span className="text-gray-500">Buying Power</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.buying_power)}</span>
+          {status?.settled_cash != null && (
+            <>
+              <span className="text-gray-500">Settled Cash</span>
+              <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.settled_cash)}</span>
+            </>
+          )}
           {(status?.wheel_count ?? 0) > 0 && (
             <span className="text-yellow-600 dark:text-yellow-400 font-medium">🔄 {status.wheel_count} wheel{status.wheel_count !== 1 ? 's' : ''}</span>
           )}

@@ -2473,6 +2473,7 @@ def get_status():
         "ibkr_error":         ibkr.get("error"),
         "account_value":      ibkr["account_value"],
         "buying_power":       ibkr["buying_power"],
+        "settled_cash":       ibkr.get("settled_cash"),
         "unrealized_pnl":     ibkr.get("unrealized_pnl"),
         "net_liquidation":    ibkr.get("account_value"),
         "account":            ibkr["account"],
