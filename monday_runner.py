@@ -279,18 +279,23 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
                      f"freed=${freed_capital:,.0f}  effective=${effective_budget:,.0f}  "
                      f"(cash account — reserved not subtracted)")
         else:
-            # Exclude capital already tied up in wheel holdings. buying_power is
-            # min(BuyingPower, NetLiq): for cash/Roth accounts BuyingPower already
-            # excludes wheel stock, but on margin/paper accounts it resolves to
-            # NetLiq, which INCLUDES the wheel stock — so without this cap we'd
-            # secure new CSPs with capital that's already deployed. Capping at
-            # net_liq − reserved removes that double-count; min() keeps whichever
-            # basis is tighter, and it's a no-op when there are no wheel holdings.
-            capped_budget    = min(buying_power, net_liq - reserved_capital)
-            effective_budget = capped_budget + freed_capital
+            # Margin/paper: deployable = net_liq − capital locked in KEPT wheel
+            # holdings. buying_power is min(BuyingPower, NetLiq); on margin it resolves
+            # to NetLiq, which INCLUDES the wheel stock, so min() removes the stock
+            # that's already deployed. Do NOT add freed_capital: the stock stop-loss /
+            # screener-drop sells is ALREADY inside net_liq, so adding its proceeds on
+            # top double-counts — it was producing an effective budget ABOVE net_liq
+            # (impossible: e.g. $333k on a $214k account). freed is redundant here.
+            effective_budget = max(0.0, min(buying_power, net_liq - reserved_capital))
             log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
-                     f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f}  "
+                     f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f} (already in net_liq, not added)  "
                      f"effective=${effective_budget:,.0f}  (compounding ON)")
+        # Final sanity bound (both compound branches): never deploy more CSP capital
+        # than the whole account is worth. No-op after the margin fix; also caps any
+        # residual freed double-count in the cash branch on a post-sale live snapshot.
+        if net_liq and net_liq > 0 and effective_budget > net_liq:
+            log.info(f"  🧢 Budget capped at net_liq=${net_liq:,.0f} (was ${effective_budget:,.0f})")
+            effective_budget = net_liq
     else:
         effective_budget = fund_budget + freed_capital - reserved_capital
         log.info(f"  📊 Budget: base=${fund_budget:,.0f}  freed=${freed_capital:,.0f}  "
