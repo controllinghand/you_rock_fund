@@ -242,45 +242,51 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
     try:
-        # ── Idle-cash basis: IBKR Buying Power = real settled cash on a cash account
-        # (already excludes wheel stock + reserved collateral). On a preview the CSPs
-        # aren't placed yet, so subtract the run's planned CSP capital to estimate the
-        # post-deployment leftover; on a LIVE run the sweep executes AFTER the CSPs, so
-        # Buying Power already reflects them and no subtraction is needed.
+        # ── Base = the CSP budget remainder (the intuitive "leftover after this
+        # week's selections"): effective_budget − CSP capital deployed. Bounded by the
+        # budget, so it can't over-park from inflated margin buying power; and because
+        # the budget respects the account type (buying_power for cash, net_liq−reserved
+        # for margin) and net_liq is stable across the stock→cash conversion, the
+        # preview number matches what a live Monday run parks.
         total_cash, net_liq, buying_power = _account_summary(ib)
-        planned_csp = csp_outcome.get("total_capital", 0.0) if dry_run else 0.0
-        idle = max(0.0, (buying_power or 0.0) - planned_csp)
-        base = idle
+        remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
+                        - (csp_outcome.get("total_capital", 0.0) or 0.0))
+        base = remainder
         if include_prem:
             base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
                   + (context.get("cc_premium", 0.0) or 0.0)
 
-        # Caps: settled cash ALWAYS (no margin — blocks a borrowing account at $0).
-        # The 10% net-liq cap is ONLY a safety for a partial run — when every slot is
-        # filled the idle cash is genuinely free, so park the whole amount.
-        cash_cap   = max(0.0, total_cash) if total_cash is not None else base
-        netliq_cap = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
-        buy_amount = round(min(base, cash_cap) if all_filled
-                           else min(base, cash_cap, netliq_cap), 2)
+        # No-margin cap = real settled cash. On a DRY preview the stop-loss/screener
+        # sales haven't executed yet, so add the freed proceeds to model the POST-sale
+        # cash — otherwise a stop-loss week is wrongly zeroed by the CURRENT (pre-sale)
+        # negative settled cash. A live run reads settled cash AFTER the sales, so no
+        # adjustment. The 10% net-liq cap is ONLY a safety for a partial (unfilled) run.
+        freed       = context.get("freed_capital", 0.0) or 0.0
+        settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
+        cash_cap    = max(0.0, settled_eff) if settled_eff is not None else base
+        netliq_cap  = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
+        buy_amount  = round(min(base, cash_cap) if all_filled
+                            else min(base, cash_cap, netliq_cap), 2)
 
-        log.info(f"  🅿️  Cash sweep: idle=${idle:,.2f}  base=${base:,.2f}  cash=${cash_cap:,.2f}  "
-                 f"10%netliq=${netliq_cap:,.2f}  slots={fills}/{target} "
+        log.info(f"  🅿️  Cash sweep: remainder=${remainder:,.2f}  base=${base:,.2f}  "
+                 f"settled(eff)=${cash_cap:,.2f}  10%netliq=${netliq_cap:,.2f}  slots={fills}/{target} "
                  f"{'(all filled → full)' if all_filled else '(partial → 10% cap)'}  "
                  f"→ buy=${buy_amount:,.2f} of {instrument}")
 
-        caps = {"base": round(base, 2), "idle": round(idle, 2),
+        caps = {"base": round(base, 2), "remainder": round(remainder, 2),
                 "settled_cash": round(total_cash, 2) if total_cash is not None else None,
+                "settled_effective": round(cash_cap, 2),
                 "buying_power": round(buying_power, 2) if buying_power is not None else None,
                 "netliq_cap": round(netliq_cap, 2), "all_slots_filled": all_filled,
                 "fills": fills, "target": target, "buy_amount": buy_amount}
 
         if buy_amount < MIN_BUY_USD:
-            if total_cash is not None and total_cash <= 0:
-                reason = f"no settled cash (${total_cash:,.0f}) — would require margin"
-            elif idle < MIN_BUY_USD:
-                reason = "no idle cash after this week's deployment"
+            if remainder < MIN_BUY_USD:
+                reason = "no remainder left after this week's CSP deployment"
+            elif cash_cap < MIN_BUY_USD:
+                reason = f"no settled cash (${(settled_eff or 0):,.0f}) — would require margin"
             else:
-                reason = (f"idle ${idle:,.0f} capped by settled cash ${cash_cap:,.0f}"
+                reason = (f"remainder ${remainder:,.0f} capped by settled cash ${cash_cap:,.0f}"
                           + ("" if all_filled else f" / 10% net-liq ${netliq_cap:,.0f} (partial run)"))
             log.info(f"  💤 Nothing to park (${buy_amount:,.2f}) — {reason}")
             return _finish({"status": "skipped_no_cash", **caps,

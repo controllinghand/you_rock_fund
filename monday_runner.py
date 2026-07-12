@@ -165,6 +165,46 @@ def _fetch_account_summary(fallback: float) -> tuple[float, float]:
     return fallback, fallback
 
 
+def _compute_effective_budget(compound_enabled: bool, cash_account: bool,
+                              account_summary: tuple, fund_budget: float,
+                              freed_capital: float, reserved_capital: float) -> tuple:
+    """CSP deployment budget + (buying_power, net_liq). Extracted so it's computed
+    even when there are no CSP slots to fill (target_fills=0) — the cash sweep derives
+    its remainder = effective_budget − total_capital, and zeroing the budget on an
+    all-wheel week made an account with real idle cash look empty."""
+    net_liq = None
+    buying_power = None
+    if compound_enabled:
+        if account_summary is not None:
+            buying_power, net_liq = account_summary
+        else:
+            buying_power, net_liq = _fetch_account_summary(fund_budget)
+        if cash_account:
+            # Cash (non-margin) account: BuyingPower IS real settled cash (excludes
+            # wheel stock); + freed adds the sale proceeds. reserved not subtracted
+            # (cost basis goes falsely negative when underwater).
+            effective_budget = max(0.0, buying_power) + freed_capital
+            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
+                     f"freed=${freed_capital:,.0f}  effective=${effective_budget:,.0f}  "
+                     f"(cash account — reserved not subtracted)")
+        else:
+            # Margin/paper: deployable = net_liq − capital in KEPT holdings. Do NOT add
+            # freed — the sold stock is already inside net_liq (adding proceeds
+            # double-counts; was producing budgets above net_liq).
+            effective_budget = max(0.0, min(buying_power, net_liq - reserved_capital))
+            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
+                     f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f} (already in net_liq, not added)  "
+                     f"effective=${effective_budget:,.0f}  (compounding ON)")
+        if net_liq and net_liq > 0 and effective_budget > net_liq:
+            log.info(f"  🧢 Budget capped at net_liq=${net_liq:,.0f} (was ${effective_budget:,.0f})")
+            effective_budget = net_liq
+    else:
+        effective_budget = fund_budget + freed_capital - reserved_capital
+        log.info(f"  📊 Budget: base=${fund_budget:,.0f}  freed=${freed_capital:,.0f}  "
+                 f"reserved=${reserved_capital:,.0f}  effective=${effective_budget:,.0f}  (compounding OFF)")
+    return effective_budget, buying_power, net_liq
+
+
 # ── CSP pipeline (Monday 10:00 half) ───────────────────────────
 
 def run_csp_pipeline(context: dict, dry_run: bool = False,
@@ -228,13 +268,21 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # Remaining CSP slots = total − wheel holdings − already-open CSPs
     target_fills = max(0, num_positions - active_wheel_count - open_csp_count)
 
+    # Compute the budget up front — even on an all-wheel week — so the cash sweep can
+    # always derive remainder = effective_budget − total_capital (zeroing it here made
+    # an all-wheel account with real idle cash look empty).
+    effective_budget, buying_power, net_liq = _compute_effective_budget(
+        compound_enabled, cash_account, account_summary, fund_budget,
+        freed_capital, reserved_capital)
+
     if target_fills <= 0:
         log.info(f"  ✅ No remaining CSP slots to fill "
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP = {num_positions} cap)")
         result = {
             "positions": [], "raw_targets": [], "filtered_count": 0,
-            "effective_budget": 0, "target_fills": 0, "total_premium": 0,
+            "effective_budget": effective_budget, "target_fills": 0, "total_premium": 0,
             "total_capital": 0, "compound_enabled": compound_enabled,
+            "cash_account": cash_account, "buying_power": buying_power,
             "already_open_put_tickers": already_open_puts,
             "executed": not dry_run,
         }
@@ -258,48 +306,6 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 
     all_targets = get_top_targets(10)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
-
-    net_liq = None       # captured below for the weekly account-value goal post
-    buying_power = None   # captured below for the cash-account budget display
-    if compound_enabled:
-        if account_summary is not None:
-            buying_power, net_liq = account_summary
-        else:
-            buying_power, net_liq = _fetch_account_summary(fund_budget)
-        if cash_account:
-            # Cash (non-margin) account: IBKR BuyingPower IS real settled cash and
-            # already excludes capital converted to wheel stock (that cash left the
-            # account at assignment). Subtracting reserved on top would double-count
-            # and — because reserved is cost basis — go falsely negative when the
-            # holdings are underwater. Deploy BuyingPower directly. This can NEVER
-            # exceed settled cash: a cash account's BuyingPower has no margin/leverage
-            # component, and each CSP is still fully secured (strike×100) by the sizer.
-            effective_budget = max(0.0, buying_power) + freed_capital
-            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
-                     f"freed=${freed_capital:,.0f}  effective=${effective_budget:,.0f}  "
-                     f"(cash account — reserved not subtracted)")
-        else:
-            # Margin/paper: deployable = net_liq − capital locked in KEPT wheel
-            # holdings. buying_power is min(BuyingPower, NetLiq); on margin it resolves
-            # to NetLiq, which INCLUDES the wheel stock, so min() removes the stock
-            # that's already deployed. Do NOT add freed_capital: the stock stop-loss /
-            # screener-drop sells is ALREADY inside net_liq, so adding its proceeds on
-            # top double-counts — it was producing an effective budget ABOVE net_liq
-            # (impossible: e.g. $333k on a $214k account). freed is redundant here.
-            effective_budget = max(0.0, min(buying_power, net_liq - reserved_capital))
-            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
-                     f"reserved=${reserved_capital:,.0f}  freed=${freed_capital:,.0f} (already in net_liq, not added)  "
-                     f"effective=${effective_budget:,.0f}  (compounding ON)")
-        # Final sanity bound (both compound branches): never deploy more CSP capital
-        # than the whole account is worth. No-op after the margin fix; also caps any
-        # residual freed double-count in the cash branch on a post-sale live snapshot.
-        if net_liq and net_liq > 0 and effective_budget > net_liq:
-            log.info(f"  🧢 Budget capped at net_liq=${net_liq:,.0f} (was ${effective_budget:,.0f})")
-            effective_budget = net_liq
-    else:
-        effective_budget = fund_budget + freed_capital - reserved_capital
-        log.info(f"  📊 Budget: base=${fund_budget:,.0f}  freed=${freed_capital:,.0f}  "
-                 f"reserved=${reserved_capital:,.0f}  effective=${effective_budget:,.0f}  (compounding OFF)")
 
     log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
              f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")

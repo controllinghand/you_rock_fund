@@ -474,7 +474,7 @@ export default function ThisWeek() {
                   </div>
                   {cp.base != null && (
                     <div className="text-xs text-gray-500 dark:text-gray-500 pl-6">
-                      Idle cash {usd(cp.idle ?? cp.base)} · Settled cash {cp.settled_cash == null ? '—' : usd(cp.settled_cash)}
+                      Remainder {usd(cp.remainder ?? cp.base)} · Settled cash {cp.settled_cash == null ? '—' : usd(cp.settled_cash)}
                       {' · '}{cp.all_slots_filled ? 'no 10% cap (all slots filled)' : `10% net-liq cap ${usd(cp.netliq_cap)}`}
                       {' · '}Would park {usd(cp.buy_amount)}
                     </div>
@@ -564,13 +564,20 @@ export default function ThisWeek() {
             const premium = screener.combined_premium ?? (cspPrem + ccPrem)
             const yield_  = screener.combined_yield ?? 0
             const split   = (csp, cc) => `CSP $${Math.round(csp).toLocaleString()} + CC $${Math.round(cc).toLocaleString()}`
+            const cp = screener.cash_park
             const cards = [
               { label: hasCC ? 'Capital Deployed (CSP + CC)' : 'Capital Deployed', value: `$${Math.round(capital).toLocaleString()}`, sub: hasCC ? split(cspCap, ccCap) : null },
               { label: hasCC ? 'Est. Premium (CSP + CC)'     : 'Est. Premium',     value: `$${Math.round(premium).toLocaleString()}`, accent: 'text-green-400', sub: hasCC ? split(cspPrem, ccPrem) : null },
               { label: 'Blended Yield',    value: `${yield_.toFixed(2)}%`,                     accent: 'text-blue-400',  sub: hasCC ? 'CSP + CC combined' : null },
             ]
+            if (cp) cards.push({
+              label: '🅿️ Cash Sweep Remainder',
+              value: `$${Math.round(cp.remainder ?? 0).toLocaleString()}`,
+              accent: 'text-purple-500 dark:text-purple-400',
+              sub: cp.buy_amount != null ? `would park $${Math.round(cp.buy_amount).toLocaleString()}${cp.instrument ? ' ' + cp.instrument : ''}` : null,
+            })
             return (
-              <div className="grid grid-cols-3 gap-4">
+              <div className={`grid gap-4 ${cp ? 'grid-cols-2 md:grid-cols-4' : 'grid-cols-3'}`}>
                 {cards.map(({ label, value, accent = 'text-gray-900 dark:text-white', sub }) => (
                   <div key={label} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
                     <div className="text-gray-500 text-xs mb-2">{label}</div>
