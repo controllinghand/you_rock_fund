@@ -2723,6 +2723,7 @@ def run_screener():
             # Recovery reconciliation — positions already open in IBKR that a re-run skips:
             "already_open_put_tickers": csp.get("already_open_put_tickers", []),
             "target_fills":         csp.get("target_fills", 0),
+            "num_positions":        settings.get("num_positions", 5),
             # Cash sweep decision for this plan (buy / skip + reason), or None when off:
             "cash_park":            cash_park_eval,
             "dry_run":              True,

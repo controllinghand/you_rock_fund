@@ -293,9 +293,28 @@ export default function ThisWeek() {
       {screener && !loading && (
         <>
           {/* Capital allocation (shown when wheel holdings are active) */}
-          {(screener.active_wheel_count ?? 0) > 0 && (
+          {(screener.active_wheel_count ?? 0) > 0 && (() => {
+            const slotsTotal   = screener.num_positions ?? ((screener.active_wheel_count ?? 0) + positions.length)
+            const noCspSlots    = (screener.target_fills ?? 0) <= 0
+            const idleCash      = screener.cash_park?.idle ?? screener.cash_park?.buying_power ?? null
+            return (
             <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
               <div className="text-gray-900 dark:text-white font-semibold text-sm mb-3">Capital Allocation</div>
+              {noCspSlots ? (
+                /* All slots taken by wheels → no CSP slots open. Show the real reason,
+                   not a misleading "net liq − reserved = $0 available" cash-shortage view. */
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Slots</span>
+                    <span className="text-gray-900 dark:text-white font-mono">{screener.active_wheel_count} wheel · 0 CSP of {slotsTotal} total</span>
+                  </div>
+                  <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 leading-relaxed">
+                    All {slotsTotal} position slot{slotsTotal !== 1 ? 's are' : ' is'} held by wheel holdings, so no CSP slots are open this week — there are no new CSPs regardless of cash. This is <span className="font-semibold">not</span> a cash shortage.
+                    {idleCash != null && idleCash > 0 && <> Your idle cash (${Math.round(idleCash).toLocaleString()}) is free and available for the cash sweep.</>}
+                    {' '}Raise “# Positions” in Settings to open more CSP slots.
+                  </div>
+                </div>
+              ) : (
               <div className="space-y-2 text-sm">
                 {screener.cash_account ? (
                   <>
@@ -332,12 +351,14 @@ export default function ThisWeek() {
                   <span className="text-green-400 font-mono">${(screener.budget ?? 0).toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-xs text-gray-500 dark:text-gray-600 pt-0.5">
-                  <span>CSP positions this week</span>
-                  <span>{positions.length} of {(screener.active_wheel_count ?? 0) + positions.length} total slots</span>
+                  <span>Slots used</span>
+                  <span>{screener.active_wheel_count ?? 0} wheel + {positions.length} CSP of {slotsTotal} total</span>
                 </div>
               </div>
+              )}
             </div>
-          )}
+            )
+          })()}
 
           {/* Wheel holdings table */}
           {(screener.wheel_holdings ?? []).some(h => h.shares > 0) && (
