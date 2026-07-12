@@ -483,11 +483,15 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
 # ── Orders ─────────────────────────────────────────────────────
 
 def _sell_stock_market(ib: IB, ticker: str, shares: int, reason: str,
-                       assigned_strike: float = 0.0, dry_run: bool = False) -> dict:
+                       assigned_strike: float = 0.0, dry_run: bool = False,
+                       known_price: float = None) -> dict:
     if dry_run:
-        # Preview only: simulate a market fill at the current price. No order,
-        # no Discord alert, no trade-log write.
-        price = _get_stock_price(ib, ticker)
+        # Preview only: simulate a market fill. Reuse a price the caller already has
+        # (the stop-loss check's fetch, or the holding's last-known price) rather than
+        # a SECOND reqMktData — that redundant call flakily returned None on closed-
+        # market data, making the simulated sale "fail" and silently dropping the
+        # holding from the Monday plan (e.g. IONQ/QBTS over a weekend).
+        price = known_price if (known_price and known_price > 0) else _get_stock_price(ib, ticker)
         if price is None:
             log.warning(f"  🟡 [DRY RUN] {ticker}: price unavailable — cannot simulate sale")
             return {"status": "failed", "proceeds": 0.0, "fill_price": None, "dry_run": True}
@@ -1217,7 +1221,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 log.warning(f"  🚫 {ticker}: dropped from screener — selling shares")
                 _progress(ticker=ticker, stage="dropped screener — selling")
                 result = _sell_stock_market(ib, ticker, shares, "dropped_screener",
-                                               assigned_strike=assigned_strike, dry_run=orders_dry_run)
+                                               assigned_strike=assigned_strike, dry_run=orders_dry_run,
+                                               known_price=h.get("current_price"))
                 if result["status"] == "filled":
                     proceeds = result["proceeds"]
                     realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1240,6 +1245,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                       "shares": shares, "proceeds": proceeds})
                 else:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
+                                           "reason": "dropped_screener", "shares": shares})
                     _progress(ticker=ticker, stage="sale FAILED",
                               result={"ticker": ticker, "status": "sell_failed"})
                 continue
@@ -1263,7 +1270,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             f"(threshold {stop_loss_pct*100:.0f}%) — selling shares"
                         )
                         result = _sell_stock_market(ib, ticker, shares, "stop_loss",
-                                                    assigned_strike=assigned_strike, dry_run=orders_dry_run)
+                                                    assigned_strike=assigned_strike, dry_run=orders_dry_run,
+                                                    known_price=current_price)
                         if result["status"] == "filled":
                             proceeds = result["proceeds"]
                             realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1287,6 +1295,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                               "shares": shares, "proceeds": proceeds})
                         else:
                             log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                            wheel_activity.append({"ticker": ticker, "action": "sell_failed",
+                                                   "reason": "stop_loss", "shares": shares})
                             _progress(ticker=ticker, stage="sale FAILED",
                                       result={"ticker": ticker, "status": "sell_failed"})
                         continue
@@ -1318,7 +1328,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     log.warning(f"  🚨 {ticker}: earnings in {dte_int} day(s) — "
                                  f"selling shares to avoid earnings risk")
                     result = _sell_stock_market(ib, ticker, shares, "earnings_this_week",
-                                                   assigned_strike=assigned_strike, dry_run=orders_dry_run)
+                                                   assigned_strike=assigned_strike, dry_run=orders_dry_run,
+                                                   known_price=h.get("current_price"))
                     if result["status"] == "filled":
                         proceeds = result["proceeds"]
                         realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1339,6 +1350,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                         log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
                     else:
                         log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                        wheel_activity.append({"ticker": ticker, "action": "sell_failed",
+                                               "reason": "earnings_this_week", "shares": shares})
                     continue
             else:
                 ticker_info      = candidate_info.get(ticker, {})
@@ -1379,7 +1392,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 log.warning(f"  ❌ {ticker}: no call strike with delta ≥ "
                              f"{CC_DELTA_MIN:.2f} — selling shares")
                 result = _sell_stock_market(ib, ticker, shares, "no_viable_cc",
-                                               assigned_strike=assigned_strike, dry_run=orders_dry_run)
+                                               assigned_strike=assigned_strike, dry_run=orders_dry_run,
+                                               known_price=h.get("current_price"))
                 if result["status"] == "filled":
                     proceeds = result["proceeds"]
                     realized = round(proceeds - (assigned_strike * shares), 2)
@@ -1402,6 +1416,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                       "shares": shares, "proceeds": proceeds})
                 else:
                     log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
+                                           "reason": "no_viable_cc", "shares": shares})
                     _progress(ticker=ticker, stage="sale FAILED",
                               result={"ticker": ticker, "status": "sell_failed"})
                 continue

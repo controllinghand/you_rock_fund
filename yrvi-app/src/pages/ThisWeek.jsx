@@ -419,9 +419,12 @@ export default function ThisWeek() {
                   const isDeferred = a.action === 'cc_deferred'
                   const isAlready  = a.action === 'cc_already_open' || a.action === 'held_covered'
                   const isSold     = typeof a.action === 'string' && a.action.startsWith('sold')
-                  const emoji      = isCC ? '✅' : isDeferred ? '⏳' : isAlready ? '♻️' : isSold ? '📤' : '⚠️'
+                  const isSellFail = a.action === 'sell_failed'
+                  const emoji      = isCC ? '✅' : isDeferred ? '⏳' : isAlready ? '♻️' : isSold ? '📤' : isSellFail ? '🛑' : '⚠️'
                   let detail
-                  if (isCC) {
+                  if (isSellFail) {
+                    detail = `Sell (${(a.reason ?? '').replace(/_/g, ' ')}) couldn't be priced — ${a.shares ?? ''} sh kept; will sell live at market`
+                  } else if (isCC) {
                     detail = `Write CC @ $${a.cc_strike} · δ${(a.cc_delta ?? 0).toFixed(2)} · ~$${(a.cc_premium ?? 0).toLocaleString()} premium · exp ${a.cc_expiry}`
                   } else if (isDeferred) {
                     detail = `CC priced Monday at open — market closed, ${a.shares ?? ''} sh kept (no sale)`
