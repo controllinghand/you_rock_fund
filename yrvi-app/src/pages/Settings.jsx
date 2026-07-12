@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { Save, AlertTriangle, CheckCircle, Send, Sun, Moon, Monitor, RefreshCw, Power, RotateCcw, Upload, Download, RotateCw, ExternalLink, KeyRound, Pause, Play } from 'lucide-react'
 import { useThemeContext } from '../ThemeProvider.jsx'
+import { useUnsavedChanges } from '../components/UnsavedChanges.jsx'
 
 // Earliest allowed execution is 07:00 PST. The wheel check runs 5 min before
 // execution and must land after the 6:30 open (to price CCs) yet before the CSP
@@ -225,6 +226,7 @@ export default function SettingsPage() {
   const fileInputRef                          = useRef(null)
 
   const { theme, setTheme } = useThemeContext()
+  const { setDirty } = useUnsavedChanges()
 
   useEffect(() => {
     axios.get('/api/settings').then(r => {
@@ -522,6 +524,15 @@ export default function SettingsPage() {
   }
 
   const isDirty = JSON.stringify(settings) !== JSON.stringify(original)
+
+  // Raise the shared "unsaved changes" flag whenever the form (or the
+  // separately-saved timezone) differs from its saved baseline, so navigating
+  // away — a sidebar click or a tab close — warns first. Clear it on unmount.
+  const unsaved = isDirty || timezone !== timezoneOriginal
+  useEffect(() => {
+    setDirty(unsaved)
+    return () => setDirty(false)
+  }, [unsaved, setDirty])
 
   const DEFAULTS = {
     fund_budget: 250000, goal_pct: 0.24, num_positions: 5, min_position_size: 10000,

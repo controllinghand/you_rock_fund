@@ -1,6 +1,7 @@
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { LayoutDashboard, TrendingUp, Calendar, History, Settings, Lock, HelpCircle } from 'lucide-react'
 import StatusBar from './components/StatusBar.jsx'
+import { UnsavedChangesProvider, useUnsavedChanges } from './components/UnsavedChanges.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Performance from './pages/Performance.jsx'
 import ThisWeek from './pages/ThisWeek.jsx'
@@ -21,10 +22,34 @@ const NAV = [
 export default function App() {
   return (
     <BrowserRouter>
+      <UnsavedChangesProvider>
+        <Shell />
+      </UnsavedChangesProvider>
+    </BrowserRouter>
+  )
+}
+
+function Shell() {
+  const { dirty, setDirty } = useUnsavedChanges()
+  const loc = useLocation()
+
+  // Intercept sidebar navigation while the Settings form has unsaved edits.
+  // Skip when the link targets the current page (e.g. clicking Settings while
+  // already editing it) so we never prompt on a no-op navigation.
+  const guard = (path) => (e) => {
+    if (!dirty || path === loc.pathname) return
+    if (window.confirm('You have unsaved changes on the Settings page.\n\nLeave without saving?')) {
+      setDirty(false)      // proceeding — drop the flag so beforeunload stays quiet
+    } else {
+      e.preventDefault()   // stay on the page
+    }
+  }
+
+  return (
       <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-white overflow-hidden">
         {/* Sidebar */}
         <nav className="w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
-          <NavLink to="/" className="px-5 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center">
+          <NavLink to="/" onClick={guard('/')} className="px-5 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center">
             <img src="/yrvi_logo.png" alt="YRVI" className="w-[60px]" />
           </NavLink>
 
@@ -34,6 +59,7 @@ export default function App() {
                 key={path}
                 to={path}
                 end={end}
+                onClick={guard(path)}
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                     isActive
@@ -52,6 +78,7 @@ export default function App() {
           <div className="p-2 border-t border-gray-200 dark:border-gray-800">
             <NavLink
               to="/help"
+              onClick={guard('/help')}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
                   isActive
@@ -82,6 +109,5 @@ export default function App() {
           </main>
         </div>
       </div>
-    </BrowserRouter>
   )
 }
