@@ -179,6 +179,11 @@ def _poll_fill(ib: IB, trade) -> bool:
         fl  = trade.orderStatus.filled
         if st == "Filled" or (rem == 0 and fl and fl > 0):
             return True
+        # Terminal rejection/cancel (e.g. Error 10244 cashQty reject) — stop
+        # waiting the full window; the caller can escalate immediately.
+        if st in ("Cancelled", "ApiCancelled", "Inactive") and not fl:
+            log.info(f"  ⛔ order {st} (filled {fl}) — not waiting out the window")
+            return False
         log.info(f"  ⏳ order {st}: filled {fl} after {elapsed}s")
     return False
 
@@ -323,11 +328,36 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
             return _finish({"status": "failed_qualify", **caps,
                             "message": f"Failed — could not qualify {instrument}"})
 
+        # Tier 1 — fractional via cashQty (spend the exact dollars). Supported on
+        # accounts with fractional/monetary-order permission.
         order = Order(action="BUY", orderType="MKT", cashQty=buy_amount,
                       tif="DAY", account=ACCOUNT)
         log.info(f"  📥 BUY ${buy_amount:,.2f} {instrument} at market (cashQty)")
         trade = ib.placeOrder(q[0], order)
-        if not _poll_fill(ib, trade):
+        filled_ok = _poll_fill(ib, trade)
+
+        # Tier 2 — whole-share fallback. Some accounts (paper, and any without
+        # fractional trading) reject cashQty with Error 10244. If NOTHING filled,
+        # retry as a plain whole-share market order for floor($ / price) shares —
+        # the same order style the sell side uses. The sub-1-share remainder (well
+        # under one QQQ/SGOV share) just stays as cash for the week.
+        if not filled_ok and not float(trade.orderStatus.filled or 0.0):
+            ib.cancelOrder(trade.order)
+            ib.sleep(1)
+            _, px = _price(ib, instrument)
+            whole = int(buy_amount // px) if px else 0
+            if whole >= 1:
+                log.info(f"  🔁 cashQty unfilled — falling back to {whole} whole "
+                         f"share(s) of {instrument} @ ${px:.2f}")
+                order = Order(action="BUY", orderType="MKT", totalQuantity=whole,
+                              tif="DAY", account=ACCOUNT)
+                trade = ib.placeOrder(q[0], order)
+                filled_ok = _poll_fill(ib, trade)
+            else:
+                log.error(f"  ❌ {instrument} price unavailable or ${buy_amount:,.0f} "
+                          f"< 1 share — cannot fall back")
+
+        if not filled_ok:
             log.error(f"  ❌ {instrument} buy did not fill in {MARKET_WAIT_SECS}s")
             _discord_alert(f"❌ **YRVI** Cash sweep: {instrument} BUY (${buy_amount:,.0f}) "
                            f"did not fill — MANUAL CHECK.")
