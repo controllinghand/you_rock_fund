@@ -304,7 +304,11 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
             _write_weekly_pnl(0.0, context)
         return result
 
-    all_targets = get_top_targets(10)
+    # Grab the FULL ranked pool (not just the top 10) so the trader has real
+    # fallback depth. In weeks where the top ranks are gutted by wheel-exit
+    # skips + illiquid/oversized names, a shallow pool under-fills even though
+    # dozens of names qualify (v5.2.55 under-fill: 52 qualified, only 10 seen).
+    all_targets = get_top_targets(None)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
 
     log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "

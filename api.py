@@ -3358,7 +3358,7 @@ def test_run():
 
             settings    = load_settings()
             n           = settings.get("num_positions", 5)
-            all_targets = get_top_targets(n * 2)
+            all_targets = get_top_targets(None)  # full pool → dry preview matches live fallback depth
             positions   = size_all(all_targets[:n])
             _ticker_results = []
 

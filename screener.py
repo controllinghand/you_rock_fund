@@ -93,6 +93,11 @@ def score_target(row: dict) -> float:
     )
 
 def get_top_targets(n=5, always_include: set = None):
+    """Return the top-`n` scored CSP targets (ranked). Pass ``n=None`` to return
+    every qualifying candidate — the Monday pipeline uses this so the trader has
+    full fallback depth. Walking a big pool is free: execute_positions stops the
+    moment it reaches its fill target, so extra names are only ever touched in an
+    under-fill week (illiquid / skipped names crowding the top ranks)."""
     print(f"\n📡 Fetching CSP targets from Render API...")
     _warm_up()
     response = requests.get(URL, params=PARAMS, headers=HEADERS, timeout=60)
@@ -168,11 +173,15 @@ def get_top_targets(n=5, always_include: set = None):
     else:
         top = rows[:n]
 
-    print(f"\n🎯 Top {n} CSP Targets — {datetime.today().strftime('%Y-%m-%d')}")
+    _label = n if n is not None else "ALL"
+    print(f"\n🎯 Top {_label} CSP Targets ({len(top)}) — {datetime.today().strftime('%Y-%m-%d')}")
     print(f"   Scoring: 50% Buffer (1.5x ≥10%) | 35% Premium (1.1x buyzone) | 15% IV")
     print("=" * 65)
 
-    for i, r in enumerate(top, 1):
+    # Cap the verbose per-target detail so a full pool (n=None) doesn't dump ~50
+    # blocks into the logs; the tail names are fallback depth only.
+    _detail_limit = 15
+    for i, r in enumerate(top[:_detail_limit], 1):
         premium_pct = r.get("put_20d_premium_pct", 0) * 100
         buffer_pct  = r["_buffer_pct"] * 100
         score       = r["_score"] * 100
@@ -190,6 +199,9 @@ def get_top_targets(n=5, always_include: set = None):
         print(f"   Expiry:      {r['expiry']}  ({dte} days)")
         print(f"   Earnings:    {r.get('days_to_earnings', '?')} days away")
         print(f"   Buyzone:     {bz}")
+
+    if len(top) > _detail_limit:
+        print(f"\n   … +{len(top) - _detail_limit} more ranked candidates (fallback depth)")
 
     print("\n" + "=" * 65)
     return top
