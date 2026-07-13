@@ -3309,8 +3309,13 @@ def manual_run():
                 _run_status["current_stage"]  = stage
                 _run_status["ticker_results"] = list(_ticker_results)
 
+            # Heads-up to Discord (+ in-app bell) that a manual run was triggered,
+            # so the feed shows it distinctly from the scheduled Monday job.
+            _send_discord_alert("🔧 Manual run started — wheel check + CSP pipeline")
+
             # Full Monday sequence, live: wheel check (sell shares / write CCs) then CSPs.
-            outcome = run_monday(dry_run=False, progress_callback=_progress)
+            # manual=True tags the weekly-results post as a manual Run Now.
+            outcome = run_monday(dry_run=False, progress_callback=_progress, manual=True)
             _run_status["current_ticker"] = None
             _run_status["current_stage"]  = None
 
@@ -3326,10 +3331,19 @@ def manual_run():
                     "completed":     datetime.now().isoformat(),
                 }
             })
+
+            # Concise completion summary (separate from the full weekly-results embed).
+            _send_discord_alert(
+                f"✅ Manual run finished — {csp.get('fills', 0)} new CSP fill(s), "
+                f"${csp.get('csp_premium', 0):,.0f} premium · "
+                f"CC ${wheel.get('cc_premium', 0):,.0f} · "
+                f"freed ${wheel.get('freed_capital', 0):,.0f}"
+            )
         except Exception as e:
             import logging
             logging.getLogger(__name__).error(f"Manual run failed: {e}", exc_info=True)
             _run_status.update({"executing": False, "error": str(e), "result": None})
+            _send_discord_alert(f"❌ Manual run failed — {e}")
 
     threading.Thread(target=_run, daemon=True).start()
     return {"success": True, "message": "Monday sequence started (wheel check + CSP pipeline)"}

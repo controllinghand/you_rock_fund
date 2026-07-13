@@ -455,8 +455,11 @@ def _goal_lines(ytd_total: float, capital: float, goal_pct: float,
 
 def post_weekly_results(state: dict, fund_budget: float = 250_000,
                          capital: float = None, goal_pct: float = 0.24,
-                         net_liq: float = None):
-    """Post rich embed after Monday CSP execution completes."""
+                         net_liq: float = None, manual: bool = False):
+    """Post rich embed after Monday CSP execution completes.
+
+    manual=True tags the footer so it's clear the run was a manual Run Now rather
+    than the scheduled Monday job."""
     if not WEBHOOK_URL:
         return
 
@@ -598,7 +601,7 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
                      f"${total_realized:,.0f} realized ({yield_pct:.2f}%)",
         "color":     _yield_color(yield_pct),
         "fields":    fields,
-        "footer":    {"text": _FOOTER},
+        "footer":    {"text": _FOOTER + (" · Manual run" if manual else "")},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 

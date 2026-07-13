@@ -74,7 +74,7 @@ def _week_premium_from_trade_log(week_monday: str):
 
 
 def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
-                      net_liq: float = None) -> float:
+                      net_liq: float = None, manual: bool = False) -> float:
     """Assemble weekly_pnl from CSP premium + wheel-check context, persist it, and
     post Discord results. Returns total_realized. Shared by the normal and the
     'no remaining CSP slots' code paths so P&L is consistent either way."""
@@ -131,7 +131,8 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
                 except Exception:
                     nl = None
             post_weekly_results(_load_state(), fund_budget=fund_budget,
-                                capital=capital, goal_pct=goal_pct, net_liq=nl)
+                                capital=capital, goal_pct=goal_pct, net_liq=nl,
+                                manual=manual)
     except Exception as e:
         log.warning(f"  ⚠️  Discord weekly results post failed: {e}")
 
@@ -208,7 +209,8 @@ def _compute_effective_budget(compound_enabled: bool, cash_account: bool,
 # ── CSP pipeline (Monday 10:00 half) ───────────────────────────
 
 def run_csp_pipeline(context: dict, dry_run: bool = False,
-                     progress_callback=None, account_summary: tuple = None) -> dict:
+                     progress_callback=None, account_summary: tuple = None,
+                     manual: bool = False) -> dict:
     """
     Screen → size → (execute) CSPs, applying the wheel check's results.
 
@@ -287,21 +289,24 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
             "executed": not dry_run,
         }
         if not dry_run:
-            # No CSPs ran this week, so trader.execute_positions never executed and
-            # never refreshed the CSP-run fields — they'd keep the PRIOR week's run.
-            # Clear them here so the Discord weekly post and the Trade-History
+            # No CSPs to fill this week. If the prior state is from an EARLIER week,
+            # clear the stale CSP fields so the Discord weekly post + Trade-History
             # "Current Week" view don't resurface last week's executions/positions.
-            # Must happen BEFORE _write_weekly_pnl, which re-loads state to build the
-            # Discord "This Week's Trades" section from state["executions"].
+            # But if it's from THIS week — a re-run after the slots were already
+            # filled — PRESERVE them so the week's trades aren't wiped; just refresh
+            # run_date. Must happen BEFORE _write_weekly_pnl, which re-loads state to
+            # build the Discord "This Week's Trades" section from state["executions"].
+            from trader import _same_week
             state = _load_state()
+            if not _same_week(state.get("run_date")):
+                state["positions"]     = []
+                state["executions"]    = []
+                state["filled_count"]  = 0
+                state["total_premium"] = 0
             state["run_date"]      = datetime.now().isoformat()
-            state["positions"]     = []
-            state["executions"]    = []
-            state["filled_count"]  = 0
-            state["total_premium"] = 0
             with open(STATE_FILE, "w") as f:
                 json.dump(state, f, indent=2)
-            _write_weekly_pnl(0.0, context)
+            _write_weekly_pnl(0.0, context, manual=manual)
         return result
 
     # Grab the FULL ranked pool (not just the top 10) so the trader has real
@@ -346,7 +351,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)
     total_realized = _write_weekly_pnl(csp_premium, context, fund_budget=effective_budget,
-                                        net_liq=net_liq)
+                                        net_liq=net_liq, manual=manual)
 
     log.info(f"✅ CSP pipeline done — {len(filled)}/{target_fills} fills  "
              f"CSP ${csp_premium:,.0f}  CC ${context.get('cc_premium', 0.0):,.0f}  total ${total_realized:,.0f}")
@@ -364,13 +369,14 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 # ── Full Monday sequence (wheel check → CSP pipeline) ──────────
 
 def run_monday(dry_run: bool = False, progress_callback=None,
-               account_summary: tuple = None) -> dict:
+               account_summary: tuple = None, manual: bool = False) -> dict:
     """
     Run the complete Monday sequence in one call: wheel check then CSP pipeline,
     using the wheel check's in-memory results to drive the pipeline.
 
     dry_run=True  → faithful preview, zero side effects (Run Screener)
     dry_run=False → live execution: sells shares, writes CCs, opens CSPs (Run Now)
+    manual=True   → tag the Discord weekly-results post as a manual Run Now.
     """
     from wheel_manager import run_wheel_check
 
@@ -383,7 +389,7 @@ def run_monday(dry_run: bool = False, progress_callback=None,
                             progress_callback=progress_callback)
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
                              progress_callback=progress_callback,
-                             account_summary=account_summary)
+                             account_summary=account_summary, manual=manual)
 
     # Cash sweep — park the week's undeployed remainder (no-op unless enabled in
     # Settings). On a dry run it only reports what it would do. Mirrors the

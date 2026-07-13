@@ -4,7 +4,7 @@ import math
 import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder
 
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, gateway_unreachable_message, probe_port
@@ -51,6 +51,72 @@ def _append_trade_log(record: dict) -> None:
         entries.append(record)
     with open(TRADE_LOG_JSON, "w") as f:
         json.dump(entries, f, indent=2)
+
+
+def _same_week(iso_ts: str | None) -> bool:
+    """True if `iso_ts` (naive-local isoformat, as stored in state.run_date) falls
+    in the current Monday-anchored week. Used to decide whether a prior state's
+    executions belong to THIS week and should be consolidated into a re-run."""
+    if not iso_ts:
+        return False
+    try:
+        d = datetime.fromisoformat(iso_ts)
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now(d.tzinfo) if d.tzinfo else datetime.now()
+    monday = lambda x: (x - timedelta(days=x.weekday())).date()
+    return monday(d) == monday(now)
+
+
+def _merge_week_executions(existing: dict, new_results: list, new_positions: list):
+    """Consolidate a same-week re-run. A live Run Now overwrote state.executions
+    with only the latest run's results, so after a re-run the dashboard week view,
+    filled_count, total_premium, and the Discord 'This Week's Trades' section
+    showed just the new fills and dropped the ones opened earlier this week — even
+    though weekly_pnl (summed from the durable trade_log) stayed correct. Here we
+    UNION this run's results with the still-open fills already recorded this week.
+
+    Safe against double-counting: the pipeline folds open short puts into
+    skip_tickers (open_short_put_tickers), so a carried fill is never also
+    re-executed. A new FILL for a ticker supersedes a prior one; a new non-fill
+    (skip/fail) never displaces a prior fill for the same ticker. Prior-WEEK state
+    is dropped (fresh week starts clean).
+
+    Returns (executions, positions, filled_count, total_premium).
+    """
+    _FILLED = ("filled", "partial_fill", "dry_run")
+
+    by_ticker: dict = {}
+    order: list = []
+
+    def _put(e):
+        t = e.get("ticker")
+        if t not in by_ticker:
+            order.append(t)
+        by_ticker[t] = e
+
+    if _same_week(existing.get("run_date")):
+        for e in existing.get("executions", []):
+            if e.get("status") in _FILLED:
+                _put(e)   # carry this week's already-open fills first
+
+    for e in new_results:
+        t = e.get("ticker")
+        # A real new fill overrides; a skip/fail only fills an empty slot so it
+        # can't wipe out a fill that this same ticker already produced this week.
+        if e.get("status") in _FILLED or t not in by_ticker:
+            _put(e)
+
+    merged_execs = [by_ticker[t] for t in order]
+
+    new_pos_tickers = {p.get("ticker") for p in new_positions}
+    carried_pos = [p for p in existing.get("positions", [])
+                   if p.get("ticker") in by_ticker and p.get("ticker") not in new_pos_tickers]
+    merged_positions = list(new_positions) + carried_pos
+
+    filled = [e for e in merged_execs if e.get("status") in _FILLED]
+    total_premium = round(sum(e.get("premium_collected", 0) or 0 for e in filled), 2)
+    return merged_execs, merged_positions, len(filled), total_premium
 
 
 def connect() -> IB:
@@ -861,12 +927,20 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                   f"the results write to avoid clobbering wheel_holdings. CSP orders "
                   f"were placed; reconcile via Saturday detection, then repair state.json.")
         return results
+    # Consolidate a same-week re-run: union this run's results with the fills
+    # already opened earlier this week so the dashboard week view + filled_count +
+    # total_premium + the Discord trades section reflect the whole week, not just
+    # the last run. Dry runs keep the plain overwrite (no week to consolidate).
+    execs, positions_out, fcount, tprem = (
+        _merge_week_executions(existing, results, all_sized) if not dry_run
+        else (results, all_sized, filled_count, total_premium)
+    )
     existing.update({
         "run_date":      datetime.now().isoformat(),
-        "positions":     all_sized,   # includes any fallback candidates that were attempted
-        "executions":    results,
-        "filled_count":  filled_count,
-        "total_premium": total_premium
+        "positions":     positions_out,   # includes any fallback candidates that were attempted
+        "executions":    execs,
+        "filled_count":  fcount,
+        "total_premium": tprem
     })
     with open("state.json", "w") as f:
         json.dump(existing, f, indent=2)
