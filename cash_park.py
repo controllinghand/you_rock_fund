@@ -169,6 +169,29 @@ def _held_shares(ib: IB, ticker: str) -> float:
     return 0.0
 
 
+def _open_short_put_capital(ib: IB) -> float:
+    """Sum strike × 100 × |contracts| across ALL open short puts — the cash a
+    cash-secured-put fund reserves to back them.
+
+    The sweep subtracts this so its remainder reflects capital committed by CSPs
+    opened in EARLIER runs this week, not just the current run's. Without it, a
+    same-week RE-RUN (where this run deploys 0 new CSPs because the slots are
+    already filled) treats the whole budget as idle and over-parks — which drove
+    the account onto margin (v5.2.58). Read live from IBKR so it's independent of
+    how many runs happened. Best-effort: 0.0 on error (the settled-cash cap still
+    applies)."""
+    total = 0.0
+    try:
+        for p in ib.positions(ACCOUNT):
+            c = p.contract
+            if (c.secType == "OPT" and str(getattr(c, "right", "")).upper().startswith("P")
+                    and p.position < 0):
+                total += float(c.strike) * 100.0 * abs(float(p.position))
+    except Exception as e:
+        log.warning(f"⚠️  Could not read open short-put capital: {e}")
+    return round(total, 2)
+
+
 def _poll_fill(ib: IB, trade) -> bool:
     elapsed = 0
     while elapsed < MARKET_WAIT_SECS:
@@ -247,38 +270,52 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
     try:
-        # ── Base = the CSP budget remainder (the intuitive "leftover after this
-        # week's selections"): effective_budget − CSP capital deployed. Bounded by the
-        # budget, so it can't over-park from inflated margin buying power; and because
-        # the budget respects the account type (buying_power for cash, net_liq−reserved
-        # for margin) and net_liq is stable across the stock→cash conversion, the
-        # preview number matches what a live Monday run parks.
+        # ── Committed CSP capital = cash reserved to back ALL open short puts
+        # (strike×100), read LIVE from IBKR. Subtracting this is what makes a re-run
+        # safe: on a re-run this run deploys 0 new CSPs, but the puts opened in earlier
+        # runs this week are still consuming the budget. Using only this run's
+        # total_capital treated the whole budget as idle and over-parked onto margin
+        # (v5.2.58). On a DRY preview the CSPs aren't placed yet, so add the planned
+        # (sized) capital; on a LIVE run they're already open and counted here.
         total_cash, net_liq, buying_power = _account_summary(ib)
+        committed_csp = _open_short_put_capital(ib)
+        if dry_run:
+            committed_csp += (csp_outcome.get("total_capital", 0.0) or 0.0)
+
+        # ── Base = the CSP budget remainder: effective_budget − committed CSP capital.
+        # Bounded by the budget, so it can't over-park from inflated margin buying
+        # power; the budget respects the account type (buying_power for cash,
+        # net_liq−reserved for margin) and net_liq is stable across the stock→cash
+        # conversion, so the preview number matches what a live Monday run parks.
         remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
-                        - (csp_outcome.get("total_capital", 0.0) or 0.0))
+                        - committed_csp)
         base = remainder
         if include_prem:
             base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
                   + (context.get("cc_premium", 0.0) or 0.0)
 
-        # No-margin cap = real settled cash. On a DRY preview the stop-loss/screener
-        # sales haven't executed yet, so add the freed proceeds to model the POST-sale
-        # cash — otherwise a stop-loss week is wrongly zeroed by the CURRENT (pre-sale)
-        # negative settled cash. A live run reads settled cash AFTER the sales, so no
-        # adjustment. The 10% net-liq cap is ONLY a safety for a partial (unfilled) run.
+        # No-margin cap = real settled cash LESS the cash already reserved to secure the
+        # open short puts. TotalCashValue alone is not enough: opening a put on margin
+        # doesn't reduce it (premium even raises it), so on a re-run the raw cash cap
+        # let the sweep park cash that was already backing the puts → margin (v5.2.58).
+        # On a DRY preview add freed proceeds to model POST-sale cash (a stop-loss week
+        # is otherwise wrongly zeroed by the pre-sale negative settled cash). The 10%
+        # net-liq cap is an additional safety for a partial (unfilled) run.
         freed       = context.get("freed_capital", 0.0) or 0.0
         settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
-        cash_cap    = max(0.0, settled_eff) if settled_eff is not None else base
+        cash_cap    = max(0.0, settled_eff - committed_csp) if settled_eff is not None else base
         netliq_cap  = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
         buy_amount  = round(min(base, cash_cap) if all_filled
                             else min(base, cash_cap, netliq_cap), 2)
 
-        log.info(f"  🅿️  Cash sweep: remainder=${remainder:,.2f}  base=${base:,.2f}  "
-                 f"settled(eff)=${cash_cap:,.2f}  10%netliq=${netliq_cap:,.2f}  slots={fills}/{target} "
+        log.info(f"  🅿️  Cash sweep: remainder=${remainder:,.2f}  committed_csp=${committed_csp:,.2f}  "
+                 f"base=${base:,.2f}  settled(eff)=${cash_cap:,.2f}  10%netliq=${netliq_cap:,.2f}  "
+                 f"slots={fills}/{target} "
                  f"{'(all filled → full)' if all_filled else '(partial → 10% cap)'}  "
                  f"→ buy=${buy_amount:,.2f} of {instrument}")
 
         caps = {"base": round(base, 2), "remainder": round(remainder, 2),
+                "committed_csp": committed_csp,
                 "settled_cash": round(total_cash, 2) if total_cash is not None else None,
                 "settled_effective": round(cash_cap, 2),
                 "buying_power": round(buying_power, 2) if buying_power is not None else None,
