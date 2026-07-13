@@ -950,6 +950,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     open_short_calls       = {}     # (symbol, expiry YYYYMMDD) -> contracts short
     open_short_call_meta   = {}     # (symbol, expiry YYYYMMDD) -> {contracts, strike, premium}
     open_short_put_tickers = set()  # symbols with an open short put (CSP)
+    open_short_put_capital = 0.0    # Σ strike×100×contracts of open CSPs (cash-secured)
     tickers_with_open_call = set()  # symbols with any open short call (covered)
 
     ib = _connect(client_id)
@@ -1000,6 +1001,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     m["strike"]     = c.strike
                 elif c.right == "P":
                     open_short_put_tickers.add(c.symbol)
+                    # Cash a cash-secured put reserves — summed so the CSP pipeline can
+                    # subtract capital committed by CSPs opened in EARLIER runs this
+                    # week and not over-deploy on a re-run (v5.2.60).
+                    open_short_put_capital += float(c.strike) * 100.0 * abs(pos)
         # Prefer commission-free gross premium from trade_log over IBKR avgCost
         # (which includes commissions) for the recorded current_cc_premium — #73.
         for (sym, exp), m in open_short_call_meta.items():
@@ -1545,6 +1550,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         "active_wheel_count":     active_wheel_count,
         "held_tickers":           held_tickers,
         "open_short_put_tickers": sorted(open_short_put_tickers),
+        "open_short_put_capital": round(open_short_put_capital, 2),
         "updated":                datetime.now().isoformat()
     }
     # Gate on orders_dry_run (not the pipeline dry_run). When Settings "Dry Run"
@@ -1595,6 +1601,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         "wheel_activity":         wheel_activity,
         "held_tickers":           held_tickers,
         "open_short_put_tickers": sorted(open_short_put_tickers),
+        "open_short_put_capital": round(open_short_put_capital, 2),
     }
 
 

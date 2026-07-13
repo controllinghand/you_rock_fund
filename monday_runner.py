@@ -316,9 +316,23 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     all_targets = get_top_targets(None)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
 
+    # Subtract capital committed by CSPs opened in EARLIER runs this week so a re-run
+    # sizes new CSPs against the REMAINING capital, not the full budget — otherwise the
+    # new puts stack on top of the open ones and blow past net_liq into margin (v5.2.60:
+    # a re-run deployed $250,950 of CSPs against a $198k net_liq). effective_budget is
+    # left untouched (the cash sweep subtracts its own live CSP read); only the SIZING
+    # budget is reduced. Cash accounts already exclude open-CSP cash from BuyingPower,
+    # so subtracting again would double-count → only margin/compound needs this.
+    open_csp_capital  = context.get("open_short_put_capital", 0.0) or 0.0
+    csp_sizing_budget = effective_budget if cash_account \
+                        else max(0.0, effective_budget - open_csp_capital)
+    if open_csp_capital and not cash_account:
+        log.info(f"  💵 Sizing budget ${csp_sizing_budget:,.0f} = effective ${effective_budget:,.0f} "
+                 f"− ${open_csp_capital:,.0f} open-CSP capital (re-run safety)")
+
     log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
              f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")
-    positions    = size_all(filtered_targets, budget=effective_budget,
+    positions    = size_all(filtered_targets, budget=csp_sizing_budget,
                             num_positions=target_fills)
 
     total_premium = sum(p.get("premium_total", 0) for p in positions)
