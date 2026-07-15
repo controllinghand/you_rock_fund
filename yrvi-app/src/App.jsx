@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { LayoutDashboard, TrendingUp, Calendar, History, Settings, Lock, HelpCircle } from 'lucide-react'
 import StatusBar from './components/StatusBar.jsx'
@@ -33,6 +34,14 @@ function Shell() {
   const { dirty, setDirty } = useUnsavedChanges()
   const loc = useLocation()
 
+  // Mobile only: the sidebar is a slide-over drawer under md. At md+ it is the
+  // static column it has always been and this state is inert.
+  const [navOpen, setNavOpen] = useState(false)
+
+  // Close the drawer on navigation, so tapping a link doesn't leave it covering
+  // the page it just opened.
+  useEffect(() => { setNavOpen(false) }, [loc.pathname])
+
   // Intercept sidebar navigation while the Settings form has unsaved edits.
   // Skip when the link targets the current page (e.g. clicking Settings while
   // already editing it) so we never prompt on a no-op navigation.
@@ -47,8 +56,19 @@ function Shell() {
 
   return (
       <div className="flex h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-white overflow-hidden">
-        {/* Sidebar */}
-        <nav className="w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
+        {/* Backdrop — mobile only, only while the drawer is open. */}
+        {navOpen && (
+          <div
+            className="fixed inset-0 z-30 bg-black/50 md:hidden"
+            onClick={() => setNavOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Sidebar. Under md it is a fixed slide-over drawer (w-52 was 48% of a
+            phone screen). At md+ every mobile class is cancelled — md:static
+            md:translate-x-0 restores the exact static w-52 column as before. */}
+        <nav className={`fixed inset-y-0 left-0 z-40 w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 transition-transform duration-200 md:static md:translate-x-0 md:transition-none ${navOpen ? 'translate-x-0' : '-translate-x-full'}`}>
           <NavLink to="/" onClick={guard('/')} className="px-5 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center">
             <img src="/yrvi_logo.png" alt="YRVI" className="w-[60px]" />
           </NavLink>
@@ -94,9 +114,9 @@ function Shell() {
         </nav>
 
         {/* Main */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <StatusBar />
-          <main className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+          <StatusBar onMenuClick={() => setNavOpen(true)} />
+          <main className="flex-1 overflow-y-auto p-3 md:p-6">
             <Routes>
               <Route path="/"              element={<Dashboard />} />
               <Route path="/performance"   element={<Performance />} />

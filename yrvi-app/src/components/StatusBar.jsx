@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { Sun, Moon, Monitor } from 'lucide-react'
+import { Sun, Moon, Monitor, Menu } from 'lucide-react'
 import axios from 'axios'
 import { useThemeContext } from '../ThemeProvider.jsx'
 import AlertsBell from './AlertsBell.jsx'
@@ -54,7 +54,7 @@ function versionDiff(current, latest) {
   return 'same'
 }
 
-export default function StatusBar() {
+export default function StatusBar({ onMenuClick }) {
   const [status, setStatus]       = useState(null)
   const [pidFlash, setPidFlash]   = useState(false)
   const prevPid                   = useRef(null)
@@ -311,9 +311,22 @@ export default function StatusBar() {
   return (
     <>
       {/* ── Top bar ────────────────────────────────────────────── */}
-      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-6 gap-6 shrink-0">
-        {/* Status pills */}
-        <div className="flex items-center gap-4">
+      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-3 md:px-6 gap-3 md:gap-6 shrink-0">
+        {/* Drawer toggle — mobile only; the sidebar is always visible at md+. */}
+        <button
+          type="button"
+          onClick={onMenuClick}
+          aria-label="Open navigation menu"
+          className="md:hidden -ml-1 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-200 shrink-0"
+        >
+          <Menu size={18} />
+        </button>
+
+        {/* Status pills. Under md this is the ONLY element allowed to flex and
+            scroll — everything after it (mode badge, alerts, theme) is shrink-0
+            and stays visible at any phone width. The mode badge in particular
+            must never require a swipe: you always need to know LIVE vs PAPER. */}
+        <div className="flex items-center gap-2 md:gap-4 flex-1 md:flex-none min-w-0 overflow-x-auto md:overflow-x-visible">
           {paused ? (
             <div className="flex items-center gap-1.5" title="Trading paused by you (Settings → System Control). The gateway is stopped on purpose — Resume Trading to bring it back.">
               <div className="w-2 h-2 rounded-full bg-amber-400" />
@@ -441,10 +454,12 @@ export default function StatusBar() {
           )}
         </div>
 
-        <div className="w-px h-5 bg-gray-200 dark:bg-gray-800" />
+        <div className="hidden md:block w-px h-5 bg-gray-200 dark:bg-gray-800" />
 
-        {/* Account info */}
-        <div className="flex items-center gap-4 text-xs">
+        {/* Account info — hidden under md. Every figure here (account value,
+            unrealized, buying power, settled cash) is already a card on the
+            Dashboard, so on a phone this is duplication that overflowed the bar. */}
+        <div className="hidden md:flex items-center gap-4 text-xs">
           <span className="text-gray-500">Account</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.account_value)}</span>
           {status?.unrealized_pnl != null && status.unrealized_pnl !== 0 && (
@@ -468,10 +483,11 @@ export default function StatusBar() {
           )}
         </div>
 
-        <div className="flex-1" />
+        {/* Spacer — md+ only. Under md the pills flex instead. */}
+        <div className="hidden md:block md:flex-1" />
 
         {/* Mode badge */}
-        <span className={`text-xs font-bold px-3 py-1 rounded-full border ${
+        <span className={`shrink-0 text-xs font-bold px-3 py-1 rounded-full border ${
           isLive
             ? 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/50 dark:text-green-400 dark:border-green-700 animate-pulse'
             : 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-400 dark:border-blue-800'
@@ -479,8 +495,10 @@ export default function StatusBar() {
           {isLive ? '🟢 LIVE' : '📄 PAPER'}
         </span>
 
+        {/* Account number — hidden under md. It costs ~70px the phone doesn't
+            have, and it's an account number on a screen you read in public. */}
         {status?.account && (
-          <span className="text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
+          <span className="hidden md:inline text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
         )}
 
         {/* Alerts bell */}
