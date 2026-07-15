@@ -235,6 +235,60 @@ self_heal_jre_pointer() {
     return 0
 }
 
+# Keep x11vnc alive so the built-in View Gateway viewer can reach the display.
+#
+# The image starts x11vnc exactly once (run.sh start_vnc), immediately after
+# waiting for the X socket — but common.sh's wait_x_socket only checks that the
+# socket FILE exists, and Xvfb creates that file a moment before it accepts
+# connections. An x11vnc that loses the race dies on the spot ("unable to open
+# the X DISPLAY: :1") and nothing ever retries it, so port 5900 stays dead for
+# the life of the container while the gateway logs in and trades normally. That
+# is the confusing case where the dashboard says the gateway is UP and the viewer
+# says it is down — both are right. Seen on the paper box 2026-07-15; a restart
+# 12 hours earlier won the same race, so it is luck, not configuration.
+#
+# run.sh is image code we can't patch, so supervise from here instead: relaunch
+# x11vnc whenever it is missing while Xvfb is up. The image ships no X probe tool
+# (no xdpyinfo/xset), but none is needed — x11vnc exits immediately if the display
+# isn't ready, so a relaunch that fails simply retries on the next tick.
+#
+# Viewer-only, so this deliberately never sends a Discord alert: it has no trading
+# impact, and a cosmetic alert on gateway starts would just be noise.
+vnc_watcher() {
+    vnc_pw="$1"
+    gw_pid="$2"
+    poll="${VNC_WATCH_INTERVAL:-15}"
+
+    # No password → the image disables VNC entirely; nothing to supervise.
+    if [ -z "$vnc_pw" ]; then
+        return 0
+    fi
+
+    heals=0
+    while kill -0 "$gw_pid" 2>/dev/null; do
+        sleep "$poll"
+
+        # Xvfb down means the gateway is still starting or is shutting down
+        # (stop_ibc kills x11vnc, then Xvfb) — either way, don't touch the display.
+        pgrep -x Xvfb   >/dev/null 2>&1 || continue
+        # Already serving? Nothing to do.
+        pgrep -x x11vnc >/dev/null 2>&1 && continue
+
+        # DISPLAY is exported by run.sh in its own process, not inherited here;
+        # :1 is the display run.sh always creates. -rfbport pins 5900 rather than
+        # letting x11vnc drift to 5901 on a bind clash, since 5900 is the only
+        # port the viewer knows.
+        x11vnc -ncache_cr -display :1 -forever -shared -bg -noipv6 \
+               -rfbport 5900 -passwd "$vnc_pw" >/dev/null 2>&1 || true
+        sleep 1
+        if pgrep -x x11vnc >/dev/null 2>&1; then
+            heals=$((heals + 1))
+            echo "yrvi-gw-entrypoint: VNC self-heal — x11vnc was not running; relaunched it on :1 (heal #${heals})"
+        fi
+    done
+    return 0
+}
+
 # ── Credentials preflight ────────────────────────────────────────
 
 echo "yrvi-gw-entrypoint: fetching ${PASSWORD_KEY} from secrets container..."
@@ -331,6 +385,11 @@ rm -f "$LOG_FILE" "$LOCKOUT_FLAG"
 "$@" > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2) &
 GW_PID=$!
 
+# Supervise x11vnc for the viewer (see vnc_watcher above). Exits on its own when
+# the gateway does; never blocks or fails startup.
+vnc_watcher "$vnc_password" "$GW_PID" &
+VNC_WATCHER_PID=$!
+
 # Watcher: tails the log, matches the lockout patterns case-insensitively,
 # and on hit sends an alert and signals the gateway to exit.
 (
@@ -355,9 +414,11 @@ WATCHER_PID=$!
 EXIT=0
 wait "$GW_PID" 2>/dev/null || EXIT=$?
 
-# Tear down the watcher.
+# Tear down the watchers.
 kill "$WATCHER_PID" 2>/dev/null || true
 wait "$WATCHER_PID" 2>/dev/null || true
+kill "$VNC_WATCHER_PID" 2>/dev/null || true
+wait "$VNC_WATCHER_PID" 2>/dev/null || true
 
 if [ -f "$LOCKOUT_FLAG" ]; then
     exit 1
