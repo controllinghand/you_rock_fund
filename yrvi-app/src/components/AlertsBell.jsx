@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Bell, Trash2 } from 'lucide-react'
 import axios from 'axios'
 
@@ -59,7 +60,9 @@ export default function AlertsBell() {
     const v = parseInt(localStorage.getItem(LAST_SEEN_KEY) || '0', 10)
     return Number.isNaN(v) ? 0 : v
   })
-  const wrapRef = useRef(null)
+  const [pos, setPos]         = useState(null)
+  const wrapRef  = useRef(null)
+  const panelRef = useRef(null)
 
   // ── Poll the feed every 30s (matches the rest of the StatusBar) ──
   useEffect(() => {
@@ -74,14 +77,57 @@ export default function AlertsBell() {
     return () => clearInterval(t)
   }, [])
 
-  // Close on outside click
+  // ── Placement ──
+  // The panel is portalled to <body> and fixed-positioned rather than absolutely
+  // positioned inside the bell. The StatusBar sets overflow-x on itself at lg+,
+  // and a container with overflow-x:auto computes overflow-y to auto as well —
+  // an absolute panel would be trapped inside the 48px bar behind a scrollbar.
+  // Fixed + portal keeps it clear of any ancestor's overflow for good.
+  useLayoutEffect(() => {
+    if (!open) return
+    const GAP = 8, EDGE = 8, IDEAL_W = 384  // 24rem
+    const place = () => {
+      const r = wrapRef.current?.getBoundingClientRect()
+      if (!r) return
+      // Right-align to the bell, but clamp so neither edge leaves the viewport.
+      // On a phone the bell is not the rightmost item, so an unclamped
+      // right-anchor hangs the panel off the left side.
+      const width = Math.min(IDEAL_W, window.innerWidth - EDGE * 2)
+      const right = Math.min(
+        Math.max(EDGE, window.innerWidth - r.right),
+        window.innerWidth - width - EDGE
+      )
+      setPos({
+        top:  r.bottom + GAP,
+        right,
+        width,
+        maxH: Math.max(160, window.innerHeight - r.bottom - GAP - EDGE),
+      })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)  // capture: any scrolling ancestor
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open])
+
+  // Close on outside click (the panel lives outside wrapRef, so check both) or Esc
   useEffect(() => {
     if (!open) return
     const onDown = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false)
+      if (wrapRef.current?.contains(e.target)) return
+      if (panelRef.current?.contains(e.target)) return
+      setOpen(false)
     }
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
   }, [open])
 
   const unread = alerts.filter(a => a.id > lastSeen)
@@ -125,8 +171,17 @@ export default function AlertsBell() {
         )}
       </button>
 
-      {open && (
-        <div className="absolute right-0 mt-2 w-96 max-h-[28rem] flex flex-col bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+      {open && pos && createPortal(
+        <div
+          ref={panelRef}
+          style={{
+            top:       pos.top,
+            right:     pos.right,
+            width:     pos.width,
+            maxHeight: Math.min(pos.maxH, 448),   // 28rem, or less when the viewport is short
+          }}
+          className="fixed flex flex-col bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden"
+        >
           <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 dark:border-gray-800">
             <span className="text-sm font-semibold text-gray-900 dark:text-white">
               Alerts
@@ -171,7 +226,8 @@ export default function AlertsBell() {
               ))
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
