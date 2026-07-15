@@ -3068,6 +3068,51 @@ _GITHUB_VERSION_URL = (
     "you_rock_fund/main/VERSION"
 )
 
+# ── One-time post-upgrade notes ───────────────────────────────────────
+# For releases needing a step the upgrade physically CANNOT do for itself: the
+# build runs inside the api container, which has neither /Applications nor
+# AppKit, so anything touching the host's installed app is out of reach.
+# Keyed by the version that introduced the step; an upgrade crossing that
+# version emits the note once. This exists because a CHANGELOG doesn't reach
+# anyone — the friend boxes are standalone and Discord is the only channel.
+# Keep entries rare: every one of these interrupts someone.
+UPGRADE_NOTES: dict[str, str] = {
+    "5.2.63": (
+        "🖼️ **One-time step — launcher icon**\n"
+        "This upgrade ships a fixed launcher icon, but it can't install it for "
+        "you: the icon lives inside the already-installed app, which the "
+        "upgrade can't reach.\n"
+        "In Terminal on this box:\n"
+        "`cd ~/you_rock_fund && bash scripts/install-startup-app.sh`\n"
+        "Then drag 'YRVI Startup' OUT of the Dock and back in — the Dock caches "
+        "the old icon and won't reload it in place.\n"
+        "Cosmetic only — trading is unaffected, so do it whenever."
+    ),
+}
+
+
+def _version_tuple(v: str):
+    """(5, 2, 63) from '5.2.63' / 'v5.2.63'; None if unparseable (e.g. 'unknown')."""
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _notes_crossed(current: str, latest: str) -> list[str]:
+    """Notes for versions in (current, latest] — the steps THIS upgrade newly needs.
+
+    Half-open by design: a box already on 5.2.63 has had 5.2.63's note, but one
+    jumping 5.2.62 → 5.2.65 still must get it.
+    """
+    cur, lat = _version_tuple(current), _version_tuple(latest)
+    if cur is None or lat is None:
+        return []
+    return [
+        note for ver, note in sorted(UPGRADE_NOTES.items(), key=lambda kv: _version_tuple(kv[0]) or ())
+        if (v := _version_tuple(ver)) and cur < v <= lat
+    ]
+
 @app.get("/api/version/check")
 def version_check():
     version_file = BASE_DIR / "VERSION"
@@ -3158,6 +3203,18 @@ def version_upgrade():
         return {"success": False, "output": "git pull timed out after 60s — upgrade aborted"}
     except Exception as e:
         return {"success": False, "output": f"git pull failed: {e}"}
+
+    # ── Post-upgrade notes ────────────────────────────────────
+    # Emitted HERE — after the pull, before the build — on purpose. These notes
+    # describe host-side steps that depend only on the pulled files being on
+    # disk, so they're already actionable and stay valid even if the build below
+    # fails. Emitting before Popen also means the alert is safely written before
+    # the build restarts this very container.
+    for _note in _notes_crossed(current, latest):
+        try:
+            _send_discord_alert(f"{_note}\n(upgrade {current} → {latest})")
+        except Exception as e:
+            logger.warning(f"post-upgrade note failed to send: {e}")
 
     # ── Step 2: yrvi-build.sh all --paper ────────────────────
     # Run from /host_repo so docker compose sends updated host files as the
