@@ -154,6 +154,14 @@ Setup polls silently until the browser form is submitted, then auto-proceeds —
 
 > **Note:** The `docker/secrets/` directory holds empty placeholder files for the file-based fallback path; it's git-ignored and the real values never live there.
 
+#### Remote access — the dashboard on your phone (optional)
+
+Every YRVI service binds to `127.0.0.1`, so the dashboard is reachable only from the box itself. That loopback binding is deliberate and load-bearing: it's why the dashboard needs no login. **Never rebind these services to `0.0.0.0` or forward a port to them.**
+
+If you want the dashboard on your phone, put your box and your phone on a **private overlay network** (Tailscale) and publish just the dashboard port to it — no inbound ports, no public exposure, no code changes, about 15 minutes. See **[docs/remote-access.md](docs/remote-access.md)** for the walkthrough and its non-obvious traps (uncheck Funnel; run the daemon as root; disable key expiry; HTTPS only).
+
+Your own account, your own network, your own devices — and self-supported. The isolation that keeps YRVI deployments independent also means nobody else can debug your box. For why there's no password on the dashboard, see [docs/dashboard-auth.md](docs/dashboard-auth.md).
+
 #### Viewing the IB Gateway screen (built-in View Gateway)
 
 To check the Gateway's screen — a login, 2FA prompt, error dialog, or just its status — use the **View Gateway** viewer built into the dashboard. No VNC client to download: open **Help → System Diagnostics → View Gateway**, then **👁 Open viewer (view-only)** (the password auto-fills). See [docs/view-gateway.md](docs/view-gateway.md).
