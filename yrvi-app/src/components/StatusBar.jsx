@@ -311,22 +311,28 @@ export default function StatusBar({ onMenuClick }) {
   return (
     <>
       {/* ── Top bar ────────────────────────────────────────────── */}
-      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-3 md:px-6 gap-3 md:gap-6 shrink-0">
-        {/* Drawer toggle — mobile only; the sidebar is always visible at md+. */}
+      {/* lg:overflow-x-auto — at lg+ the pills stop scrolling and the bar carries
+          its full content, which can exceed a narrow desktop window (it already
+          did before any of this: ~1232px of content in 1072px at 1280). Without
+          this it silently clips with no way to reach the right-hand items. Under
+          lg the pills scroll instead and everything else stays pinned, so the bar
+          itself must NOT scroll — nesting the two would fight. */}
+      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-3 lg:px-6 gap-3 lg:gap-6 shrink-0 lg:overflow-x-auto">
+        {/* Drawer toggle — mobile only; the sidebar is always visible at lg+. */}
         <button
           type="button"
           onClick={onMenuClick}
           aria-label="Open navigation menu"
-          className="md:hidden -ml-1 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-200 shrink-0"
+          className="lg:hidden -ml-1 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-200 shrink-0"
         >
           <Menu size={18} />
         </button>
 
-        {/* Status pills. Under md this is the ONLY element allowed to flex and
+        {/* Status pills. Under lg this is the ONLY element allowed to flex and
             scroll — everything after it (mode badge, alerts, theme) is shrink-0
             and stays visible at any phone width. The mode badge in particular
             must never require a swipe: you always need to know LIVE vs PAPER. */}
-        <div className="flex items-center gap-2 md:gap-4 flex-1 md:flex-none min-w-0 overflow-x-auto md:overflow-x-visible">
+        <div className="flex items-center gap-2 lg:gap-4 flex-1 lg:flex-none min-w-0 overflow-x-auto lg:overflow-x-visible">
           {paused ? (
             <div className="flex items-center gap-1.5" title="Trading paused by you (Settings → System Control). The gateway is stopped on purpose — Resume Trading to bring it back.">
               <div className="w-2 h-2 rounded-full bg-amber-400" />
@@ -454,12 +460,12 @@ export default function StatusBar({ onMenuClick }) {
           )}
         </div>
 
-        <div className="hidden md:block w-px h-5 bg-gray-200 dark:bg-gray-800" />
+        <div className="hidden lg:block w-px h-5 bg-gray-200 dark:bg-gray-800" />
 
-        {/* Account info — hidden under md. Every figure here (account value,
+        {/* Account info — hidden under lg. Every figure here (account value,
             unrealized, buying power, settled cash) is already a card on the
             Dashboard, so on a phone this is duplication that overflowed the bar. */}
-        <div className="hidden md:flex items-center gap-4 text-xs">
+        <div className="hidden lg:flex items-center gap-4 text-xs">
           <span className="text-gray-500">Account</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.account_value)}</span>
           {status?.unrealized_pnl != null && status.unrealized_pnl !== 0 && (
@@ -483,8 +489,8 @@ export default function StatusBar({ onMenuClick }) {
           )}
         </div>
 
-        {/* Spacer — md+ only. Under md the pills flex instead. */}
-        <div className="hidden md:block md:flex-1" />
+        {/* Spacer — lg+ only. Under lg the pills flex instead. */}
+        <div className="hidden lg:block lg:flex-1" />
 
         {/* Mode badge */}
         <span className={`shrink-0 text-xs font-bold px-3 py-1 rounded-full border ${
@@ -495,10 +501,10 @@ export default function StatusBar({ onMenuClick }) {
           {isLive ? '🟢 LIVE' : '📄 PAPER'}
         </span>
 
-        {/* Account number — hidden under md. It costs ~70px the phone doesn't
+        {/* Account number — hidden under lg. It costs ~70px the phone doesn't
             have, and it's an account number on a screen you read in public. */}
         {status?.account && (
-          <span className="hidden md:inline text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
+          <span className="hidden lg:inline text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
         )}
 
         {/* Alerts bell */}

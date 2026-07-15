@@ -34,7 +34,7 @@ function Shell() {
   const { dirty, setDirty } = useUnsavedChanges()
   const loc = useLocation()
 
-  // Mobile only: the sidebar is a slide-over drawer under md. At md+ it is the
+  // Mobile only: the sidebar is a slide-over drawer under lg. At lg+ it is the
   // static column it has always been and this state is inert.
   const [navOpen, setNavOpen] = useState(false)
 
@@ -59,16 +59,16 @@ function Shell() {
         {/* Backdrop — mobile only, only while the drawer is open. */}
         {navOpen && (
           <div
-            className="fixed inset-0 z-30 bg-black/50 md:hidden"
+            className="fixed inset-0 z-30 bg-black/50 lg:hidden"
             onClick={() => setNavOpen(false)}
             aria-hidden="true"
           />
         )}
 
-        {/* Sidebar. Under md it is a fixed slide-over drawer (w-52 was 48% of a
-            phone screen). At md+ every mobile class is cancelled — md:static
-            md:translate-x-0 restores the exact static w-52 column as before. */}
-        <nav className={`fixed inset-y-0 left-0 z-40 w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 transition-transform duration-200 md:static md:translate-x-0 md:transition-none ${navOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        {/* Sidebar. Under lg it is a fixed slide-over drawer (w-52 was 48% of a
+            phone screen). At lg+ every mobile class is cancelled — lg:static
+            lg:translate-x-0 restores the exact static w-52 column as before. */}
+        <nav className={`fixed inset-y-0 left-0 z-40 w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 transition-transform duration-200 lg:static lg:translate-x-0 lg:transition-none ${navOpen ? 'translate-x-0' : '-translate-x-full'}`}>
           <NavLink to="/" onClick={guard('/')} className="px-5 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center">
             <img src="/yrvi_logo.png" alt="YRVI" className="w-[60px]" />
           </NavLink>
@@ -116,7 +116,7 @@ function Shell() {
         {/* Main */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
           <StatusBar onMenuClick={() => setNavOpen(true)} />
-          <main className="flex-1 overflow-y-auto p-3 md:p-6">
+          <main className="flex-1 overflow-y-auto p-3 lg:p-6">
             <Routes>
               <Route path="/"              element={<Dashboard />} />
               <Route path="/performance"   element={<Performance />} />
