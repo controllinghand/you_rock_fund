@@ -4,8 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>YRVI Dashboard</title>
+
+    <!-- Installable-app metadata. Add to Home Screen then launches full-screen
+         (no URL bar / toolbar) with its own icon and app-switcher entry.
+         start_url/scope/icons are all origin-relative, so this works unchanged
+         on every operator's own box and hostname. No App Store, no native app.
+         apple-touch-icon is FLATTENED onto white on purpose: iOS ignores alpha
+         on home-screen icons and composites transparency onto black. -->
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="YRVI" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="theme-color" content="#111827" />
+
     <script>
-      (function(){var t=localStorage.getItem('yrvi-theme')||'dark';if(t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches)){document.documentElement.classList.add('dark');}})();
+      (function(){
+        var t=localStorage.getItem('yrvi-theme')||'dark';
+        var dark=(t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches));
+        if(dark){document.documentElement.classList.add('dark');}
+        // Keep the standalone status-bar tint matching the StatusBar it sits above
+        // (bg-white / dark:bg-gray-900). The app's theme is its own setting, not the
+        // OS's, so a static theme-color would mismatch whenever they disagree.
+        var m=document.querySelector('meta[name="theme-color"]');
+        if(m){m.setAttribute('content', dark ? '#111827' : '#ffffff');}
+      })();
     </script>
   </head>
   <body>

@@ -1,0 +1,14 @@
+{
+  "name": "YRVI Dashboard",
+  "short_name": "YRVI",
+  "description": "You Rock Volatility Income Fund — status, this week, and run controls",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#111827",
+  "icons": [
+    { "src": "/icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icon-512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}
