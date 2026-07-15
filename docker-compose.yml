@@ -19,7 +19,12 @@ services:
     build: ./docker/secrets_service
     container_name: yrvi-secrets-1
     ports:
-      - "8001:8001"
+      # Loopback-bound like every other service. The host mapping exists ONLY so a
+      # browser on this machine can open the Secrets Setup UI at localhost:8001 —
+      # every in-stack consumer reaches it as http://secrets:8001 over the Docker
+      # network, which does not use this mapping. Do not widen to 0.0.0.0: this
+      # service fronts the IBKR credentials.
+      - "127.0.0.1:8001:8001"
     volumes:
       - yrvi_data:/data
     healthcheck:
