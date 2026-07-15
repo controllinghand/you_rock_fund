@@ -38,6 +38,8 @@ putting an unauthenticated dashboard on the open internet.**
 
 - The dashboard at `https://your-box.your-tailnet.ts.net` from anywhere — cell
   data, coffee shop, wherever — with a real, valid TLS certificate.
+- **A YRVI icon on your home screen** that opens it full-screen, like an app —
+  no URL bar, no browser toolbar. One tap. See [step 7](#7-install-it-as-an-app-optional-but-do-it).
 - Zero inbound ports. Nothing forwarded on your router. Nothing to attack.
 - No YRVI code changes. Nothing touches Docker, IBKR, or the trading stack.
 - About 15 minutes.
@@ -177,6 +179,54 @@ https://your-box.your-tailnet.ts.net
 > `127.0.0.1`, not the network interface — which is exactly why Serve exists.
 
 Turn WiFi off and load it over cell data. That is the real test.
+
+### 7. Install it as an app (optional, but do it)
+
+Requires **v5.2.62 or later**. Once the dashboard loads over your tailnet, you can
+put it on your home screen — after this you just tap the icon.
+
+It is not a bookmark. It launches **full-screen**: no URL bar, no browser toolbar,
+its own icon and its own card in the app switcher. It is the same dashboard, just
+without the browser wrapped around it. No App Store, no install, nothing to update.
+
+> ### Install it from the `.ts.net` URL — not a LAN address
+>
+> **This is the one that matters.** Whatever URL is on screen when you tap Add to
+> Home Screen is the URL that icon is welded to, forever.
+>
+> Install from `https://your-box.your-tailnet.ts.net` and the icon works
+> **anywhere** — cell data, a coffee shop, another country. Install from
+> `http://192.168.x.x:3000` and you get an icon that only works in your own house
+> and shows a blank error everywhere else. The icon cannot be re-pointed; you would
+> delete it and re-add from the right URL.
+
+**iPhone / iPad (Safari):**
+
+1. Open `https://your-box.your-tailnet.ts.net` in **Safari** (Chrome on iOS cannot
+   install web apps).
+2. Tap **Share** (the square with the up arrow) → scroll → **Add to Home Screen**.
+3. It offers the name **YRVI** and the YRVI logo. Rename it if you run more than
+   one box — "YRVI paper", "YRVI live" — so you can tell the icons apart.
+4. Tap **Add**. Then close Safari and launch it from the home screen.
+
+**Android (Chrome):** open the same URL → menu (⋮) → **Install app** (or **Add to
+Home screen**).
+
+**From then on it is one tap.** Tailscale runs in the background, so there is
+nothing to connect first.
+
+Notes:
+
+- **It still needs to reach your box.** The icon is a launcher, not an offline
+  copy. Tailscale has to be on and your box has to be up — the same as any other
+  way of loading the dashboard.
+- **It updates itself.** It loads the current dashboard every launch, so a YRVI
+  upgrade just shows up. Nothing to reinstall. If it ever looks stale, pull down
+  to refresh.
+- **It has its own storage**, separate from Safari's — so your theme choice will
+  not carry over from the browser. Set it once inside the app.
+- **To remove it:** long-press the icon → Remove App → Delete. Nothing on the box
+  changes.
 
 ---
 

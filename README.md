@@ -158,7 +158,7 @@ Setup polls silently until the browser form is submitted, then auto-proceeds —
 
 Every YRVI service binds to `127.0.0.1`, so the dashboard is reachable only from the box itself. That loopback binding is deliberate and load-bearing: it's why the dashboard needs no login. **Never rebind these services to `0.0.0.0` or forward a port to them.**
 
-If you want the dashboard on your phone, put your box and your phone on a **private overlay network** (Tailscale) and publish just the dashboard port to it — no inbound ports, no public exposure, no code changes, about 15 minutes. See **[docs/remote-access.md](docs/remote-access.md)** for the walkthrough and its non-obvious traps (uncheck Funnel; run the daemon as root; disable key expiry; HTTPS only).
+If you want the dashboard on your phone, put your box and your phone on a **private overlay network** (Tailscale) and publish just the dashboard port to it — no inbound ports, no public exposure, no code changes, about 15 minutes. Then **Add to Home Screen** gives you a YRVI icon that opens the dashboard full-screen like an app: one tap, from anywhere. See **[docs/remote-access.md](docs/remote-access.md)** for the walkthrough and its non-obvious traps (uncheck Funnel; run the daemon as root; disable key expiry; HTTPS only; install the app from the `.ts.net` URL, never a LAN address).
 
 Your own account, your own network, your own devices — and self-supported. The isolation that keeps YRVI deployments independent also means nobody else can debug your box. For why there's no password on the dashboard, see [docs/dashboard-auth.md](docs/dashboard-auth.md).
 
