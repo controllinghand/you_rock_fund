@@ -163,3 +163,47 @@ if [ "$API_UP" = true ]; then
 else
     fail "The dashboard did not come up within ~2 minutes. Open Docker Desktop to check the containers, then start YRVI again."
 fi
+
+# ── 4. Launcher icon sync ─────────────────────────────────────
+# The dashboard upgrade CANNOT install the launcher icon: it only `git pull`s,
+# and the build runs INSIDE the api container, which mounts just /host_repo —
+# no /Applications, no AppKit. So `assets/YRVI.icns` gets updated while the
+# installed app keeps its old icon forever, and the operator is never told.
+# This runs on the HOST, and the .app invokes THIS file from the repo
+# ($PROJ/scripts/yrvi-launch.sh), so an upgrade updates this logic too — an
+# icon change installs itself on the next launch with nothing for the operator
+# to do (the friend boxes are standalone; nobody is running a Terminal there).
+#
+# Deliberately LAST: cosmetic work must never delay or fail the trading stack.
+# Everything below is best-effort and swallows its own errors.
+sync_launcher_icon() {
+    local app="/Applications/YRVI Startup.app"
+    local src="$PROJ/assets/YRVI.icns"
+    [ -d "$app" ] && [ -f "$src" ] || return 0
+
+    # Normal path: one cmp and out. Only a real difference does any work.
+    cmp -s "$src" "$app/Contents/Resources/YRVI.icns" 2>/dev/null && return 0
+
+    echo "Launcher icon changed — reinstalling…"
+    bash "$PROJ/scripts/install-startup-app.sh" >/dev/null 2>&1 || {
+        echo "  icon reinstall failed — ignoring (cosmetic only)"
+        return 0
+    }
+
+    # The Dock keeps its OWN persistent icon cache, and clearing it is the only
+    # thing that refreshes the tile in place. Verified by experiment 2026-07-15:
+    # `killall Dock` alone does nothing, and neither does `lsregister -f` — the
+    # icon survives both. The cache is user-owned (no sudo) and macOS rebuilds
+    # it automatically, so deleting it is safe; the cost is that every app's
+    # icon re-renders once, which is why this is gated on an actual change.
+    local cache="$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null)com.apple.dock.iconcache"
+    if [ -f "$cache" ]; then
+        rm -f "$cache" 2>/dev/null
+    else
+        # Fallback if getconf ever stops resolving (older/different macOS).
+        find /private/var/folders -name "com.apple.dock.iconcache" -delete 2>/dev/null
+    fi
+    killall Dock 2>/dev/null
+    echo "Launcher icon updated."
+}
+sync_launcher_icon || true

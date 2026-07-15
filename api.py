@@ -3076,19 +3076,11 @@ _GITHUB_VERSION_URL = (
 # version emits the note once. This exists because a CHANGELOG doesn't reach
 # anyone — the friend boxes are standalone and Discord is the only channel.
 # Keep entries rare: every one of these interrupts someone.
-UPGRADE_NOTES: dict[str, str] = {
-    "5.2.63": (
-        "🖼️ **One-time step — launcher icon**\n"
-        "This upgrade ships a fixed launcher icon, but it can't install it for "
-        "you: the icon lives inside the already-installed app, which the "
-        "upgrade can't reach.\n"
-        "In Terminal on this box:\n"
-        "`cd ~/you_rock_fund && bash scripts/install-startup-app.sh`\n"
-        "Then drag 'YRVI Startup' OUT of the Dock and back in — the Dock caches "
-        "the old icon and won't reload it in place.\n"
-        "Cosmetic only — trading is unaffected, so do it whenever."
-    ),
-}
+# Intentionally empty. 5.2.63's launcher-icon note lived here until v5.2.67
+# taught yrvi-launch.sh to install the icon itself on the next launch — an alert
+# telling operators to run a script that already ran is worse than silence. Add
+# an entry only for a step that genuinely cannot be automated.
+UPGRADE_NOTES: dict[str, str] = {}
 
 
 def _version_tuple(v: str):
