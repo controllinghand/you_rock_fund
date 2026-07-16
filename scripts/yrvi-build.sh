@@ -272,15 +272,19 @@ run_with_build_timeout() {
 
 if [ "$DRY_RUN" = true ]; then
     if [ "$CONTAINER" = "all" ]; then
-        info "Would build+restart all 5 services in dependency order:"
+        info "Would build+restart all 5 services in dependency order (plus view-gateway, only where the viewer is set up):"
         info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build secrets"
         info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets   (then wait until healthy)"
         info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build --pull ib_gateway"
         info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
-        for svc in scheduler web api; do
+        for svc in scheduler web; do
             info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build $svc"
-            info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
+            info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc"
         done
+        info "Would run (only if the viewer is set up here): docker compose --env-file .env.compose --profile viewer build view-gateway"
+        info "Would run (only if it is currently running): docker compose --env-file .env.compose --profile viewer up -d --no-deps --force-recreate view-gateway"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build api"
+        info "Would run: docker compose --env-file .env.compose up -d --no-deps api  (api uses the sidecar restart when run inside the container)"
     else
         info "Would run: docker compose --env-file .env.compose up -d --build $CONTAINER"
     fi
@@ -344,6 +348,40 @@ else
                 BUILD_FAILED+=("$svc")
             fi
         done
+
+        # ── view-gateway (opt-in) ──────────────────────────────────
+        # The viewer is profile-gated ("viewer"), so a plain `compose build` skips
+        # it — meaning it had NEVER been rebuilt by an upgrade and source changes
+        # to it silently didn't deploy. That went unnoticed until v5.2.68 moved the
+        # viewer onto the dashboard's /viewer/ origin: `web` shipped the new proxy
+        # while `view-gateway` kept serving a page that asked for an absolute
+        # /websockify, so the upgrade half-landed and BROKE a working viewer.
+        #
+        # Gate on the operator having actually enabled it, so an upgrade never
+        # starts a viewer nobody asked for:
+        #   - image exists  -> they set it up at some point: rebuild it.
+        #   - container up  -> also recreate, so the fix lands immediately.
+        #   - stopped       -> build only. `/api/view-gateway/start` runs
+        #                      `compose up -d`, which recreates from the newer
+        #                      image on its own, so it self-heals on next use.
+        VIEWER_RUNNING=$(docker ps -q --filter "name=^yrvi-view-gateway$" 2>/dev/null || true)
+        VIEWER_IMAGE=$(docker image inspect yrvi-view-gateway --format '{{.Id}}' 2>/dev/null || true)
+        if [ -n "$VIEWER_RUNNING" ] || [ -n "$VIEWER_IMAGE" ]; then
+            info "Building view-gateway (viewer is set up on this box)..."
+            if run_with_build_timeout docker compose --env-file .env.compose --profile viewer build view-gateway; then
+                if [ -n "$VIEWER_RUNNING" ]; then
+                    docker compose --env-file .env.compose --profile viewer up -d --no-deps --force-recreate view-gateway
+                    ok "view-gateway built and restarted"
+                else
+                    ok "view-gateway image rebuilt (container not running — it will pick this up when next opened)"
+                fi
+            else
+                warn "view-gateway build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+                BUILD_FAILED+=("view-gateway")
+            fi
+        else
+            info "Viewer never enabled on this box — skipping view-gateway"
+        fi
 
         # api last — same self-restart-sidecar reasoning as before (its own
         # build is now independent too, so a scheduler/web failure can't block it).
