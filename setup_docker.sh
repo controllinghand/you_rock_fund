@@ -265,10 +265,8 @@ if docker compose --env-file .env.compose up -d --build; then
     info "Checking dry_run setting..."
     sleep 5
     DRY_RUN=$(curl -sf http://127.0.0.1:8000/api/settings 2>/dev/null \
-        | python3 -c \
-          "import sys,json; print(json.load(sys.stdin).get('dry_run','?'))" \
-          2>/dev/null \
-        || echo "?")
+        | sed -n 's/.*"dry_run"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+    [ -z "$DRY_RUN" ] && DRY_RUN="?"
     if [ "$DRY_RUN" = "False" ] || [ "$DRY_RUN" = "false" ]; then
         ok "dry_run=false — paper trading handles safety; orders go to your paper account"
     elif [ "$DRY_RUN" = "True" ] || [ "$DRY_RUN" = "true" ]; then
