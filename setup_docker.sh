@@ -298,7 +298,12 @@ if $IS_WINDOWS; then
         "$PROJ_WIN" "$LOGFILE" > "$BATCH"
     BATCH_WIN=$(cygpath -w "$BATCH")
 
-    if schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
+    # MSYS_NO_PATHCONV=1 is required here: Git Bash's MSYS layer auto-converts
+    # any bare /leading-slash token to a Windows path before exec, which mangles
+    # schtasks.exe's /tn, /sc, /f flags into garbage ("Invalid argument/option -
+    # 'C:/Program Files/Git/create'") and makes registration fail even when
+    # elevated — masked as a permissions error since stderr is discarded below.
+    if MSYS_NO_PATHCONV=1 schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
         ok "Task Scheduler job '$TASK_NAME' registered — containers auto-start on every login"
         info "  Reboot log: $LOGFILE"
     else
