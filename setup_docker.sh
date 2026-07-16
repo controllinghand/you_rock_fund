@@ -181,8 +181,8 @@ ok "Secrets container running"
 
 secrets_complete() {
     curl -sf "$SECRETS_URL/secrets/status" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('complete') else 'false')" 2>/dev/null \
-        || echo "false"
+        | grep -q '"complete"[[:space:]]*:[[:space:]]*true' \
+        && echo "true" || echo "false"
 }
 
 if [ "$(secrets_complete)" = "true" ]; then
@@ -226,9 +226,9 @@ fi
 # verifies the required secrets are populated there.
 if [ "$TRADING_MODE" = "live" ]; then
     LIVE_ACCT=$(curl -sf "$SECRETS_URL/secret/account_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     LIVE_USER=$(curl -sf "$SECRETS_URL/secret/tws_userid_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     if [ -z "$LIVE_ACCT" ] || [ -z "$LIVE_USER" ]; then
         fail "Live mode requires account_live and tws_userid_live in the secrets UI ($SECRETS_URL)"
     fi
