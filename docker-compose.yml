@@ -136,13 +136,20 @@ services:
 
   # Browser-accessible, VIEW-ONLY window into the IB Gateway GUI. Bridges the
   # Gateway's existing x11vnc display (ib_gateway:5900) to noVNC over websockify.
-  # Opt-in: only starts under the "viewer" profile, so the normal stack is
-  # unaffected — see docs/view-gateway.md. Bound to 127.0.0.1 (local-only).
+  # See docs/view-gateway.md. Bound to 127.0.0.1; the dashboard proxies it at
+  # /viewer/, so it is reachable exactly where the dashboard is and nowhere else.
+  #
+  # Core, NOT opt-in (v5.2.69). It used to sit behind a "viewer" profile, which
+  # made it invisible to `compose build` — so the upgrade never rebuilt it and
+  # changes to it silently didn't deploy for five releases, while the dashboard
+  # reported success. It costs ~22MB and 0.01% CPU (the gateway it watches costs
+  # 1GB), and gating a troubleshooting tool behind an on-demand build meant the
+  # first click could stall on a 539MB image build at the exact moment something
+  # was wrong. Always-on is both simpler and cheaper than the gate was.
   view-gateway:
     build:
       context: ./docker/view-gateway
     container_name: yrvi-view-gateway
-    profiles: ["viewer"]
     restart: unless-stopped
     depends_on:
       ib_gateway:

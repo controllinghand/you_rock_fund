@@ -272,12 +272,12 @@ run_with_build_timeout() {
 
 if [ "$DRY_RUN" = true ]; then
     if [ "$CONTAINER" = "all" ]; then
-        info "Would build+restart all 5 services in dependency order:"
+        info "Would build+restart all 6 services in dependency order:"
         info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build secrets"
         info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets   (then wait until healthy)"
         info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build --pull ib_gateway"
         info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
-        for svc in scheduler web api; do
+        for svc in scheduler web view-gateway api; do
             info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build $svc"
             info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
         done
@@ -330,11 +330,17 @@ else
             BUILD_FAILED+=("ib_gateway")
         fi
 
-        # ── scheduler, web ─────────────────────────────────────────
+        # ── scheduler, web, view-gateway ───────────────────────────
         # Built+restarted independently so a stuck/crashed build of ONE service
         # can never block the others — each gets its own bounded build
         # (run_with_build_timeout) and its own immediate restart.
-        for svc in scheduler web; do
+        #
+        # view-gateway is in this list as of v5.2.69. It used to be profile-gated
+        # ("viewer"), which meant a plain `compose build` skipped it: the upgrade
+        # never rebuilt it and changes to it silently didn't deploy for five
+        # releases, while the dashboard still reported success. A service that is
+        # special-cased out of this loop is a service that drifts.
+        for svc in scheduler web view-gateway; do
             info "Building ${svc}..."
             if run_with_build_timeout docker compose --env-file .env.compose build "$svc"; then
                 docker compose --env-file .env.compose up -d --no-deps "$svc"

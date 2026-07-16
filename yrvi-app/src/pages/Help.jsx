@@ -263,34 +263,6 @@ export default function Help() {
   const [gwRestarting, setGwRestarting] = useState(false)
   const [gwRestartMsg, setGwRestartMsg] = useState(null)  // {ok, text}
 
-  const [viewStarting, setViewStarting] = useState(false)
-  const [viewMsg, setViewMsg]           = useState(null)  // {ok, text}
-
-  const openViewGateway = async () => {
-    setViewStarting(true)
-    setViewMsg(null)
-    // Open the tab synchronously within the click gesture so popup blockers don't
-    // eat it; we redirect it once the viewer is up, or close it on failure.
-    const tab = window.open('', '_blank')
-    try {
-      const res  = await axios.post('/api/view-gateway/start')
-      // Same origin as the dashboard, via nginx's /viewer/ proxy — NOT the
-      // viewer's own :6080. That port is bound to 127.0.0.1 on the box, so a
-      // host:6080 URL only ever resolved from the box itself: from a phone (or
-      // anything off-box) it was unreachable and the tab just failed. Riding this
-      // origin means the viewer works anywhere the dashboard already does.
-      const url  = `${window.location.origin}/viewer/`
-      if (tab) tab.location = url
-      else window.open(url, '_blank', 'noopener')
-      setViewMsg({ ok: true, text: res.data.message })
-    } catch (err) {
-      if (tab) tab.close()
-      setViewMsg({ ok: false, text: err.response?.data?.detail ?? err.message ?? 'Could not start View Gateway' })
-    } finally {
-      setViewStarting(false)
-    }
-  }
-
   const restartGateway = async () => {
     if (!window.confirm(
       'Restart the IB Gateway?\n\n' +
@@ -381,15 +353,20 @@ export default function Help() {
             {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
           </button>
 
-          <button
-            onClick={openViewGateway}
-            disabled={viewStarting}
-            title="Open a browser window showing the live IB Gateway screen (view-only)"
-            className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-wait text-sm font-medium rounded-lg transition-colors"
+          {/* A plain link now: the viewer runs as part of the stack, so there is
+              nothing to start and nothing to wait for. It lives on this origin at
+              /viewer/, which means it follows the dashboard everywhere — phone
+              included — with no port of its own. */}
+          <a
+            href="/viewer/"
+            target="_blank"
+            rel="noopener"
+            title="Open the live IB Gateway screen (view-only)"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 text-sm font-medium rounded-lg transition-colors"
           >
-            <Monitor size={13} className={viewStarting ? 'animate-pulse' : ''} />
-            {viewStarting ? 'Starting…' : 'View Gateway'}
-          </button>
+            <Monitor size={13} />
+            View Gateway
+          </a>
         </div>
 
         {gwRestartMsg && (
@@ -400,17 +377,6 @@ export default function Help() {
           }`}>
             <RotateCcw size={14} className="shrink-0" />
             {gwRestartMsg.text}
-          </div>
-        )}
-
-        {viewMsg && (
-          <div className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border ${
-            viewMsg.ok
-              ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-400'
-              : 'bg-red-900/30 border-red-800 text-red-400'
-          }`}>
-            <Monitor size={14} className="shrink-0" />
-            {viewMsg.text}
           </div>
         )}
 

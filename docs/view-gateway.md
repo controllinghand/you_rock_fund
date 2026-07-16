@@ -21,8 +21,8 @@ tiny container, `view-gateway`, that runs **noVNC + websockify** and bridges tha
 existing VNC display to your browser:
 
 ```
-browser ──HTTP/WebSocket──▶ view-gateway (noVNC + websockify) ──VNC──▶ ib_gateway:5900
-        http://localhost:6080                (Docker network only)      (Xvfb + x11vnc)
+browser ──HTTP/WS──▶ dashboard nginx ──▶ view-gateway (noVNC + websockify) ──VNC──▶ ib_gateway:5900
+      <dashboard>/viewer/     (proxy)      (Docker network only)                    (Xvfb + x11vnc)
 ```
 
 Nothing about trading, credentials, or the Gateway itself changes. The bridge only
@@ -30,40 +30,50 @@ Nothing about trading, credentials, or the Gateway itself changes. The bridge on
 
 **Security defaults:**
 
-- **Local-only** — the host port is bound to `127.0.0.1:6080`, exactly like every
-  other YRVI service. It is never exposed on your LAN or the internet.
+- **No port of its own** — the viewer's own host port stays bound to
+  `127.0.0.1:6080`, exactly like every other YRVI service, and the dashboard
+  proxies it at **`/viewer/`**. So it is reachable exactly where the dashboard is
+  reachable, and nowhere else: on the box, or over whatever private overlay you
+  put the dashboard on ([remote-access.md](remote-access.md)). It is never exposed
+  on your LAN or the internet.
 - **View-only by default** — the default URL opens noVNC with `view_only=true`, so
   your clicks and keystrokes are *not* sent to the Gateway. Enabling control is a
   separate, clearly-labeled, confirm-gated action (see below).
-- **The VNC password stays out of the viewer** — the browser prompts you for it on
-  connect. The `view-gateway` container never reads the `vnc_server_password`
-  secret and it never appears in a URL.
-- **Opt-in** — it only runs when you ask for the `viewer` profile, so the normal
-  stack is unchanged and there's no extra always-on surface.
+- **The VNC password never appears in a URL, browser history, or a log.** The
+  container fetches the `vnc_server_password` secret at startup and writes it into
+  a same-origin `vnc-config.js` so the viewer connects without prompting.
+  *(Corrected v5.2.69: this section previously claimed the container "never reads"
+  that secret. It does, and has since the auto-fill was added.)* That file is
+  served wherever the dashboard is — which is **no wider than the dashboard's own
+  `GET /api/secrets/vnc_server_password`**, so it is not extra exposure. The
+  boundary for both is the network.
+- **Part of the core stack** (since v5.2.69) — it costs ~22MB of RAM and ~0.01%
+  CPU, against the 1GB the Gateway it watches uses. It used to be gated behind a
+  `viewer` compose profile, which made it invisible to `compose build`: the
+  upgrade never rebuilt it, so changes to it silently didn't deploy for five
+  releases while the dashboard reported success. It also meant your first click
+  could stall on a 539MB image build at the exact moment something was wrong. A
+  troubleshooting tool should already be running when you need it.
 
 ---
 
-## Start
+## Open it
 
-**Easiest — from the dashboard:** open **Help → System Diagnostics → View Gateway**.
-That calls `POST /api/view-gateway/start`, which brings the viewer up on demand
-(building it the first time) and opens it in a new browser tab. Nothing to type.
+**From the dashboard:** **Help → System Diagnostics → View Gateway**. It is a plain
+link — the viewer runs as part of the stack, so there is nothing to start and
+nothing to wait for.
 
-**From the command line** — bring up (or leave up) the normal stack, then add the viewer:
+**Or go straight there**, at the same address you use for the dashboard:
 
-```bash
-cd /path/to/you_rock_fund
-
-# Normal stack (unchanged)
-docker compose --env-file .env.compose up -d
-
-# Add the View Gateway (builds it the first time)
-docker compose --env-file .env.compose --profile viewer up -d --build view-gateway
+```
+http://localhost:3000/viewer/                      # at the box
+https://<your-box>.<your-tailnet>.ts.net/viewer/   # over a private overlay, phone included
 ```
 
-## Access
+It comes up with the rest of the stack (`docker compose --env-file .env.compose up -d`)
+— no extra flag, no profile.
 
-Open in a browser on **this machine**:
+The viewer's own port still works directly if you want it, and is unchanged:
 
 ```
 http://localhost:6080
@@ -95,10 +105,10 @@ falls back to a manual prompt rather than dead-ending.
 
 ```bash
 # Stop just the viewer (leaves the trading stack running)
-docker compose --env-file .env.compose --profile viewer stop view-gateway
+docker compose --env-file .env.compose stop view-gateway
 
 # Or remove it entirely
-docker compose --env-file .env.compose --profile viewer rm -sf view-gateway
+docker compose --env-file .env.compose rm -sf view-gateway
 ```
 
 Because it's behind the `viewer` profile, a plain `docker compose ... up -d` or
@@ -111,7 +121,7 @@ already-running viewer either.
 
 1. **Container is healthy:**
    ```bash
-   docker compose --env-file .env.compose --profile viewer ps view-gateway
+   docker compose --env-file .env.compose ps view-gateway
    ```
    Status should show `Up ... (healthy)`.
 
@@ -122,7 +132,7 @@ already-running viewer either.
 
 3. **The bridge reaches the Gateway VNC port** (from inside the viewer container):
    ```bash
-   docker compose --env-file .env.compose --profile viewer exec view-gateway \
+   docker compose --env-file .env.compose exec view-gateway \
      bash -c 'curl -sf --max-time 3 telnet://ib_gateway:5900 >/dev/null; echo exit=$?'
    ```
    (A quick alternative: open `http://localhost:6080`, choose view-only, enter the
@@ -149,10 +159,10 @@ already-running viewer either.
 - **Password rejected / prompted anyway:** the viewer auto-fills the
   `vnc_server_password` secret; if it was changed in the secrets UI after the viewer
   started, restart the viewer so it re-reads it
-  (`docker compose --env-file .env.compose --profile viewer up -d --force-recreate view-gateway`).
+  (`docker compose --env-file .env.compose up -d --force-recreate view-gateway`).
   The VNC password is *not* your IBKR password. Default is `ibgateway123!test`.
 - **Port 6080 in use:** change `VIEW_GATEWAY_PORT` in `.env.compose` and re-run the
-  `--profile viewer up -d` command.
+  `up -d` command.
 - **Can't reach it from another machine:** that's intentional — it's bound to
   `127.0.0.1`. Use an SSH tunnel if you truly need remote access
   (`ssh -L 6080:localhost:6080 user@host`), which keeps it off the network.
@@ -167,5 +177,5 @@ already-running viewer either.
 | `docker/view-gateway/entrypoint.sh` | Fetches the VNC secret → `vnc-config.js`, then launches websockify → `ib_gateway:5900` |
 | `docker/view-gateway/index.html` | View-only-by-default landing page |
 | `docker/view-gateway/view.html` | Thin noVNC client that auto-fills the password (no prompt) |
-| `docker-compose.yml` (`view-gateway` service) | Opt-in `viewer` profile, `127.0.0.1:6080` |
-| `.env.compose` (`VIEW_GATEWAY_PORT`) | Host port for the viewer |
+| `docker-compose.yml` (`view-gateway` service) | Core service, `127.0.0.1:6080` (proxied at `/viewer/`) |
+| `.env.compose` (`VIEW_GATEWAY_PORT`) | Host port for the viewer (direct access; the dashboard uses `/viewer/`) |
