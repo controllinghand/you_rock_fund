@@ -1,6 +1,6 @@
 # You Rock Volatility Income Fund (YRVI)
 
-![Version](https://img.shields.io/badge/version-3.0.0-blue)
+![Version](https://img.shields.io/badge/version-5.0.2-blue)
 
 An automated Python algorithmic options trading system that generates weekly income through the complete wheel strategy — selling cash-secured puts (CSPs), managing assignments with covered calls (CCs), and enforcing automatic stop losses — all running 24/7 on a Mac Mini with zero manual intervention.
 
@@ -15,7 +15,7 @@ An automated Python algorithmic options trading system that generates weekly inc
 | Monday* | 9:55 AM | Wheel check — stop losses + sell covered calls on assigned stocks |
 | Monday* | 10:00 AM | CSP execution — screen → size → execute 5 positions |
 | Tuesday–Thursday | 9:00 AM | Daily risk monitor — checks stop loss thresholds, logs P&L |
-| Friday | 4:15 PM | Assignment detection — checks for newly assigned positions |
+| Saturday | 8:00 AM | Assignment detection — checks for newly assigned positions (after IBKR posts overnight) |
 | Wednesday–Friday | 3:00 AM | Auto-update check — pulls latest release if enabled in Settings |
 
 *Shifts to Tuesday when Monday is a market holiday.
@@ -26,13 +26,14 @@ An automated Python algorithmic options trading system that generates weekly inc
 
 2. **Position Sizer** — allocates $250K across up to 5 positions (~$50K each, last position gets remainder up to $70K max)
 
-3. **Wheel Manager** — Monday 9:55 AM (four-step logic per holding):
-   - **Step 1 — Screener check:** if ticker no longer passes screener filters → sell shares at market and free capital
-   - **Step 2 — Option chain:** query IBKR for CALL options on the nearest Friday, strike ≥ assigned strike; collect delta for each candidate
-   - **Step 3 — Decision:** sell the highest-delta (≥ 0.20) covered call found. If no strike with delta ≥ 0.20 exists → sell shares at market
-   - **Step 4 — Accounting:** freed capital (from any sales) returns to the CSP pool; sold tickers are skipped in that week's screener
+3. **Wheel Manager** — Monday 9:55 AM (per holding):
+   - **Step 1 — Screener check:** if ticker no longer passes screener filters (down to the wheel-retention market-cap floor) → sell shares at market and free capital
+   - **Step 2 — Earnings:** by default the holding is **kept through earnings** and a covered call is written (`Ignore Earnings for Wheel CCs` is on by default). Turn the toggle off to sell shares before earnings instead
+   - **Step 3 — Option chain:** query IBKR for CALL options on the nearest Friday; prefer the nearest strike **≥ cost basis** with delta ≤ ~0.20
+   - **Step 4 — Decision:** write the covered call. If the holding is underwater and no acceptable strike sits at/above cost, it writes a ~0.20-delta call **below cost** (keeps the shares + premium) rather than force-selling — unless `Sell Shares Instead of Below-Cost CC` is on
+   - **Step 5 — Accounting:** freed capital (from any sales) returns to the CSP pool; sold tickers are skipped in that week's screener
 
-4. **Trader** — connects to IBKR, qualifies contracts, checks liquidity (spread ≤ 20%, OI ≥ 100), executes with limit-mid → limit-bid → market escalation; automatically replaces failed positions with the next ranked ticker
+4. **Trader** — connects to IBKR, qualifies contracts, checks liquidity (spread within limits + open-interest notional floor), executes with limit-mid → limit-bid → market escalation; automatically replaces failed positions with the next ranked ticker
 
 5. **Risk Manager** — daily Tue–Thu monitor checks all wheel holdings against the 10% stop loss threshold, logs unrealized P&L, and sends alerts
 
@@ -59,10 +60,11 @@ Each cycle generates income whether the option expires or gets exercised.
 |---------|------|
 | Delta filter | Only sell puts with delta ≤ 0.21 (~20Δ) |
 | Buffer requirement | Strike must be ≥ 5% below current price |
-| Liquidity check | Spread ≤ 20%, Open Interest ≥ 100 |
-| Screener exit | Sell shares if ticker drops from screener filters |
-| Delta exit | Sell shares if no CC strike with delta ≥ 0.20 available |
-| Earnings protection | Skip tickers with earnings within 7 days |
+| Liquidity check | Spread within limits + open-interest **notional** ≥ $1M (price-neutral, replaces the old flat OI ≥ 100 count) |
+| Screener exit | Sell shares if ticker drops from screener filters (down to the wheel-retention floor) |
+| Underwater holdings | Keep the shares and write a below-cost covered call by default, rather than force-selling (toggle to restore force-sell) |
+| Earnings protection | New CSP entries skip tickers with earnings within 7 days; held wheel positions are kept through earnings by default (covered call still written) |
+| Exclude from wheel | Per-holding Exclude checkbox (and a Settings field) — an excluded ticker is never traded, adopted, or sold: no CSP, no CC, no wheel adoption |
 | Auto-replacement | Failed position → automatically try next ranked ticker |
 
 ## Getting Started
@@ -127,7 +129,7 @@ cd you_rock_fund
 cp .env.compose.example .env.compose
 ```
 
-`.env.compose` only contains non-secret settings (ports, trading mode, timezone) — no editing required for a default paper-trading setup. Leave `TRADING_MODE=paper` and `YRVI_INIT_DRY_RUN=true` for the safe defaults.
+`.env.compose` only contains non-secret settings (ports, trading mode, timezone) — no editing required for a default paper-trading setup. Leave `TRADING_MODE=paper` — the paper account is the safety net for a new setup, so orders route to your paper account (not real money). Dry Run defaults to **off**; enable it in Settings only if you want to simulate without any account fills.
 
 #### About Secrets
 
@@ -152,13 +154,21 @@ Setup polls silently until the browser form is submitted, then auto-proceeds —
 
 > **Note:** The `docker/secrets/` directory holds empty placeholder files for the file-based fallback path; it's git-ignored and the real values never live there.
 
-#### Disable macOS Screen Sharing
+#### Remote access — the dashboard on your phone (optional)
 
-IB Gateway uses port 5900 for VNC (required for 2FA). macOS Screen Sharing also uses port 5900 and will cause `docker compose up` to fail with a "address already in use" error.
+Every YRVI service binds to `127.0.0.1`, so the dashboard is reachable only from the box itself. That loopback binding is deliberate and load-bearing: it's why the dashboard needs no login. **Never rebind these services to `0.0.0.0` or forward a port to them.**
 
-Before running setup, go to **System Settings → General → Sharing → Screen Sharing → toggle OFF**.
+If you want the dashboard on your phone, put your box and your phone on a **private overlay network** (Tailscale) and publish just the dashboard port to it — no inbound ports, no public exposure, no code changes, about 15 minutes. Then **Add to Home Screen** gives you a YRVI icon that opens the dashboard full-screen like an app: one tap, from anywhere. See **[docs/remote-access.md](docs/remote-access.md)** for the walkthrough and its non-obvious traps (uncheck Funnel; run the daemon as root; disable key expiry; HTTPS only; install the app from the `.ts.net` URL, never a LAN address).
 
-> **Note:** Use SSH for remote terminal access to the Mac Mini instead — Screen Sharing cannot run alongside YRVI.
+Your own account, your own network, your own devices — and self-supported. The isolation that keeps YRVI deployments independent also means nobody else can debug your box. For why there's no password on the dashboard, see [docs/dashboard-auth.md](docs/dashboard-auth.md).
+
+#### Viewing the IB Gateway screen (built-in View Gateway)
+
+To check the Gateway's screen — a login, 2FA prompt, error dialog, or just its status — use the **View Gateway** viewer built into the dashboard. No VNC client to download: open **Help → System Diagnostics → View Gateway**, then **👁 Open viewer (view-only)** (the password auto-fills). See [docs/view-gateway.md](docs/view-gateway.md).
+
+> Earlier versions told you to install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed. The raw VNC port still exists on `127.0.0.1:5900` (IPv4) as an optional external-client fallback; on macOS always use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost` resolves to IPv6 `::1`, which macOS Screen Sharing answers → "authentication failed" against the wrong server).
+
+> If `docker compose up` ever fails with *"address already in use"* on 5900, turn Screen Sharing off (**System Settings → General → Sharing → Screen Sharing → OFF**) or set `IB_GATEWAY_VNC_PORT` to a free port in `.env.compose`. For remote terminal access, use SSH (**Remote Login → On**).
 
 #### macOS Setup (Paper)
 
@@ -227,7 +237,7 @@ Docker Desktop's WSL2 integration makes the `docker` CLI available inside Ubuntu
 
 > **Auto-start after reboot:** The script registers a Windows Task Scheduler job so containers restart automatically on every login. If the registration fails, rerun your terminal as Administrator and run `bash setup_docker.sh --paper` again.
 
-> **VNC for 2FA:** Windows has no built-in VNC viewer. If IBKR requires 2FA on first login, install [RealVNC Viewer](https://www.realvnc.com/en/connect/download/viewer/) (free) and connect to `localhost:5900`. Most first-time logins complete automatically without needing VNC.
+> **Viewing the Gateway for 2FA:** If IBKR requires 2FA on first login, use the built-in **View Gateway** viewer — **Help → System Diagnostics → View Gateway** in the dashboard (no VNC client to install). Most first-time logins complete automatically without needing it. See [docs/view-gateway.md](docs/view-gateway.md).
 
 #### Verifying secrets
 
@@ -258,6 +268,7 @@ See **[CONTAINERIZATION.md](CONTAINERIZATION.md)** for the full setup guide — 
 - Secrets are stored AES-256-GCM-encrypted in a persistent Docker volume managed by the `secrets` container. The encryption key is generated on first run and stored at `/data/secrets.key` inside the volume (chmod 600).
 - The secrets API (`http://localhost:8001`) is bound to `localhost` on the host and reachable inside the Docker network as `http://secrets:8001` — never exposed externally.
 - `docker/secrets/` files are empty placeholders kept for the `secrets_client` 3-tier fallback (HTTP → file → env). The real values live only in the encrypted volume.
+- **These placeholder files stay empty (0 bytes) — the IBKR password is never written to disk in cleartext.** Verified on both a dashboard upgrade and a full stop/start: the files never change size. (`setup_docker.sh` only `touch`es them; the legacy Keychain→file injection path in `yrvi-build.sh` is a bootstrap fallback that the secrets-container setup never triggers.)
 - `docker/secrets/` is in `.gitignore` and must never be committed.
 
 ### What the Encryption Does and Doesn't Protect
@@ -426,8 +437,10 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 |---------|---------|-------|-------------|
 | Max Delta | 0.21 | 0.10 – 0.30 | Maximum absolute delta for CSPs sold. Higher = more aggressive strikes and more premium, but more assignment risk. |
 | Min Buffer % | 5% | 3% – 20% | The strike must be at least this far below the current stock price. Higher = more downside cushion. |
-| Earnings Filter | 7 days | 0 – 30 days | Skip tickers with earnings within this many days. Protects against earnings-driven gap moves. |
-| Ignore Earnings Filter for Wheel CCs | Off | On / Off | When on, covered calls are still sold on held positions even during earnings weeks. Has no effect on new CSP entries. |
+| Earnings Window | 7 days | 0 – 30 days | Skip new CSP entries on tickers with earnings within this many days. Protects against earnings-driven gap moves. |
+| Ignore Earnings for Wheel CCs | **On** | On / Off | On (default): held positions are kept through earnings and the covered call is still written. Off: shares are sold before earnings to dodge the gap. No effect on new CSP entries. |
+| Wheel Retention Mkt Cap | $5.0B | $1.0B – $10.0B | Keep wheeling a held name down to this market cap, even if below the 10B entry floor — sell only if it falls further. New CSP entries still use the 10B entry floor. |
+| Sell Shares Instead of Below-Cost CC | Off | On / Off | Off (default): an underwater holding with no covered call at/above cost writes a ~20-delta call below cost (keeps shares + premium). On: force-sell those shares at market instead (the old behavior). |
 | Stop Loss on Wheel Holdings | Off | On / Off | When on, a holding is sold on Monday if its price has fallen more than the Stop Loss % below its assigned strike. The screener exit is the primary exit — this is an optional additional layer. |
 | Stop Loss % | 10% | 0% – 50% | How far below the assigned strike triggers a stop loss sale. Only active when Stop Loss on Wheel Holdings is enabled. |
 
@@ -438,6 +451,7 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 | Max Spread % | 20% | 5% – 50% | Skip a CSP if the bid/ask spread exceeds this percentage of the mid price. Protects against poor fills on illiquid options. |
 | Min Bid Yield % | 1% | 0.5% – 3% | Override the spread filter if the bid yield meets this threshold — useful when wide spreads are justified by high premium. |
 | Max Spread Hard Cap % | 50% | 25% – 100% | Always skip regardless of yield if spread exceeds this. An absolute ceiling that cannot be overridden by bid yield. |
+| Min OI Notional | $1.0M | $0.25M – $5.0M | Skip if the option's open-interest notional (open interest × strike × 100) is below this. A price-neutral liquidity floor that replaced the old flat "open interest ≥ 100" count, which unfairly penalized high-strike names (the same dollar liquidity shows fewer contracts on a $300 stock than a $30 one). A small absolute floor (10 contracts) still rejects totally-dead strikes. |
 
 ### Execution
 
@@ -461,7 +475,7 @@ Each position escalates through three stages (120 seconds each):
 2. **Limit @ bid** — accepts bid to ensure fill
 3. **Market order** — last resort
 
-Liquidity checks: spread ≤ 20%, open interest ≥ 100.
+Liquidity checks: spread within the configured limits, and open-interest notional (OI × strike × 100) ≥ $1M (price-neutral floor; replaces the old flat OI ≥ 100 count).
 
 ## File Structure
 
@@ -482,6 +496,14 @@ CONTAINERIZATION.md                — Full Docker setup and operations guide
 .env.compose.example               — Compose environment variable template
 ```
 
+## 🔔 In-App Alert Feed
+
+Since v4.0.0 the dashboard is **self-observing** — every operational alert (gateway down/restarting/back, login failed or locked, auto-restarts, weekly results) is recorded in-app, not just sent to Discord. A **bell** in the status bar shows an unread badge color-coded by severity (🚨/❌/🔒 critical, 🔄/⚠️ warning, ✅ resolved), and its dropdown lists recent history newest-first; **Clear** wipes it.
+
+- The in-app record happens **first and unconditionally**, so the feed works even with Discord unconfigured or down — Discord (push when away) and the bell (context when in the app) are complementary, not either/or.
+- **Standalone by design:** each box keeps its own feed. There is no cross-box aggregation — live and paper boxes run on different IBKR accounts and must not see each other.
+- History is file-backed (`/data/alerts.json`, last 200) so it survives the api restarts that happen on trading-mode switches and upgrades. Endpoints: `GET /api/alerts`, `DELETE /api/alerts`.
+
 ## 🔔 Optional: Discord Notifications
 
 YRVI can post trade results to a Discord channel automatically. This is entirely optional — if no webhook is configured, the system runs silently as normal.
@@ -492,8 +514,8 @@ YRVI can post trade results to a Discord channel automatically. This is entirely
 |-------|------|---------|
 | Pre-execution preview | Monday 9:50AM | Sized positions with strikes, contracts, estimated premium |
 | Weekly results | Monday ~10:30AM | CSP/CC/stop-loss P&L, week yield %, YTD stats |
-| Assignment alert | Friday 4:15PM | Newly assigned stocks with stop-loss prices |
-| Called-away alert | Friday 4:15PM | CC-covered shares called away at expiry |
+| Assignment alert | Saturday 8:00AM | Newly assigned stocks with stop-loss prices |
+| Called-away alert | Saturday 8:00AM | CC-covered shares called away at expiry |
 | End-of-week summary | Friday ~4:20PM | Called-away recap, open wheel positions, weekly P&L |
 | Gateway watchdog alert | As needed | Gateway down / restarting / back online notifications |
 
@@ -608,6 +630,52 @@ cat state.json               # Full system state
 ---
 
 ## Version History
+
+### v5.0.2 (June 2026)
+- **Diagnostics wait for the delayed options feed** — the Help → System Diagnostics options probe now polls up to ~30s for SPY bid/ask/delta instead of a flat 5s wait. On a fresh connection the delayed options farm (usopt) is slow to populate, so healthy data was being false-flagged as "no bid/ask — needs OPRA"; the real trader already waits 60s for exactly this. Stops the spurious red Options-Data error during market hours.
+
+### v5.0.1 (June 2026)
+- **Dashboard cleanups** — dropped the redundant Prem/Contract column from IBKR Holdings (option Avg Price is now per-share) and removed the duplicate top "Run Screener" button on This Week.
+
+### v5.0.0 (June 2026)
+- **Exclude holdings from the wheel** — a per-holding Exclude checkbox (IBKR Holdings table) plus a Settings "Excluded Tickers" field. An excluded name is never traded, adopted, or sold: no CSP, no covered call, never force-sold, and never adopted into `wheel_holdings`. Enforced across the screener, both wheel-adoption paths, the per-holding loop, and the risk monitor.
+- **Current Price column + per-share option Avg Price** in the holdings table.
+- **Entry IV at execution** — implied vol captured from the live greeks at fill time on both the CSP and CC paths, written to the trade log and shown as an Entry IV column / on PositionCards.
+- **Narrow-screen horizontal scroll** for the holdings table, and **live covered-call progress reporting** during the Monday run (per-holding status events surfaced in This Week).
+
+### v4.3.0 (June 2026)
+- **Min OI Notional slider** — the open-interest liquidity floor (from v4.2.0) is now tunable from Settings → Liquidity Filters ($0.25M–$5M, default $1M) instead of being a code constant; hot-reloads like the spread thresholds.
+- **CCs written *through* earnings by default** — `Ignore Earnings for Wheel CCs` now defaults **on**: a held position with earnings in the Monday–Friday window is kept and a covered call is written, rather than force-selling to dodge the gap. Turn it off to restore sell-before-earnings. No effect on new CSP entries. (Boxes that previously saved this off keep their saved value — toggle on + save once after upgrading.)
+- **Settings labels cleaned up** — dropped the redundant word "Filter": *Earnings Filter* → *Earnings Window*, *Ignore Earnings Filter for Wheel CCs* → *Ignore Earnings for Wheel CCs*.
+
+### v4.2.0 (June 2026)
+- **Notional-based open-interest floor** — replaced the flat `open interest ≥ 100` count with a price-neutral floor: `OI × strike × 100 ≥ $1M` plus a small absolute floor (10 contracts). A flat contract count penalized high-strike underlyings — the same dollar liquidity shows fewer contracts on a $300 name than a $30 one (e.g. BE $302.50 at OI 76 = $2.3M notional was wrongly skipped while a lower-strike name with similar dollars passed). Thresholds hot-reload from settings.
+- **Fix:** the Discord results card mislabeled open-interest skips as "spread too wide" (an `oi` skip fell through to the default label). It now reads "open interest too thin (OI N, $X notional)".
+
+### v4.1.0 / v4.1.1 (June 2026)
+- **Below-cost covered call instead of force-selling underwater holdings** — when a wheeled holding is underwater and no covered call sits at/above cost basis, the wheel now writes a ~0.20-delta call **below cost** (keeping the shares + premium) rather than dumping the shares at a loss. New `Sell Shares Instead of Below-Cost CC` toggle (default off) restores the old force-sell behavior.
+- **CC strike selection** prefers the nearest strike **≥ cost basis**, not the exact assigned strike.
+
+### v4.0.0 / v4.0.1 (June 2026)
+- **In-app alert feed — the dashboard is now self-observing** — every operational alert that flows through the single Discord chokepoint is also persisted to a capped ring buffer (`/data/alerts.json`, last 200) and surfaced via a status-bar bell with an unread badge color-coded by severity. The in-app record happens first and unconditionally, so the feed works even with Discord down or unconfigured. Standalone by design — each box keeps its own feed, no cross-box aggregation. New endpoints `GET /api/alerts` and `DELETE /api/alerts`.
+- **Fix (v4.0.1):** Restart Scheduler now saves settings first and stays visible until applied.
+
+### v3.7.0 (June 2026)
+- **Run Now is now a recovery-safe tool** — its purpose is to complete a Monday that failed or partially filled (system down, partial fills, etc.) using whatever cash/securities are actually available. Re-running is now **idempotent**: it reconciles against the live IBKR account and only does what's *missing*, never duplicating what already succeeded.
+- **Covered-call dedup** — the wheel check snapshots open short calls from IBKR. If a holding is already covered, it is left as-is: no second (naked) call is written, and the shares are **not** sold even if the screener flipped (selling covered shares would strand a naked call, and the fund never buys back CCs). Matches ticker + this-Friday expiry.
+- **CSP dedup** — tickers that already have an open short put are skipped, counted toward the position cap, and only the *remaining* slots are filled with available cash (`NUM_POSITIONS − wheel holdings − open CSPs`).
+- The **Run Screener** preview reflects all of this: shows "already covered — skip" rows in the Monday Wheel Plan and a recovery banner listing CSPs already open. Source of truth is the live account, not `state.json`, so it's robust even if a crash skipped a state write.
+
+### v3.6.0 (June 2026)
+- **"This Week" now mirrors Monday exactly** — a new `monday_runner.py` orchestrator is the single source of truth for the full Monday sequence (wheel check → CSP pipeline). The scheduler, **Run Now**, and **Run Screener** all call the same code, so what you preview is what executes.
+- **Run Screener = faithful dry-run preview** — previously the preview used the 10B entry screener and showed held names below the entry floor (e.g. QBTS) as *dropped*, contradicting Monday. It now runs the real wheel check in dry-run mode (queries live IBKR option chains for covered-call decisions, places no orders, writes no state) and shows a **Monday Wheel Plan**: which holdings get a CC (strike/delta/premium), which get sold, and freed capital — then sizes CSPs against that plan. Takes ~20–40s and requires the gateway up.
+- **Run Now = execute Monday on demand** — now runs the complete live sequence (sell shares, write covered calls, open CSPs), not just CSPs. A context-aware confirmation lists exactly what will execute and warns about double-execution if clicked inside the Monday 9:55/10:00 AM PT scheduled window.
+- `run_wheel_check(dry_run=...)` added with full side-effect gating (no orders, state, Discord, or trade-log writes in dry-run); returns a structured result dict. New `IBKR_CLIENT_ID_PREVIEW` (4) keeps API-driven runs from colliding with the scheduler's 9:55 wheel job.
+
+### v3.5.0 (June 2026)
+- **Separate wheel retention market-cap floor** — market cap is an *entry* criterion (10B), but a held name that slips modestly below it shouldn't be force-sold. A new `wheel_retention_market_cap_min` setting (default $5.0B) lets the Monday wheel check keep writing covered calls on assigned positions down to a lower floor; a name is only sold if it falls below the retention floor or fails the genuine risk gates (stop loss, no viable 0.20-delta CC, earnings this week).
+- New **"Wheel Retention Mkt Cap"** slider on Settings → Screener Filters (1.0B–10.0B, 0.5B steps). New CSP entries still use the 10B entry floor.
+- `screener.get_all_candidates()` gains a `market_cap_min` override; `wheel_manager` retention check queries the screener with the retention floor instead of the entry floor.
 
 ### v3.0.0 (May 2026) 🚀
 - **Live trading support** — full paper ↔ live toggle from the Settings page. IB Gateway restarts automatically with the correct account credentials. No config file edits required.

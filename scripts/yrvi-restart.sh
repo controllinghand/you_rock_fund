@@ -210,7 +210,10 @@ else
     FINAL_STATUS=""
 
     while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-        HEALTH=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
+        # Null-safe: containers without a HEALTHCHECK (web, ib_gateway) have a nil
+        # .State.Health; the {{if .State.Health}} guard yields an empty string
+        # instead of erroring, so the "no healthcheck" branch treats it as success.
+        HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
         STATUS=$(docker inspect --format='{{.State.Status}}'        "$CONTAINER_ID" 2>/dev/null || echo "error")
 
         if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then

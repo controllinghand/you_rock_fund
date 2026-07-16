@@ -2,6 +2,8 @@
 
 This guide walks You Rock Club members through setting up a Windows Mini PC as a dedicated, always-on YRVI trading machine. Follow these steps in order from initial Windows setup through a verified reboot test.
 
+> 💡 **Tip:** Open each download/reference link in a **new tab** — **Ctrl+click** (or middle-click) the link — so you don't lose your place in these instructions.
+
 ---
 
 ## Recommended Hardware
@@ -36,9 +38,11 @@ You will need the following physical hardware to complete the initial setup. Aft
 When you first power on the GEEKOM, follow these decisions at each setup screen:
 
 ### Microsoft Account
-- **Create a local account instead** — on the "Sign in with Microsoft" screen, click "Sign-in options" → "Domain join instead" (Windows 11 Pro)
+- **Create a local account instead** — on the "Sign in with Microsoft" screen, look for **"Sign-in options"** → **"Domain join instead"** (Windows 11 Pro). The exact wording varies by build — you may instead see "Other ways to sign in," or the screen may push hard toward a Microsoft account. The goal is simply: **do not sign in with a Microsoft account.**
 - Choose a short username (e.g. `yrvi`) and a strong password
 - This machine is a dedicated server and doesn't need OneDrive, Microsoft 365, or any cloud sync
+
+> ⚠️ **If you accidentally created a Microsoft account** (or Windows wouldn't let you skip it), you can convert it to local afterward: **Settings → Accounts → Your info → "Sign in with a local account instead"** → set username `yrvi` + a password. A local account avoids Microsoft-account 2FA prompts and makes the automatic-login step (Phase 2) work cleanly.
 
 ### Privacy Settings
 - **Turn everything off** — location, diagnostic data, inking, tailored experience, advertising ID
@@ -72,13 +76,24 @@ To connect from a Mac: download **Microsoft Remote Desktop** (free, App Store) �
 > 💡 Connect over your local network (Ethernet on both machines is most reliable) or via your router's VPN if accessing from outside your home.
 
 ### Enable Automatic Login
-This ensures the GEEKOM logs itself in automatically after a power outage or reboot — no one needs to be present.
+This ensures the GEEKOM logs itself in automatically after a power outage or reboot — no one needs to be present. **Set this up now, before installing Docker** (the Docker install in Phase 3 forces a reboot — see the note there).
 
+**Method 1 — `netplwiz` (try this first):**
 1. Press **Win + R**, type `netplwiz`, press Enter
 2. In the User Accounts dialog, select your user account
 3. **Uncheck** "Users must enter a user name and password to use this computer"
 4. Click **Apply** — enter your password twice to confirm
 5. Click **OK**
+
+> ⚠️ **The checkbox is often missing** on Windows 11 (common with Microsoft / passwordless accounts). If you don't see "Users must enter a user name and password," try toggling **Settings → Accounts → Sign-in options → "For improved security, only allow Windows Hello sign-in for Microsoft accounts on this device" → Off**, then reopen `netplwiz`. If it still doesn't appear, use Method 2.
+
+**Method 2 — Sysinternals Autologon (reliable fallback):**
+1. Download **Autologon** from [learn.microsoft.com/sysinternals/downloads/autologon](https://learn.microsoft.com/en-us/sysinternals/downloads/autologon)
+2. Unzip and run **Autologon.exe** (no install needed)
+3. Enter **Username** (`yrvi`), **Domain** (leave the prefilled PC name), and **Password**
+4. Click **Enable** — it stores the password encrypted, not plaintext
+
+> ⚠️ **PIN gotcha:** If the account has a Windows Hello **PIN**, the boot may stop at the PIN prompt even with auto-login set. If your reboot test (Phase 6) doesn't go straight to the desktop, remove the PIN: **Settings → Accounts → Sign-in options → PIN (Windows Hello) → Remove.**
 
 ### Optional: Prevent Display Sleep
 - Settings → System → Power → Screen and sleep
@@ -91,19 +106,20 @@ This ensures the GEEKOM logs itself in automatically after a power outage or reb
 ### 1. Git for Windows
 Download and install from [git-scm.com/download/win](https://git-scm.com/download/win).
 
-During install, accept all defaults **except**:
-- "Adjusting your PATH environment": select **"Git from the command line and also from 3rd-party software"**
+During install, **accept all the defaults** — click Next through every screen. The one screen worth a glance is **"Adjusting your PATH environment"**: confirm **"Git from the command line and also from 3rd-party software"** is selected (it's the default — you usually don't need to change anything). Click **Next → Install**.
 
 Git for Windows includes **Git Bash**, the terminal you'll use for all YRVI commands.
 
-### 2. GitHub CLI (gh)
-Download the installer from [cli.github.com](https://cli.github.com) and run it.
+### 2. GitHub CLI (gh) — *optional, you can skip this*
+The YRVI repo is **public**, so cloning it needs **no GitHub account and no authentication**. You only need the GitHub CLI if you plan to push changes back (a dedicated trading box normally won't). **Most people can skip straight to Docker Desktop below.**
 
-Open **Git Bash** (Start → search "Git Bash") and authenticate:
+If you do want it: download the installer from [cli.github.com](https://cli.github.com) and run it, then **close and reopen Git Bash** (so it picks up the new `gh` command) and authenticate:
 ```bash
 gh auth login
 ```
 Choose: **GitHub.com → HTTPS → Yes → Login with a web browser**
+
+> 💡 A terminal opened *before* you install a tool won't see it (`command not found`). After installing **anything** — git, gh, Docker — **close and reopen Git Bash** so its PATH refreshes.
 
 ### 3. Docker Desktop
 Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) and run the installer.
@@ -113,6 +129,8 @@ On first launch:
 - Select **Use recommended settings** → Finish
 - Skip the Docker account sign-in (click Skip)
 
+> ⚠️ **Docker will reboot the PC** to finish setting up its WSL2 backend. This is expected. After the reboot, the machine should boot straight to the desktop **if you completed the auto-login step in Phase 2** — if it stops at a login prompt instead, log in manually and revisit Phase 2 (Autologon) before continuing.
+
 #### Configure Docker Desktop to Auto-Start
 Docker Desktop → Settings (⚙️) → General:
 - ✅ **Start Docker Desktop when you sign in to your computer**
@@ -120,11 +138,17 @@ Docker Desktop → Settings (⚙️) → General:
 Click **Apply & Restart**.
 
 #### Verify Docker Works
-Open Git Bash and run:
+Wait for the Docker Desktop whale icon / engine indicator to go **green ("Engine running")**, then open Git Bash and run:
 ```bash
 docker run hello-world
 ```
 Should print "Hello from Docker!"
+
+> ⚠️ **If you get "Docker Desktop is unable to start"** — the WSL2 kernel is usually out of date. Fix it:
+> ```bash
+> wsl --update
+> ```
+> (If that errors on permissions, run it in **PowerShell as Administrator**.) Then fully **Quit Docker Desktop** (right-click the tray whale → Quit) and reopen it. If it still won't start, try `wsl --shutdown`, and check that **virtualization (AMD-V/SVM) is enabled** in the BIOS (Task Manager → Performance → CPU → "Virtualization: Enabled").
 
 ---
 
@@ -144,7 +168,7 @@ cd you_rock_fund
 cp .env.compose.example .env.compose
 ```
 
-Leave `TRADING_MODE=paper` and `YRVI_INIT_DRY_RUN=true` — these are the safe defaults for a new setup.
+You don't need to edit anything — the `--paper` flag in the next step sets `TRADING_MODE` for you (and points IBKR at the paper port). The paper account is the safety net for a new setup, so orders route to your paper account (not real money). Dry Run defaults to **off**; enable it in Settings only if you want to simulate without any account fills.
 
 ### Run Paper Trading Setup
 ```bash
@@ -159,7 +183,11 @@ The script runs the same 6-step flow as the Mac setup:
 - Your **IBKR paper trading username and password**
 - Your **Render screener API secret** (provided in onboarding)
 
-Setup waits at this step until you click Save in the browser.
+> 📖 **Where do these come from?** See [IBKR_SETUP_GUIDE.md](./IBKR_SETUP_GUIDE.md) → "Find Your Credentials for YRVI" for exactly where to find your paper username, paper password, and account number.
+
+Setup waits at this step until you click **Save** in the browser.
+
+> 💡 **If the browser doesn't open on its own**, just open it manually and go to **http://localhost:8001** — the page is served the whole time setup is waiting. Enter your secrets there and click Save, and setup continues automatically.
 
 **Step 3 — Validate config**: verifies `.env.compose` and required secrets.
 
@@ -170,6 +198,18 @@ Setup waits at this step until you click Save in the browser.
 > ⚠️ If Step 5 fails with a permissions error, close Git Bash, reopen it **as Administrator** (right-click → "Run as administrator"), navigate back to the repo, and rerun `bash setup_docker.sh --paper`. The Task Scheduler registration requires elevated rights.
 
 **Step 6 — Desktop app**: skipped on Windows (macOS only). Access the dashboard at `http://localhost:3000`.
+
+### Confirm All 5 Containers Are Running
+Before going further, verify the stack actually started. In Git Bash, from the repo folder:
+```bash
+docker compose --env-file .env.compose ps
+```
+You should see **5 containers** with status `Up` / `running`: **ib_gateway**, **api**, **scheduler**, **web**, **secrets**.
+
+- If you see **only `secrets`** → setup is still waiting on the secrets page. Open **http://localhost:8001**, enter your credentials, click **Save**, then rerun `bash setup_docker.sh --paper`.
+- If a `docker compose ... logs` command **returns instantly with no output**, that container isn't running — check `ps` first.
+
+> Run all `docker compose` commands from `~/you_rock_fund` in **Git Bash** (not Command Prompt), or compose won't find the project.
 
 ### Watch IB Gateway Log In
 ```bash
@@ -278,17 +318,19 @@ docker compose --env-file .env.compose up -d --build
 | Dashboard shows Gateway red | Run `docker compose --env-file .env.compose logs -f ib_gateway` and check for errors |
 | Task Scheduler job not registered | Rerun `bash setup_docker.sh --paper` from Git Bash opened as Administrator |
 | `docker` not found in Git Bash | Docker Desktop isn't running. Open it and wait for the engine indicator to go green. |
-| IB Gateway needs 2FA or shows a login dialog | Connect via RealVNC Viewer (see below) |
+| IB Gateway needs 2FA or shows a login dialog | Open the built-in **View Gateway** viewer (see below) |
 
-### Connecting via VNC (2FA / login dialogs)
+### Viewing the IB Gateway screen (2FA / login dialogs)
 
-The IB Gateway runs headless inside Docker but exposes a VNC session on port 5900. Windows does not have a built-in VNC viewer — use **RealVNC Viewer** (free):
+There's a **View Gateway** viewer built into the dashboard — no VNC client to download.
 
-1. Download from [realvnc.com/en/connect/download/viewer](https://www.realvnc.com/en/connect/download/viewer/)
-2. Open RealVNC Viewer and connect to: `127.0.0.1:5900`
-3. Password: `ibgateway123!test` (default — change it via `http://localhost:8001` if desired)
+1. Open the dashboard (**http://localhost:3000**) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway**. A new browser tab opens.
+3. Click **👁 Open viewer (view-only)** to watch, or **⚠️ Enable keyboard / mouse control** to click through a 2FA/login dialog.
 
-You'll see the IB Gateway GUI and can dismiss any dialog that's blocking login.
+The password auto-fills from your `vnc_server_password` secret — nothing to type. You'll see the IB Gateway GUI and can dismiss any dialog that's blocking login. See [docs/view-gateway.md](docs/view-gateway.md).
+
+> Older versions had you install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port on `127.0.0.1:5900` still works with an external client like [TigerVNC](https://tigervnc.org/) if you ever want a fallback.)
 
 ---
 

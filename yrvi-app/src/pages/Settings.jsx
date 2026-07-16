@@ -1,11 +1,17 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
-import { Save, AlertTriangle, CheckCircle, Send, Sun, Moon, Monitor, RefreshCw, Power, RotateCcw, Upload, Download, RotateCw, ExternalLink, KeyRound } from 'lucide-react'
+import { Save, AlertTriangle, CheckCircle, Send, Sun, Moon, Monitor, RefreshCw, Power, RotateCcw, Upload, Download, RotateCw, ExternalLink, KeyRound, Pause, Play } from 'lucide-react'
 import { useThemeContext } from '../ThemeProvider.jsx'
+import { useUnsavedChanges } from '../components/UnsavedChanges.jsx'
+
+// Earliest allowed execution is 07:00 PST. The wheel check runs 5 min before
+// execution and must land after the 6:30 open (to price CCs) yet before the CSP
+// pipeline. 7:00 → wheel check at 6:55 (~25 min post-open), safe on live AND on
+// paper's 15-min-delayed feed. The scheduler enforces the same floor server-side.
+const MIN_EXEC_TIME = '07:00'
 
 const PRESET_TIMES = [
-  { value: '06:30', et: '9:30 AM ET',  note: 'Market Open — live only' },
-  { value: '07:00', et: '10:00 AM ET', note: '30 min after open' },
+  { value: '07:00', et: '10:00 AM ET', note: '30 min after open — earliest' },
   { value: '07:30', et: '10:30 AM ET', note: '1 hr after open' },
   { value: '08:00', et: '11:00 AM ET', note: '' },
   { value: '09:00', et: '12:00 PM ET', note: 'Noon ET' },
@@ -33,6 +39,7 @@ function isPreset(val) {
 }
 
 function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange, description }) {
+  const fillPct = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0
   return (
     <div>
       <div className="flex items-center gap-4">
@@ -47,7 +54,8 @@ function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange
           step={step}
           value={value}
           onChange={e => onChange(Number(e.target.value))}
-          className="flex-1 accent-blue-500 h-1.5"
+          className="yrvi-range flex-1"
+          style={{ '--fill': `${fillPct}%` }}
         />
         <div className="flex gap-1 text-xs text-gray-400 dark:text-gray-600 w-28 shrink-0 justify-end">
           <span>{format(min)}</span>
@@ -100,6 +108,47 @@ function Toggle({ label, sub, checked, onChange }) {
   )
 }
 
+function TickerExcludeInput({ value, onChange }) {
+  const [draft, setDraft] = useState('')
+  const tickers = Array.isArray(value) ? value : []
+
+  const add = () => {
+    const sym = draft.trim().toUpperCase()
+    if (sym && !tickers.includes(sym)) onChange([...tickers, sym].sort())
+    setDraft('')
+  }
+  const remove = (sym) => onChange(tickers.filter(t => t !== sym))
+
+  return (
+    <div>
+      <div className="text-gray-700 dark:text-gray-300 text-sm">Excluded Tickers</div>
+      <div className="text-gray-500 dark:text-gray-600 text-xs mt-0.5 mb-2">
+        Never traded by the wheel — no CSPs, no covered calls, never sold. Use for long-term holds.
+      </div>
+      <div className="flex flex-wrap gap-2 mb-2">
+        {tickers.length === 0 && (
+          <span className="text-xs text-gray-400 dark:text-gray-600 italic">None excluded</span>
+        )}
+        {tickers.map(sym => (
+          <span key={sym} className="inline-flex items-center gap-1 text-xs font-mono bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 rounded-full px-2.5 py-1">
+            {sym}
+            <button type="button" onClick={() => remove(sym)} className="text-gray-400 hover:text-red-500" title={`Remove ${sym}`}>×</button>
+          </span>
+        ))}
+      </div>
+      <input
+        type="text"
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add() } }}
+        onBlur={add}
+        placeholder="Add ticker (e.g. AAPL) — Enter to add"
+        className="w-full text-sm bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:border-blue-500"
+      />
+    </div>
+  )
+}
+
 const THEME_OPTIONS = [
   { value: 'system', label: 'System', icon: Monitor },
   { value: 'light',  label: 'Light',  icon: Sun },
@@ -140,10 +189,23 @@ export default function SettingsPage() {
   const [timezone, setTimezone]                 = useState('')
   const [timezoneOriginal, setTimezoneOriginal] = useState('')
   const [tzSaving, setTzSaving]                 = useState(false)
+  // What the running scheduler is actually using. Tracked separately from
+  // `original` (the saved-to-disk baseline) because persisting a new time does
+  // NOT live-reschedule the scheduler — only a restart does. Gating the "restart
+  // scheduler" prompt on these (not on the dirty/saved state) keeps the button
+  // visible after a plain Save, until the scheduler has actually been restarted
+  // onto the new value. Initialized at load assuming disk and scheduler agree.
+  const [appliedExecTime, setAppliedExecTime]   = useState(null)
+  const [appliedTimezone, setAppliedTimezone]   = useState('')
   const [confirmReset, setConfirmReset]           = useState(false)
   const [showShutdownModal, setShowShutdownModal] = useState(false)
   const [shuttingDown, setShuttingDown]           = useState(false)
   const [systemOffline, setSystemOffline]         = useState(false)
+  // System Control — Pause/Resume trading (A) + Restart All (B)
+  const [pausing, setPausing]                     = useState(false)
+  const [pauseResult, setPauseResult]             = useState(null)
+  const [showRestartAllModal, setShowRestartAllModal] = useState(false)
+  const [restartingAll, setRestartingAll]         = useState(false)
 
   // Reconciler
   const [reconXml, setReconXml]               = useState('')
@@ -159,17 +221,22 @@ export default function SettingsPage() {
   const [manualPremium, setManualPremium]     = useState('')
   const [manualSaving, setManualSaving]       = useState(false)
   const [showManual, setShowManual]           = useState(false)
+  const [confirmDelete, setConfirmDelete]     = useState(null) // week_start pending delete confirm
+  const [deleting, setDeleting]               = useState(false)
   const fileInputRef                          = useRef(null)
 
   const { theme, setTheme } = useThemeContext()
+  const { setDirty } = useUnsavedChanges()
 
   useEffect(() => {
     axios.get('/api/settings').then(r => {
       setSettings(r.data)
       setOriginal(r.data)
+      setAppliedExecTime(r.data?.execution_time ?? '10:00')
       const tz = r.data?.timezone || 'America/Los_Angeles'
       setTimezone(tz)
       setTimezoneOriginal(tz)
+      setAppliedTimezone(tz)
     })
   }, [])
 
@@ -254,6 +321,62 @@ export default function SettingsPage() {
     setTimeout(checkOffline, 2000)
   }
 
+  // Whether the operator has intentionally paused trading (System Control marker,
+  // surfaced by /api/status). Drives the Pause ↔ Resume toggle. Distinct from a
+  // real gateway outage — a genuine outage leaves trading_paused false so the
+  // watchdog (not this button) handles recovery.
+  const tradingPaused = tokenStatus?.trading_paused === true
+
+  // Option A — pause / resume trading. api + web stay up, so this page never
+  // goes offline; we just flip the button and surface the result inline.
+  const toggleTrading = async () => {
+    const resuming = tradingPaused
+    setPausing(true)
+    setPauseResult(null)
+    try {
+      const res = await axios.post(resuming ? '/api/trading/start' : '/api/trading/stop')
+      setPauseResult({ ok: res.data.success, text: res.data.message })
+      // Refresh status so the Pause ↔ Resume button flips immediately rather
+      // than waiting for the 20s status poll.
+      axios.get('/api/status', { timeout: 4000 }).then(r => setTokenStatus(r.data)).catch(() => {})
+    } catch (err) {
+      setPauseResult({ ok: false, text: err.response?.data?.detail ?? 'Action failed — check logs' })
+    } finally {
+      setPausing(false)
+    }
+  }
+
+  // Option B — restart every container (clean reboot, no rebuild). api restarts
+  // itself last, so we bounce to the offline overlay and poll until it's back.
+  const confirmRestartAll = async () => {
+    setRestartingAll(true)
+    setShowRestartAllModal(false)
+    try {
+      await axios.post('/api/restart-all')
+    } catch (err) {
+      const status = err?.response?.status
+      if (status === 501) {
+        showMsg('error', err.response?.data?.detail ?? 'Restart rejected')
+        setRestartingAll(false)
+        return
+      }
+      // api killing itself mid-request looks like a network error — expected.
+    }
+    // Wait for the API to drop, then come back, then reload the app fresh.
+    let sawDown = false
+    const poll = async () => {
+      try {
+        await axios.get('/api/status', { timeout: 2000 })
+        if (sawDown) { window.location.reload(); return }
+        setTimeout(poll, 1500)
+      } catch {
+        sawDown = true
+        setTimeout(poll, 1500)
+      }
+    }
+    setTimeout(poll, 2500)
+  }
+
   const saveTimezone = async () => {
     setTzSaving(true)
     try {
@@ -272,8 +395,23 @@ export default function SettingsPage() {
     setRestarting(true)
     setRestartResult(null)
     try {
+      // Persist any pending schedule/timezone edits BEFORE restarting, so the
+      // scheduler reads the new values on startup. This is what makes the button
+      // a true one-click "apply" — no separate Save step required.
+      const saved = await axios.post('/api/settings', settings)
+      setSettings(saved.data)
+      setOriginal(saved.data)
+      if (timezone !== appliedTimezone) {
+        const tzRes = await axios.post('/api/settings/timezone', { timezone })
+        setTimezone(tzRes.data.timezone)
+        setTimezoneOriginal(tzRes.data.timezone)
+      }
       const res = await axios.post('/api/restart-scheduler')
       const detail = res.data.container ?? (res.data.pid ? `PID ${res.data.pid}` : 'success')
+      // Scheduler is now running on the persisted values — mark them applied so
+      // the prompt clears (it only clears here, never on a plain Save).
+      setAppliedExecTime(saved.data?.execution_time ?? settings.execution_time)
+      setAppliedTimezone(timezone)
       setRestartResult({ ok: true, text: `Scheduler restarted (${detail})` })
     } catch (err) {
       setRestartResult({ ok: false, text: err.response?.data?.detail ?? 'Restart failed — check logs' })
@@ -387,15 +525,29 @@ export default function SettingsPage() {
 
   const isDirty = JSON.stringify(settings) !== JSON.stringify(original)
 
+  // Raise the shared "unsaved changes" flag whenever the form (or the
+  // separately-saved timezone) differs from its saved baseline, so navigating
+  // away — a sidebar click or a tab close — warns first. Clear it on unmount.
+  const unsaved = isDirty || timezone !== timezoneOriginal
+  useEffect(() => {
+    setDirty(unsaved)
+    return () => setDirty(false)
+  }, [unsaved, setDirty])
+
   const DEFAULTS = {
-    fund_budget: 250000, num_positions: 5, min_position_size: 10000,
+    fund_budget: 250000, goal_pct: 0.24, num_positions: 5, min_position_size: 10000,
     max_position_size: 70000, max_delta: 0.21, min_buffer_pct: 0.05,
-    earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: false,
-    wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true,
+    earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
+    wheel_retention_market_cap_min: 5000000000,
+    wheel_sell_when_cc_below_assigned: false, wheel_cover_all_shares: true,
+    wheel_allow_add_to_position: false,
+    wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
+    min_oi_notional: 1000000, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
-    auto_update_enabled: false,
+    auto_update_enabled: false, show_verse_of_the_day: true,
+    cash_park_enabled: false, cash_park_instrument: 'QQQ', cash_park_include_premiums: false,
   }
 
   const resetToDefaults = () => {
@@ -500,6 +652,14 @@ export default function SettingsPage() {
       {/* Fund Settings */}
       <Section title="Fund Settings" emoji="💰">
         <SliderRow label="Initial Fund Budget"  value={settings.fund_budget}      min={10000}  max={2000000} step={10000} format={v => `$${v.toLocaleString()}`} onChange={v => set('fund_budget', v)} />
+        <SliderRow
+          label="Annual Goal %"
+          value={settings.goal_pct ?? 0.24}
+          min={0.06} max={0.60} step={0.02}
+          format={v => `${(v * 100).toFixed(0)}%`}
+          onChange={v => set('goal_pct', v)}
+          description={`Target annual return as % of fund budget. Drives both goal bars: premium goal = $${Math.round((settings.fund_budget ?? 250000) * (settings.goal_pct ?? 0.24)).toLocaleString()}, account-value target = $${Math.round((settings.fund_budget ?? 250000) * (1 + (settings.goal_pct ?? 0.24))).toLocaleString()}. Default 24% ≈ 2%/month.`}
+        />
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
             label="Compound Weekly"
@@ -513,6 +673,21 @@ export default function SettingsPage() {
             </p>
           )}
         </div>
+        {settings.compound_enabled !== false && (
+          <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+            <Toggle
+              label="Cash Account (no margin)"
+              sub="Deploy IBKR Buying Power directly as the CSP budget. Only enable on a true cash account — Buying Power is real settled cash and already excludes capital tied up in wheel stock, so reserved capital is not subtracted again."
+              checked={settings.cash_account === true}
+              onChange={v => set('cash_account', v)}
+            />
+            {settings.cash_account === true && (
+              <p className="mt-2 text-xs text-amber-500 dark:text-amber-400">
+                Reserved wheel capital is NOT subtracted from the budget in this mode. Do not enable on a margin account — you'd deploy leverage.
+              </p>
+            )}
+          </div>
+        )}
         <SliderRow label="# Positions"  value={settings.num_positions}    min={1}      max={10}                  format={v => `${v} positions`}           onChange={v => set('num_positions', v)} />
         <SliderRow label="Min Position" value={settings.min_position_size} min={5000}  max={100000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('min_position_size', v)} />
         <SliderRow label="Max Position" value={settings.max_position_size} min={10000} max={200000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('max_position_size', v)} />
@@ -521,17 +696,99 @@ export default function SettingsPage() {
         )}
       </Section>
 
+      {/* Cash Sweep */}
+      <Section title="Cash Sweep" emoji="🅿️">
+        <Toggle
+          label="Park leftover cash each week"
+          sub="After Monday's option workflow, buy the instrument below with the undeployed remainder, then sell it on the week's last trading day — so idle cash keeps working."
+          checked={!!settings.cash_park_enabled}
+          onChange={v => set('cash_park_enabled', v)}
+        />
+        {settings.cash_park_enabled && (
+          <>
+            <div>
+              <div className="text-gray-700 dark:text-gray-300 text-sm">Instrument</div>
+              <div className="text-gray-500 dark:text-gray-600 text-xs mt-0.5 mb-2">
+                QQQ for growth exposure. SGOV (T-bill ETF) is near-zero-risk — mainly useful for accounts under ~$10K, since IBKR already pays interest on idle cash above that.
+              </div>
+              <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+                {['QQQ', 'SGOV'].map(sym => (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => set('cash_park_instrument', sym)}
+                    className={`px-4 py-1.5 text-sm font-mono transition-colors ${
+                      (settings.cash_park_instrument || 'QQQ') === sym
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800'
+                    }`}
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <Toggle
+              label="Also park this week's premiums"
+              sub="Include the CSP + covered-call premium collected this week on top of the leftover cash. Off = remainder cash only."
+              checked={!!settings.cash_park_include_premiums}
+              onChange={v => set('cash_park_include_premiums', v)}
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-600">
+              Parks idle settled cash only (never margin). When all option slots are filled it uses the full idle amount; a 10% net-liq safety cap applies only if some slots went unfilled that week.
+            </p>
+          </>
+        )}
+      </Section>
+
       {/* Screener Filters */}
       <Section title="Screener Filters" emoji="📐">
         <SliderRow label="Max Delta"      value={settings.max_delta}            min={0.10} max={0.30} step={0.01} format={v => v.toFixed(2)}                onChange={v => set('max_delta', v)} />
         <SliderRow label="Min Buffer %"   value={settings.min_buffer_pct}       min={0.03} max={0.20} step={0.01} format={v => `${(v * 100).toFixed(0)}%`} onChange={v => set('min_buffer_pct', v)} />
-        <SliderRow label="Earnings Filter" value={settings.earnings_filter_days} min={0}    max={30}              format={v => `${v} days`}                  onChange={v => set('earnings_filter_days', v)} />
+        <SliderRow label="Earnings Window" value={settings.earnings_filter_days} min={0}    max={30}              format={v => `${v} days`}                  onChange={v => set('earnings_filter_days', v)} />
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <TickerExcludeInput value={settings.excluded_tickers ?? []} onChange={v => set('excluded_tickers', v)} />
+        </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
-            label="Ignore Earnings Filter for Wheel CCs"
-            sub="Allow CCs on held positions through earnings — no effect on new CSP entries"
+            label="Ignore Earnings for Wheel CCs"
+            sub="ON (default): keep held positions through earnings and write the CC. OFF: sell shares before earnings to dodge the gap. No effect on new CSP entries."
             checked={!!settings.wheel_cc_ignore_earnings_filter}
             onChange={v => set('wheel_cc_ignore_earnings_filter', v)}
+          />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <SliderRow
+            label="Wheel Retention Mkt Cap"
+            value={settings.wheel_retention_market_cap_min ?? 5000000000}
+            min={1000000000} max={10000000000} step={500000000}
+            format={v => `$${(v / 1e9).toFixed(1)}B`}
+            onChange={v => set('wheel_retention_market_cap_min', v)}
+            description="Keep wheeling a held name down to this market cap, even if below the 10B entry floor — sell only if it falls further"
+          />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <Toggle
+            label="Sell Shares Instead of Below-Cost CC"
+            sub="Default OFF: an underwater holding with no CC at/above cost writes a 20-delta CC below cost (keeps shares + premium). Turn ON to force-sell those shares at market instead, like the old behavior."
+            checked={!!settings.wheel_sell_when_cc_below_assigned}
+            onChange={v => set('wheel_sell_when_cc_below_assigned', v)}
+          />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <Toggle
+            label="Auto-Cover Uncovered Shares"
+            sub="Default ON: automatically finishes covering any shares that don't yet have a covered call (e.g. when a CC order only partly filled), selling the remaining calls at the same strike and expiry. Turn OFF to leave partially-covered holdings as they are."
+            checked={!!settings.wheel_cover_all_shares}
+            onChange={v => set('wheel_cover_all_shares', v)}
+          />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <Toggle
+            label="Allow Adding to an Existing Position"
+            sub="Default OFF (one position per ticker): the CSP pipeline won't open a new cash-secured put on a stock you already hold shares of — avoids building a second tranche at a different strike. Turn ON to allow adding to an existing position."
+            checked={!!settings.wheel_allow_add_to_position}
+            onChange={v => set('wheel_allow_add_to_position', v)}
           />
         </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
@@ -582,6 +839,14 @@ export default function SettingsPage() {
           onChange={v => set('max_spread_hard_cap', v)}
           description="Always skip regardless of yield if spread exceeds this %"
         />
+        <SliderRow
+          label="Min OI Notional"
+          value={settings.min_oi_notional ?? 1000000}
+          min={250000} max={5000000} step={250000}
+          format={v => `$${(v / 1e6).toFixed(2)}M`}
+          onChange={v => set('min_oi_notional', v)}
+          description="Skip if open-interest notional (OI × strike × 100) is below this — price-neutral liquidity floor, fairer to high-strike names than a flat contract count"
+        />
       </Section>
 
       {/* Execution */}
@@ -624,16 +889,16 @@ export default function SettingsPage() {
           <div className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
             Earlier = less liquidity and wider spreads.
             10:00 AM PST (1:00 PM ET) recommended for best fill prices.
-            {settings.execution_time === '06:30' && (
+            {/^\d{2}:\d{2}$/.test(settings.execution_time || '') && settings.execution_time < MIN_EXEC_TIME && (
               <span className="block mt-1 text-amber-600 dark:text-amber-500">
-                ⚠ 6:30 AM (market open) requires a live account — paper accounts use delayed data that isn't available at open.
+                ⚠ Earliest allowed is 7:00 AM PST. The wheel check runs 5 min before execution and must price covered calls after the open — anything earlier has no option data. The scheduler will use 7:00 AM if you save an earlier time.
               </span>
             )}
           </div>
-          {settings.execution_time !== original?.execution_time && (
+          {settings.execution_time !== appliedExecTime && (
             <div className="mt-2 flex items-center gap-3 flex-wrap">
               <span className="text-xs text-amber-600 dark:text-amber-500">
-                ⚠ Save + restart scheduler for new time to take effect.
+                ⚠ Restart scheduler for the new time to take effect (saves automatically).
               </span>
               <button
                 onClick={restartScheduler}
@@ -825,9 +1090,9 @@ export default function SettingsPage() {
               <Save size={11} />
               {tzSaving ? 'Saving…' : 'Save Timezone'}
             </button>
-            {timezone !== timezoneOriginal && (
+            {timezone !== appliedTimezone && (
               <span className="text-xs text-amber-600 dark:text-amber-500">
-                ⚠ Save and then restart scheduler for change to take effect.
+                ⚠ Restart scheduler for the change to take effect (saves automatically).
               </span>
             )}
             <button
@@ -862,6 +1127,14 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
+        </div>
+        <div className="pt-4 border-t border-gray-100 dark:border-gray-800">
+          <Toggle
+            label="Words of Encouragement"
+            sub="Show a daily Bible verse on the Help page"
+            checked={settings.show_verse_of_the_day !== false}
+            onChange={v => set('show_verse_of_the_day', v)}
+          />
         </div>
       </Section>
 
@@ -955,19 +1228,73 @@ export default function SettingsPage() {
         )}
       </Section>
 
-      {/* Shutdown */}
-      <Section title="Shutdown" emoji="⛔">
-        <div className="space-y-3">
-          <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
-            Stop all YRVI containers (scheduler, web, IB Gateway, secrets, api). The api shuts itself down last — this page will become unreachable.
+      {/* System Control */}
+      <Section title="System Control" emoji="⛔">
+        <div className="space-y-4">
+
+          {/* A — Pause / Resume Trading */}
+          <div className="flex items-start justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white flex items-center gap-2">
+                {tradingPaused
+                  ? <><span className="h-2 w-2 rounded-full bg-yellow-400 inline-block" /> Trading is paused</>
+                  : <><span className="h-2 w-2 rounded-full bg-green-500 inline-block" /> Trading is active</>}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                Stops just the IB Gateway + scheduler. The dashboard stays up, so you can resume right here — no desktop icon needed.
+              </div>
+              {pauseResult && (
+                <div className={`mt-1.5 text-xs font-medium ${pauseResult.ok ? 'text-green-500' : 'text-red-400'}`}>
+                  {pauseResult.ok ? '✅' : '❌'} {pauseResult.text}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={toggleTrading}
+              disabled={pausing}
+              className={`flex items-center gap-2 px-4 py-2 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-60 ${
+                tradingPaused ? 'bg-green-600 hover:bg-green-500' : 'bg-yellow-600 hover:bg-yellow-500'}`}
+            >
+              {tradingPaused ? <Play size={14} /> : <Pause size={14} />}
+              {pausing ? 'Working…' : (tradingPaused ? 'Resume Trading' : 'Pause Trading')}
+            </button>
           </div>
-          <button
-            onClick={() => setShowShutdownModal(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            <Power size={14} />
-            Shut Down YRVI
-          </button>
+
+          {/* B — Restart All */}
+          <div className="flex items-start justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Restart all containers</div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                A clean reboot of every container (no update/rebuild). This page will briefly disconnect and reload automatically (~30–60s).
+              </div>
+            </div>
+            <button
+              onClick={() => setShowRestartAllModal(true)}
+              disabled={restartingAll}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-60"
+            >
+              <RotateCw size={14} className={restartingAll ? 'animate-spin' : ''} />
+              Restart All
+            </button>
+          </div>
+
+          {/* C — Full Shutdown */}
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-white">Full shutdown</div>
+              <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed mt-1">
+                Stops <span className="font-medium">everything</span>, including this dashboard. To bring it back, use the YRVI icon on the desktop.
+              </div>
+            </div>
+            <button
+              onClick={() => setShowShutdownModal(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-lg transition-colors"
+            >
+              <Power size={14} />
+              Shut Down
+            </button>
+          </div>
+
         </div>
       </Section>
 
@@ -1182,23 +1509,48 @@ export default function SettingsPage() {
                         ${(w.premium_collected ?? w.realized ?? 0).toLocaleString()}
                       </td>
                       <td className="py-1 text-right">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            if (!confirm(`Remove week ${w.week_start}?`)) return
-                            try {
-                              await axios.delete(`/api/ytd/weeks/${w.week_start}`)
-                              const r = await axios.get('/api/performance')
-                              setYtdWeeks(r.data.weeks || [])
-                              setReconMsg({ type: 'success', text: `Removed week ${w.week_start}` })
-                            } catch (e) {
-                              setReconMsg({ type: 'error', text: e?.response?.data?.detail || 'Delete failed' })
-                            }
-                          }}
-                          className="text-red-400 hover:text-red-600 text-[10px] px-1.5 py-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30"
-                        >
-                          remove
-                        </button>
+                        {confirmDelete === w.week_start ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-[10px] text-gray-500">Remove?</span>
+                            <button
+                              type="button"
+                              disabled={deleting}
+                              onClick={async () => {
+                                setDeleting(true)
+                                try {
+                                  await axios.delete(`/api/ytd/weeks/${w.week_start}`)
+                                  const r = await axios.get('/api/performance')
+                                  setYtdWeeks(r.data.weeks || [])
+                                  setReconMsg({ type: 'success', text: `Removed week ${w.week_start}` })
+                                } catch (e) {
+                                  setReconMsg({ type: 'error', text: e?.response?.data?.detail || 'Delete failed' })
+                                } finally {
+                                  setDeleting(false)
+                                  setConfirmDelete(null)
+                                }
+                              }}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 disabled:cursor-wait"
+                            >
+                              {deleting ? '…' : 'yes'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deleting}
+                              onClick={() => setConfirmDelete(null)}
+                              className="text-[10px] px-1.5 py-0.5 rounded border border-gray-300 dark:border-gray-700 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+                            >
+                              no
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDelete(w.week_start)}
+                            className="text-red-400 hover:text-red-600 text-[10px] px-1.5 py-0.5 rounded hover:bg-red-50 dark:hover:bg-red-950/30"
+                          >
+                            remove
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -1331,6 +1683,50 @@ export default function SettingsPage() {
               <p className="text-gray-500 text-sm">Stopping all containers</p>
             </>
           )}
+        </div>
+      )}
+
+      {/* Restart-All overlay — covers page while all containers bounce, then reloads */}
+      {restartingAll && (
+        <div className="fixed inset-0 bg-black/90 flex flex-col items-center justify-center z-[100]">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mb-5" />
+          <h2 className="text-white text-xl font-semibold mb-1">Restarting YRVI…</h2>
+          <p className="text-gray-500 text-sm">Bouncing all containers — this page will reload when it's back (~30–60s)</p>
+        </div>
+      )}
+
+      {/* Restart-All Modal */}
+      {showRestartAllModal && (
+        <div
+          className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+          onClick={e => e.target === e.currentTarget && !restartingAll && setShowRestartAllModal(false)}
+        >
+          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <RotateCw size={22} className="text-blue-400" />
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Restart all containers</h3>
+            </div>
+            <p className="text-gray-600 dark:text-gray-300 text-sm mb-5">
+              This bounces every container (a clean reboot — no update). The dashboard will disconnect briefly and reload itself when it's back.
+              {tokenStatus?.trading_mode === 'live' && ' On live, the Gateway restart will trigger an IB Key approval on your phone.'}
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRestartAllModal(false)}
+                disabled={restartingAll}
+                className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmRestartAll}
+                disabled={restartingAll}
+                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-60 disabled:cursor-wait"
+              >
+                {restartingAll ? 'Restarting…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

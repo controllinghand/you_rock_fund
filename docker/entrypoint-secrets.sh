@@ -39,7 +39,7 @@ initialize_settings() {
 
     mkdir -p "$data_dir"
 
-    if [ -e "$settings_file" ] || [ "${YRVI_INIT_DRY_RUN:-true}" = "false" ]; then
+    if [ -e "$settings_file" ]; then
         return
     fi
 
@@ -56,7 +56,10 @@ settings = {}
 if defaults_file.exists():
     settings = json.loads(defaults_file.read_text())
 
-settings["dry_run"] = True
+# Dry Run defaults to OFF (from settings_default.json). Fresh installs are
+# paper-mode, so the paper account — not simulation — is the safety net; seeding
+# dry_run=true would just create "am I actually trading?" confusion. A user opts
+# into Dry Run explicitly via Settings; it's the exception, not the default.
 if os.environ.get("IBKR_PORT"):
     settings["ibkr_port"] = int(os.environ["IBKR_PORT"])
 if os.environ.get("TRADING_MODE"):

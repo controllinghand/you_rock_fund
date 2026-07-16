@@ -1,11 +1,13 @@
 import json
 import logging
 import math
+import os
+import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder
 
-from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings
+from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, gateway_unreachable_message, probe_port
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +23,8 @@ TRADE_LOG_JSON      = "trade_log.json"
 MAX_SPREAD_PCT      = 0.20  # fallback default — settings.json overrides via check_liquidity
 MIN_BID_YIELD_PCT   = 0.01  # fallback default — bid yield threshold to proceed despite wide spread
 MAX_SPREAD_HARD_CAP = 0.50  # fallback default — spread above this is always skipped
-MIN_OPEN_INTEREST   = 100
+MIN_OI_NOTIONAL     = 1_000_000  # fallback default — min open-interest notional (OI × strike × 100); settings.json overrides
+MIN_OI_FLOOR        = 10         # fallback default — absolute min contracts; rejects totally-dead strikes that math past the notional floor
 MAX_DELTA           = 0.21  # hard ceiling — never sell a CSP with abs(delta) above this
 MIN_DELTA           = 0.15  # floor — if live delta drops below this, scan upward for a better strike
 MID_WAIT_SECS       = 120
@@ -50,8 +53,74 @@ def _append_trade_log(record: dict) -> None:
         json.dump(entries, f, indent=2)
 
 
+def _same_week(iso_ts: str | None) -> bool:
+    """True if `iso_ts` (naive-local isoformat, as stored in state.run_date) falls
+    in the current Monday-anchored week. Used to decide whether a prior state's
+    executions belong to THIS week and should be consolidated into a re-run."""
+    if not iso_ts:
+        return False
+    try:
+        d = datetime.fromisoformat(iso_ts)
+    except (TypeError, ValueError):
+        return False
+    now = datetime.now(d.tzinfo) if d.tzinfo else datetime.now()
+    monday = lambda x: (x - timedelta(days=x.weekday())).date()
+    return monday(d) == monday(now)
+
+
+def _merge_week_executions(existing: dict, new_results: list, new_positions: list):
+    """Consolidate a same-week re-run. A live Run Now overwrote state.executions
+    with only the latest run's results, so after a re-run the dashboard week view,
+    filled_count, total_premium, and the Discord 'This Week's Trades' section
+    showed just the new fills and dropped the ones opened earlier this week — even
+    though weekly_pnl (summed from the durable trade_log) stayed correct. Here we
+    UNION this run's results with the still-open fills already recorded this week.
+
+    Safe against double-counting: the pipeline folds open short puts into
+    skip_tickers (open_short_put_tickers), so a carried fill is never also
+    re-executed. A new FILL for a ticker supersedes a prior one; a new non-fill
+    (skip/fail) never displaces a prior fill for the same ticker. Prior-WEEK state
+    is dropped (fresh week starts clean).
+
+    Returns (executions, positions, filled_count, total_premium).
+    """
+    _FILLED = ("filled", "partial_fill", "dry_run")
+
+    by_ticker: dict = {}
+    order: list = []
+
+    def _put(e):
+        t = e.get("ticker")
+        if t not in by_ticker:
+            order.append(t)
+        by_ticker[t] = e
+
+    if _same_week(existing.get("run_date")):
+        for e in existing.get("executions", []):
+            if e.get("status") in _FILLED:
+                _put(e)   # carry this week's already-open fills first
+
+    for e in new_results:
+        t = e.get("ticker")
+        # A real new fill overrides; a skip/fail only fills an empty slot so it
+        # can't wipe out a fill that this same ticker already produced this week.
+        if e.get("status") in _FILLED or t not in by_ticker:
+            _put(e)
+
+    merged_execs = [by_ticker[t] for t in order]
+
+    new_pos_tickers = {p.get("ticker") for p in new_positions}
+    carried_pos = [p for p in existing.get("positions", [])
+                   if p.get("ticker") in by_ticker and p.get("ticker") not in new_pos_tickers]
+    merged_positions = list(new_positions) + carried_pos
+
+    filled = [e for e in merged_execs if e.get("status") in _FILLED]
+    total_premium = round(sum(e.get("premium_collected", 0) or 0 for e in filled), 2)
+    return merged_execs, merged_positions, len(filled), total_premium
+
+
 def connect() -> IB:
-    account_type = "paper" if IBKR_PORT == 4002 else "live"
+    log.info(f"🔌 Connecting to IB Gateway {IBKR_HOST}:{IBKR_PORT} ({ACCOUNT_TYPE}, clientId={IBKR_CLIENT_ID})")
     for attempt in range(1, 4):
         try:
             ib = IB()
@@ -61,13 +130,14 @@ def connect() -> IB:
             _wait_for_usopt(ib)
             return ib
         except TimeoutError:
-            log.warning(f"⚠️  IBKR connect attempt {attempt}/3 timed out ({account_type}, {IBKR_HOST}:{IBKR_PORT})")
+            port_open = probe_port(IBKR_HOST, IBKR_PORT)
+            log.warning(
+                f"⚠️  IBKR connect attempt {attempt}/3 timed out ({ACCOUNT_TYPE}, {IBKR_HOST}:{IBKR_PORT}) — "
+                f"TCP port {'OPEN (API handshake hung)' if port_open else 'CLOSED (gateway not listening)'}"
+            )
             if attempt < 3:
                 time.sleep(10)
-    raise TimeoutError(
-        f"IB Gateway unreachable at {IBKR_HOST}:{IBKR_PORT} ({account_type} account) — "
-        f"is IB Gateway running? {'No 2FA needed for paper.' if account_type == 'paper' else 'Check 2FA login.'}"
-    )
+    raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
 
 
 def _wait_for_usopt(ib: IB, timeout: int = 30) -> None:
@@ -130,16 +200,19 @@ def is_nan(val) -> bool:
         return True
 
 
-def _get_delta_for_contract(ib: IB, contract) -> float | None:
-    """Request delayed market data and return put delta. Returns None if IBKR has no data."""
+def _get_greeks_for_contract(ib: IB, contract) -> tuple[float | None, float | None]:
+    """Request delayed market data and return (put delta, implied vol) from the
+    same greeks snapshot. Either value may be None if IBKR has no data."""
     tkr = ib.reqMktData(contract, genericTickList="106", snapshot=False)
     ib.sleep(3)
     ib.cancelMktData(contract)
     ib.sleep(0.5)
     for greeks in (tkr.modelGreeks, tkr.lastGreeks, tkr.bidGreeks, tkr.askGreeks):
         if greeks is not None and not is_nan(greeks.delta):
-            return greeks.delta
-    return None
+            iv = getattr(greeks, "impliedVol", None)
+            iv = iv if (iv is not None and not is_nan(iv)) else None
+            return greeks.delta, iv
+    return None, None
 
 
 def _get_stock_price(ib: IB, ticker: str) -> float | None:
@@ -173,8 +246,9 @@ def verify_and_adjust_strike(
     - If abs(delta) < MIN_DELTA (stock rose since Saturday): scan upward for highest
       strike still within delta ≤ MAX_DELTA (maximises premium within the safe zone).
 
-    Returns (qualified_contract, final_strike, orig_delta, final_delta, was_adjusted)
-    or None if qualification fails or no valid strike is found.
+    Returns (qualified_contract, final_strike, orig_delta, final_delta, final_iv,
+    was_adjusted) or None if qualification fails or no valid strike is found.
+    final_iv is the chosen contract's implied vol at execution (may be None).
     """
     expiry = parse_expiry(expiry_str)
 
@@ -190,7 +264,7 @@ def verify_and_adjust_strike(
         log.error(f"  ❌ {ticker} delta-check qualify error: {e}")
         return None
 
-    live_delta = _get_delta_for_contract(ib, c)
+    live_delta, live_iv = _get_greeks_for_contract(ib, c)
 
     if live_delta is None:
         log.warning(f"  ⚠️  {ticker} — no live delta from IBKR; "
@@ -201,7 +275,7 @@ def verify_and_adjust_strike(
 
     if MIN_DELTA <= abs(live_delta) <= MAX_DELTA:
         log.info(f"  ✅ {ticker} delta OK: {live_delta:.3f} at ${screener_strike:.2f}")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
 
     # Need to scan the chain — fetch once and reuse for both directions
     try:
@@ -228,13 +302,13 @@ def verify_and_adjust_strike(
                 alt_c = alt_q[0]
             except Exception:
                 continue
-            alt_delta = _get_delta_for_contract(ib, alt_c)
+            alt_delta, alt_iv = _get_greeks_for_contract(ib, alt_c)
             if alt_delta is None:
                 continue
             if abs(alt_delta) <= MAX_DELTA:
                 log.warning(f"  {label} {ticker} strike adjusted ${screener_strike:.2f} → "
                             f"${alt_strike:.2f} (delta {orig_delta:.3f} → {alt_delta:.3f})")
-                return alt_c, alt_strike, orig_delta, alt_delta, True
+                return alt_c, alt_strike, orig_delta, alt_delta, alt_iv, True
         return None
 
     if abs(live_delta) > MAX_DELTA:
@@ -264,20 +338,24 @@ def verify_and_adjust_strike(
             above.extend(s for s in ch.strikes if s > screener_strike)
     if not above:
         log.warning(f"  ⚠️  {ticker} — no higher strikes in chain; using screener strike as-is")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
     # 15 closest above screener, then scan highest-first to find best delta within cap
     closest_above = sorted(sorted(set(above))[:15], reverse=True)
     result = _scan_strikes(closest_above, "⬆️ ")
     if result is None:
         log.warning(f"  ⚠️  {ticker} — no higher strike improves delta; using screener strike as-is")
-        return c, screener_strike, orig_delta, live_delta, False
+        return c, screener_strike, orig_delta, live_delta, live_iv, False
     return result
 
 
-def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
+def get_market_data(ib: IB, contract, screener_premium: float,
+                    dry_run: bool = False) -> dict | None:
     """
     Request delayed market data (type 3 — no subscription needed).
     Falls back to screener premium if market is closed.
+
+    dry_run: caller passes the effective Dry Run state so a closed-market
+    simulation only happens when we're actually simulating orders.
     """
     ticker = ib.reqMktData(contract, genericTickList="101", snapshot=False)
     ib.sleep(10)
@@ -293,7 +371,7 @@ def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
     # Market is closed or no delayed data available
     if is_nan(bid) or is_nan(ask) or bid <= 0 or ask <= 0:
         log.warning(f"  ⏰ No market data for {contract.symbol} — market likely closed")
-        if DRY_RUN:
+        if dry_run:
             simulated_bid       = round(screener_premium * 0.90, 2)
             simulated_ask       = round(screener_premium * 1.10, 2)
             simulated_mid       = screener_premium
@@ -309,6 +387,7 @@ def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
                 "bid_yield": simulated_bid_yield,
                 "mid_yield": simulated_mid_yield,
                 "open_interest": 999,
+                "strike": strike,
                 "simulated": True
             }
         return None
@@ -329,6 +408,7 @@ def get_market_data(ib: IB, contract, screener_premium: float) -> dict | None:
         "bid_yield": bid_yield,
         "mid_yield": mid_yield,
         "open_interest": oi,
+        "strike": strike,
         "simulated": False
     }
 
@@ -387,14 +467,27 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
                     "max_spread_pct": max_spread, "min_bid_yield_pct": min_bid_yield,
                     "max_spread_hard_cap": hard_cap}
 
-    if mkt["open_interest"] < MIN_OPEN_INTEREST:
-        log.warning(f"⚠️  {ticker} OI too low: {mkt['open_interest']} — skipping")
-        return {"reason": "oi", "open_interest": mkt["open_interest"]}
+    # Open-interest gate: use notional (OI × strike × 100), not a flat contract
+    # count. A flat count penalises high-strike underlyings — the same dollar
+    # liquidity shows fewer contracts on a $300 name than a $30 one. The notional
+    # floor is price-neutral; a tiny absolute floor still kills dead strikes.
+    oi              = mkt["open_interest"]
+    strike          = mkt.get("strike", 0)
+    oi_notional     = oi * strike * 100
+    min_oi_notional = s.get("min_oi_notional", MIN_OI_NOTIONAL)
+    min_oi_floor    = s.get("min_oi_floor",    MIN_OI_FLOOR)
+    if oi < min_oi_floor or oi_notional < min_oi_notional:
+        log.warning(f"⚠️  {ticker} open interest too thin: OI {oi:.0f} "
+                    f"(${oi_notional:,.0f} notional) < ${min_oi_notional:,.0f} floor — skipping")
+        return {"reason": "oi",
+                "open_interest": oi, "oi_notional": oi_notional,
+                "min_oi_notional": min_oi_notional, "min_oi_floor": min_oi_floor}
     return None
 
 
 def place_order_with_escalation(ib: IB, contract, contracts: int,
-                                 mkt: dict, ticker: str) -> dict:
+                                 mkt: dict, ticker: str,
+                                 dry_run: bool = False) -> dict:
     result = {
         "ticker": ticker, "contracts": contracts,
         "status": "unfilled", "fill_price": None,
@@ -403,7 +496,7 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-    if DRY_RUN:
+    if dry_run:
         tag = " (simulated data)" if mkt.get("simulated") else " (live data)"
         log.info(f"  🧪 DRY RUN{tag} — would sell {contracts}x {ticker} "
                  f"put @ mid ${mkt['mid']:.2f}")
@@ -412,7 +505,37 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             "fill_price": mkt["mid"],
             "order_type": "limit_mid",
             "premium_collected": round(contracts * mkt["mid"] * 100, 2),
+            "filled_contracts": contracts,
             "exec_timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        return result
+
+    # Cumulative fill accounting across escalation legs, so each leg orders only
+    # the still-unfilled remainder and no partial fill is lost — prevents the
+    # market leg from re-sending the full quantity (over-sell) — #72.
+    filled_total  = 0
+    premium_total = 0.0
+
+    def _remaining() -> int:
+        return contracts - filled_total
+
+    def _record_leg(trade, label: str) -> None:
+        nonlocal filled_total, premium_total
+        leg_filled = int(trade.orderStatus.filled or 0)
+        if leg_filled > 0:
+            fill = trade.orderStatus.avgFillPrice or 0.0
+            premium_total += leg_filled * fill * 100
+            filled_total  += leg_filled
+            log.info(f"  ✅ {label}: filled {leg_filled}x {ticker} PUT @ ${fill:.2f} "
+                     f"({filled_total}/{contracts} total)")
+
+    def _finalize(status: str) -> dict:
+        avg = round(premium_total / filled_total / 100, 2) if filled_total else None
+        result.update({
+            "status": status, "fill_price": avg, "order_type": "escalation",
+            "premium_collected": round(premium_total, 2),
+            "filled_contracts": filled_total,
+            "exec_timestamp": datetime.now(timezone.utc).isoformat(),
         })
         return result
 
@@ -433,8 +556,11 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         return False
 
     def try_limit(price: float, label: str, wait: int) -> bool:
-        log.info(f"  📤 {label}: SELL {contracts}x {ticker} PUT @ ${price:.2f}")
-        order = LimitOrder("SELL", contracts, price, account=ACCOUNT, tif="DAY")
+        qty = _remaining()
+        if qty < 1:
+            return True
+        log.info(f"  📤 {label}: SELL {qty}x {ticker} PUT @ ${price:.2f}")
+        order = LimitOrder("SELL", qty, price, account=ACCOUNT, tif="DAY")
         trade = ib.placeOrder(contract, order)
         # Quick early-exit: IBKR permission rejections (Error 201) appear within seconds
         ib.sleep(3)
@@ -443,20 +569,13 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             result["status"] = "failed_permissions"
             return False
         ib.sleep(wait - 3)
-        if trade.orderStatus.status == "Filled":
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ Filled {ticker} @ ${fill:.2f}")
-            result.update({
-                "status": "filled", "fill_price": fill,
-                "order_type": label,
-                "premium_collected": round(contracts * fill * 100, 2),
-                "exec_timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return True
-        log.info(f"  ⏳ {label} unfilled — escalating...")
-        ib.cancelOrder(trade.order)
-        ib.sleep(1)
-        return False
+        if trade.orderStatus.status != "Filled":
+            # Not fully filled — cancel the remainder, then record whatever DID fill.
+            log.info(f"  ⏳ {label} not fully filled — cancelling remainder, escalating...")
+            ib.cancelOrder(trade.order)
+            ib.sleep(1)
+        _record_leg(trade, label)
+        return _remaining() < 1
 
     def try_limit_fok(price: float, label: str) -> bool:
         """FOK limit attempt — fills the full quantity at the limit price or cancels.
@@ -502,70 +621,53 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         return result
 
     if not mkt.get("use_bid_as_limit"):
-        if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return result
+        if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return _finalize("filled")
         if result.get("status") in ("failed_permissions", "failed_funds"): return result
-    if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return result
+    if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return _finalize("filled")
     if result.get("status") in ("failed_permissions", "failed_funds"): return result
 
-    # Market order with polling loop — options can partially fill across multiple exchanges
-    log.info(f"  📤 Market order: SELL {contracts}x {ticker} PUT")
-    order = MarketOrder("SELL", contracts, account=ACCOUNT, tif="DAY")
-    trade = ib.placeOrder(contract, order)
+    # Market order for the REMAINING contracts only (never the full quantity) so a
+    # partial fill on a cancelled limit leg can't lead to an over-sell — #72.
+    qty = _remaining()
+    if qty >= 1:
+        log.info(f"  📤 Market order: SELL {qty}x {ticker} PUT")
+        trade = ib.placeOrder(contract, MarketOrder("SELL", qty, account=ACCOUNT, tif="DAY"))
+        elapsed = 0
+        while elapsed < MARKET_WAIT_SECS:
+            ib.sleep(MARKET_POLL_SECS)
+            elapsed += MARKET_POLL_SECS
+            status      = trade.orderStatus.status
+            filled_qty  = trade.orderStatus.filled
+            remaining   = trade.orderStatus.remaining
+            if status == "Filled" or (remaining == 0 and filled_qty > 0):
+                break
+            if _is_permission_error(trade):
+                log.error(f"  ❌ {ticker} — IBKR rejected: no options trading permissions (Error 201)")
+                _record_leg(trade, "market")
+                result["status"] = "failed_permissions"
+                return result
+            if result.get("status") == "failed_funds":
+                _record_leg(trade, "market")
+                return result
+            if status == "PartiallyFilled" and filled_qty > 0:
+                log.info(f"  ⏳ Partial: {int(filled_qty)}/{qty} filled after {elapsed}s — waiting...")
+            else:
+                log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
+        _record_leg(trade, "market")
 
-    elapsed = 0
-    while elapsed < MARKET_WAIT_SECS:
-        ib.sleep(MARKET_POLL_SECS)
-        elapsed += MARKET_POLL_SECS
-        status      = trade.orderStatus.status
-        filled_qty  = trade.orderStatus.filled
-        remaining   = trade.orderStatus.remaining
-
-        if status == "Filled" or (remaining == 0 and filled_qty > 0):
-            fill = trade.orderStatus.avgFillPrice
-            log.info(f"  ✅ Market order filled {ticker} @ ${fill:.2f} "
-                     f"({filled_qty} contracts in {elapsed}s)")
-            result.update({
-                "status": "filled",
-                "fill_price": fill,
-                "order_type": "market",
-                "premium_collected": round(filled_qty * fill * 100, 2),
-                "exec_timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            return result
-
-        if _is_permission_error(trade):
-            log.error(f"  ❌ {ticker} — IBKR rejected: no options trading permissions (Error 201)")
-            result["status"] = "failed_permissions"
-            return result
-        if result.get("status") == "failed_funds":
-            return result
-
-        if status == "PartiallyFilled" and filled_qty > 0:
-            log.info(f"  ⏳ Partial: {filled_qty}/{contracts} filled after {elapsed}s — waiting...")
-        else:
-            log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
-
-    # Accept whatever partial fill arrived before timeout
-    final_qty = trade.orderStatus.filled
-    if final_qty > 0:
-        fill = trade.orderStatus.avgFillPrice
-        log.warning(f"  ⚠️  Partial fill accepted: {final_qty}/{contracts} @ ${fill:.2f}")
-        result.update({
-            "status": "partial_fill",
-            "fill_price": fill,
-            "order_type": "market",
-            "premium_collected": round(final_qty * fill * 100, 2),
-            "exec_timestamp": datetime.now(timezone.utc).isoformat()
-        })
-    else:
-        log.error(f"  ❌ Could not fill {ticker} — manual review needed")
-        result["status"] = "failed"
-
-    return result
+    if filled_total >= contracts:
+        return _finalize("filled")
+    if filled_total > 0:
+        log.warning(f"  ⚠️  {ticker}: partial CSP fill {filled_total}/{contracts} "
+                    f"across legs — accepted")
+        return _finalize("partial_fill")
+    log.error(f"  ❌ Could not fill {ticker} — manual review needed")
+    return _finalize("failed")
 
 
 def execute_positions(sized_positions: list, extra_targets: list = None,
-                      target_fills: int = None, status_callback=None) -> list:
+                      target_fills: int = None, status_callback=None,
+                      dry_run: bool = None) -> list:
     """
     Execute up to target_fills fills (defaults to NUM_POSITIONS). If a candidate
     fails qualification, market data, or liquidity, the next-ranked screener target
@@ -574,14 +676,21 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
     extra_targets: full ranked screener list (raw dicts from screener).
     target_fills: how many CSP fills to seek (caller reduces by active wheel count).
+    dry_run: simulate orders instead of placing them. Defaults to None → read the
+      Dry Run toggle FRESH from settings.json at call time. The module-level DRY_RUN
+      is only an import-time snapshot and goes stale in the long-lived scheduler
+      after a UI toggle (it kept simulating fills while Settings said OFF — the
+      Trade History "Dry Run" mismatch). Read live, like check_liquidity does for its
+      thresholds. Callers may pass an explicit bool to force it (e.g. /api/test-run).
     """
     from position_sizer import size_position
 
     _target = target_fills if target_fills is not None else NUM_POSITIONS
+    dry_run = get_settings().get("dry_run", DRY_RUN) if dry_run is None else dry_run
 
     log.info("\n" + "=" * 65)
     log.info(f"🚀 YOU ROCK VOLATILITY INCOME FUND — Execution Start")
-    log.info(f"   Mode: {'🧪 DRY RUN' if DRY_RUN else '🔴 LIVE'}")
+    log.info(f"   Mode: {'🧪 DRY RUN' if dry_run else '🔴 LIVE'}")
     log.info(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log.info(f"   Primary candidates: {len(sized_positions)}  |  "
              f"Fallback pool: {len(extra_targets or [])}  |  "
@@ -672,7 +781,10 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 continue
 
-            contract, strike, orig_delta, final_delta, was_adjusted = delta_result
+            contract, strike, orig_delta, final_delta, final_iv, was_adjusted = delta_result
+            # Fall back to the screener's ATM IV if live greeks didn't carry one.
+            if final_iv is None:
+                final_iv = pos.get("iv_atm")
             if was_adjusted:
                 old_capital  = pos["capital_used"]
                 contracts    = pos["contracts"]
@@ -688,7 +800,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
 
             _status(ticker=ticker, stage="fetching market data")
-            mkt = get_market_data(ib, contract, screener_premium=premium)
+            mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
             if not mkt:
                 log.info(f"  🔄 {ticker} — no market data, trying next candidate")
                 results.append({"ticker": ticker, "status": "failed_market_data"})
@@ -703,7 +815,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 continue
 
             _status(ticker=ticker, stage="placing order — limit mid")
-            result = place_order_with_escalation(ib, contract, contracts, mkt, ticker)
+            result = place_order_with_escalation(ib, contract, contracts, mkt, ticker, dry_run=dry_run)
         except Exception as e:
             log.error(f"  ❌ {ticker} — IBKR error: {e}")
             results.append({"ticker": ticker, "status": "failed"})
@@ -719,6 +831,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             continue
 
         result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
+        result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
         results.append(result)
 
         # Report result back to status callback
@@ -750,6 +863,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                     "right":                "P",
                     "entry_date":           result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
                     "delta_at_entry":       round(final_delta, 4) if final_delta is not None else None,
+                    "iv_at_entry":          round(final_iv, 4) if final_iv is not None else None,
                     "stock_price_at_entry": stock_price,
                     "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2) if stock_price else None,
                     "premium_per_contract": fill_price,
@@ -787,18 +901,46 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
              f"Total Premium: ${total_premium:,.0f}")
     log.info("=" * 65)
 
-    # Merge with existing state so wheel_holdings and monday_context survive
+    # Merge with existing state so wheel_holdings and monday_context survive.
+    # A MISSING file is a legitimate fresh start ({}). A file that EXISTS but
+    # won't parse is corruption (e.g. a prior crash mid-write): overwriting it
+    # here would silently drop wheel_holdings — real capital-at-risk positions —
+    # which IBKR can't reconstruct as lots. So we make a forensic copy and SKIP
+    # the write rather than clobber. We deliberately do NOT rename state.json:
+    # it's a symlink into the durable /data volume, and moving it would break the
+    # link for every other process. The CSP orders are already placed at IBKR and
+    # Saturday's detection re-adopts holdings from the broker, so the only loss is
+    # this run's execution record — recoverable, unlike wheel_holdings.
     try:
         with open("state.json") as f:
             existing = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         existing = {}
+    except json.JSONDecodeError as e:
+        real = os.path.realpath("state.json")
+        backup = f"{real}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.copy2(real, backup)   # copy the real file; leave the symlink intact
+        except OSError:
+            backup = "(forensic copy failed)"
+        log.error(f"❌ state.json is corrupt ({e}); copied to {backup} and SKIPPING "
+                  f"the results write to avoid clobbering wheel_holdings. CSP orders "
+                  f"were placed; reconcile via Saturday detection, then repair state.json.")
+        return results
+    # Consolidate a same-week re-run: union this run's results with the fills
+    # already opened earlier this week so the dashboard week view + filled_count +
+    # total_premium + the Discord trades section reflect the whole week, not just
+    # the last run. Dry runs keep the plain overwrite (no week to consolidate).
+    execs, positions_out, fcount, tprem = (
+        _merge_week_executions(existing, results, all_sized) if not dry_run
+        else (results, all_sized, filled_count, total_premium)
+    )
     existing.update({
         "run_date":      datetime.now().isoformat(),
-        "positions":     all_sized,   # includes any fallback candidates that were attempted
-        "executions":    results,
-        "filled_count":  filled_count,
-        "total_premium": total_premium
+        "positions":     positions_out,   # includes any fallback candidates that were attempted
+        "executions":    execs,
+        "filled_count":  fcount,
+        "total_premium": tprem
     })
     with open("state.json", "w") as f:
         json.dump(existing, f, indent=2)

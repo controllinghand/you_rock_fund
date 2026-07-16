@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
-import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw } from 'lucide-react'
+import { Activity, BookOpen, MessageSquare, CheckCircle, AlertTriangle, XCircle, RefreshCw, ExternalLink, Send, SlidersHorizontal, ChevronDown, RotateCcw, Monitor, Heart } from 'lucide-react'
 
 const FAQ_URL = 'https://github.com/controllinghand/you_rock_fund/blob/main/FAQ.md'
 
@@ -185,6 +185,71 @@ function SettingsGroup({ group }) {
   )
 }
 
+function WordsOfEncouragement() {
+  const [verse, setVerse] = useState(null)
+  const [enabled, setEnabled] = useState(null)  // null = not yet known
+
+  useEffect(() => {
+    let alive = true
+    axios.get('/api/settings')
+      .then(res => { if (alive) setEnabled(res.data?.show_verse_of_the_day !== false) })
+      .catch(() => { if (alive) setEnabled(true) })  // default on
+    return () => { alive = false }
+  }, [])
+
+  useEffect(() => {
+    if (enabled !== true) return
+    let alive = true
+    axios.get('/api/verse-of-the-day')
+      .then(res => { if (alive) setVerse(res.data) })
+      .catch(() => { /* endpoint always returns a fallback; ignore */ })
+    return () => { alive = false }
+  }, [enabled])
+
+  // Hidden by the setting, or not yet resolved — render nothing (avoids a flash).
+  if (enabled !== true) return null
+
+  return (
+    <div className="bg-gradient-to-br from-rose-50 to-indigo-50 dark:from-rose-950/30 dark:to-indigo-950/30 border border-rose-200 dark:border-rose-900/50 rounded-xl p-5 space-y-3">
+      <div className="text-gray-900 dark:text-white font-semibold text-sm flex items-center gap-2">
+        <Heart size={15} className="text-rose-500" />
+        Words of Encouragement
+      </div>
+      {verse ? (
+        <figure className="space-y-2">
+          <blockquote className="text-gray-700 dark:text-gray-200 text-base leading-relaxed italic">
+            &ldquo;{verse.text}&rdquo;
+          </blockquote>
+          {verse.reference && (
+            <figcaption className="text-sm font-medium text-rose-600 dark:text-rose-400">
+              —{' '}
+              {verse.source_url ? (
+                <a
+                  href={verse.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Verify at Blue Letter Bible"
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  {verse.reference}
+                  <ExternalLink size={11} className="opacity-70" />
+                </a>
+              ) : (
+                verse.reference
+              )}
+            </figcaption>
+          )}
+        </figure>
+      ) : (
+        <div className="text-sm text-gray-400 dark:text-gray-500 italic">Loading today's verse…</div>
+      )}
+      <div className="text-[11px] text-gray-400 dark:text-gray-600 pt-1">
+        World English Bible (public domain)
+      </div>
+    </div>
+  )
+}
+
 export default function Help() {
   const [running, setRunning]     = useState(false)
   const [results, setResults]     = useState(null)
@@ -194,6 +259,52 @@ export default function Help() {
   const [fbMessage, setFbMessage] = useState('')
   const [fbSending, setFbSending] = useState(false)
   const [fbResult, setFbResult]   = useState(null)  // {ok, text}
+
+  const [gwRestarting, setGwRestarting] = useState(false)
+  const [gwRestartMsg, setGwRestartMsg] = useState(null)  // {ok, text}
+
+  const [viewStarting, setViewStarting] = useState(false)
+  const [viewMsg, setViewMsg]           = useState(null)  // {ok, text}
+
+  const openViewGateway = async () => {
+    setViewStarting(true)
+    setViewMsg(null)
+    // Open the tab synchronously within the click gesture so popup blockers don't
+    // eat it; we redirect it once the viewer is up, or close it on failure.
+    const tab = window.open('', '_blank')
+    try {
+      const res  = await axios.post('/api/view-gateway/start')
+      const port = res.data.port ?? '6080'
+      const url  = `${window.location.protocol}//${window.location.hostname}:${port}`
+      if (tab) tab.location = url
+      else window.open(url, '_blank', 'noopener')
+      setViewMsg({ ok: true, text: res.data.message })
+    } catch (err) {
+      if (tab) tab.close()
+      setViewMsg({ ok: false, text: err.response?.data?.detail ?? err.message ?? 'Could not start View Gateway' })
+    } finally {
+      setViewStarting(false)
+    }
+  }
+
+  const restartGateway = async () => {
+    if (!window.confirm(
+      'Restart the IB Gateway?\n\n' +
+      'This recovers a wedged gateway (port open but API not responding) by ' +
+      're-running login. On a LIVE account you must approve an IB Key 2FA push ' +
+      'on your phone. Paper logs in automatically. Takes ~1–2 minutes.'
+    )) return
+    setGwRestarting(true)
+    setGwRestartMsg(null)
+    try {
+      const res = await axios.post('/api/gateway/restart')
+      setGwRestartMsg({ ok: true, text: res.data.message })
+    } catch (err) {
+      setGwRestartMsg({ ok: false, text: err.response?.data?.detail ?? err.message ?? 'Restart failed' })
+    } finally {
+      setGwRestarting(false)
+    }
+  }
 
   const submitFeedback = async () => {
     if (!fbMessage.trim()) return
@@ -231,22 +342,73 @@ export default function Help() {
         <div className="text-gray-500 text-sm">Diagnostics, documentation, and support</div>
       </div>
 
+      {/* ── Words of Encouragement ──────────────────────────── */}
+      <WordsOfEncouragement />
+
       {/* ── System Diagnostics ──────────────────────────────── */}
       <Section icon={Activity} title="System Diagnostics">
         <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
           Checks scheduler health, IB Gateway connectivity, last run times, market status,
           and live SPY market data (stock price + options bid/ask/delta).
-          No trades are placed — read-only. Takes ~10 seconds when the gateway is running.
+          No trades are placed — read-only. Takes ~10–40 seconds when the gateway is running
+          (it waits for the delayed options feed to populate, like the trader does).
+          <span className="block mt-1"><strong>View Gateway</strong> opens a browser window
+          showing the live IB Gateway screen (view-only) so you can see a login, 2FA prompt,
+          or error dialog directly.</span>
         </div>
 
-        <button
-          onClick={runDiag}
-          disabled={running}
-          className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-wait text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          <RefreshCw size={13} className={running ? 'animate-spin' : ''} />
-          {running ? 'Running…' : results ? 'Run Again' : 'Run Diagnostics'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={runDiag}
+            disabled={running}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 disabled:cursor-wait text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <RefreshCw size={13} className={running ? 'animate-spin' : ''} />
+            {running ? 'Running…' : results ? 'Run Again' : 'Run Diagnostics'}
+          </button>
+
+          <button
+            onClick={restartGateway}
+            disabled={gwRestarting}
+            title="Recover a wedged gateway by restarting it (re-runs login; live needs IB Key 2FA)"
+            className="flex items-center gap-2 px-4 py-2 border border-amber-600 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 disabled:opacity-60 disabled:cursor-wait text-sm font-medium rounded-lg transition-colors"
+          >
+            <RotateCcw size={13} className={gwRestarting ? 'animate-spin' : ''} />
+            {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
+          </button>
+
+          <button
+            onClick={openViewGateway}
+            disabled={viewStarting}
+            title="Open a browser window showing the live IB Gateway screen (view-only)"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-60 disabled:cursor-wait text-sm font-medium rounded-lg transition-colors"
+          >
+            <Monitor size={13} className={viewStarting ? 'animate-pulse' : ''} />
+            {viewStarting ? 'Starting…' : 'View Gateway'}
+          </button>
+        </div>
+
+        {gwRestartMsg && (
+          <div className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border ${
+            gwRestartMsg.ok
+              ? 'bg-amber-50 border-amber-300 text-amber-700 dark:bg-amber-900/30 dark:border-amber-800 dark:text-amber-400'
+              : 'bg-red-900/30 border-red-800 text-red-400'
+          }`}>
+            <RotateCcw size={14} className="shrink-0" />
+            {gwRestartMsg.text}
+          </div>
+        )}
+
+        {viewMsg && (
+          <div className={`flex items-center gap-2 px-3 py-2 text-sm rounded-lg border ${
+            viewMsg.ok
+              ? 'bg-blue-50 border-blue-300 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-400'
+              : 'bg-red-900/30 border-red-800 text-red-400'
+          }`}>
+            <Monitor size={14} className="shrink-0" />
+            {viewMsg.text}
+          </div>
+        )}
 
         {error && (
           <div className="flex items-center gap-2 px-3 py-2 bg-red-900/30 border border-red-800 text-red-400 text-sm rounded-lg">
@@ -306,12 +468,6 @@ export default function Help() {
         <div className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
           Describe what happened or what you'd like to see — this goes straight to the
           YRVI team on Discord. No account needed.
-        </div>
-        <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
-          First time? Get the feedback webhook URL from the{' '}
-          <span className="font-mono text-blue-500 dark:text-blue-400">#yrvi_secrets</span>{' '}
-          channel in the You Rock Club Discord and add it in{' '}
-          <a href="/secrets" className="underline hover:text-blue-500">Secrets</a>.
         </div>
 
         <div className="space-y-3">

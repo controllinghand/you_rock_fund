@@ -25,7 +25,7 @@ except (ValueError, ImportError):
     pass
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -53,7 +53,6 @@ LIVE_REQUIRED_SECRETS = {
 
 PST = ZoneInfo("America/Los_Angeles")
 ET  = ZoneInfo("America/New_York")
-ANNUAL_TARGET = 100_000
 CONTAINERIZED = os.environ.get("YRVI_CONTAINERIZED", "0") == "1"
 HEARTBEAT_FILE = BASE_DIR / "scheduler_heartbeat.json"
 GATEWAY_STATUS_FILE = (
@@ -69,9 +68,33 @@ WEEKLY_TOKEN_FILE = (
     Path("/data/weekly_token_established") if CONTAINERIZED
     else BASE_DIR / "weekly_token_established"
 )
+# In-app alert feed (v4): every alert that goes to Discord is also persisted here so
+# the dashboard has a first-class, standalone record — no dependency on Discord being
+# configured or reachable. File-backed (not in-memory) because the api container
+# restarts on trading-mode switches and upgrades, exactly when the history matters.
+# Capped ring buffer; each box keeps its OWN feed (no cross-box aggregation by design).
+ALERTS_FILE = (
+    Path("/data/alerts.json") if CONTAINERIZED
+    else BASE_DIR / "alerts.json"
+)
+# "Pause Trading" marker (System Control, option A). When present, the operator has
+# intentionally stopped the IB Gateway + scheduler from the dashboard — so the
+# watchdog must NOT try to restart the gateway or page about the gateway/scheduler
+# being down (that's the expected paused state, not an outage). File-backed so it
+# survives an api restart. Cleared by "Resume Trading" and by a full Restart All.
+TRADING_PAUSED_FILE = (
+    Path("/data/trading_paused") if CONTAINERIZED
+    else BASE_DIR / "trading_paused"
+)
+
+def _trading_paused() -> bool:
+    return TRADING_PAUSED_FILE.exists()
+ALERTS_MAX = 200
+_alerts_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
-# Feedback webhook — configure via discord_feedback_webhook_url secret in the secrets container
-_FEEDBACK_WEBHOOK_DEFAULT = ""
+# Feedback webhook — defaults to the shared You Rock Club feedback channel so every
+# box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
+_FEEDBACK_WEBHOOK_DEFAULT = "https://discord.com/api/webhooks/1506828497757147167/364xR_1wKCz1LPREGwqpE9mmvQkwkC-EiSirRqWua69eCs-rma5Hc4j7RGIwqBas0jyE"
 # clientId 100-999 used at runtime (random per call) — never conflicts with trader(1) wheel(2) risk(3)
 
 # ── Watchdog ───────────────────────────────────────────────────
@@ -84,6 +107,10 @@ _watchdog_state: dict = {
     "last_gateway_alert":   None,
     "last_ibkr_alert":      None,
     "last_scheduler_alert": None,
+    "ibkr_soft_restart_at": None,   # when we fired an auto soft restart this outage
+    "gateway_full_restart_at": None,  # one-shot full restart this gateway-port-down episode
+    "ibkr_full_restart_at":    None,  # one-shot full restart this handshake-dead episode
+    "last_full_restart_at":    None,  # cross-episode cooldown (lockout guard)
 }
 _gateway_login_status: str = "unknown"
 _gateway_last_event:   str = ""
@@ -91,6 +118,28 @@ _gateway_recent_lines: list = []   # rolling buffer of relevant log lines
 
 WATCHDOG_INTERVAL = 300   # seconds between checks
 ALERT_THRESHOLD   = 600   # seconds a failure must persist before we alert
+SOFT_RESTART_GRACE = 240  # seconds to let an auto soft restart recover before paging
+FULL_RESTART_GRACE = 360  # seconds to let an auto full restart recover before paging
+                          # (longer than soft: a full restart re-runs login, and on
+                          #  LIVE it waits on the human approving the IB Key 2FA push)
+FULL_RESTART_COOLDOWN = 1800  # min seconds between auto full restarts of the gateway.
+                              # Lockout guard: combined with the one-shot-per-episode
+                              # cap, the watchdog can never loop fresh logins into an
+                              # IBKR account lockout.
+
+# Ports that mean a LIVE IBKR session (vs paper: 4002/4004). A full restart forces a
+# fresh login, which on live triggers an IB Key 2FA push the human must approve.
+_LIVE_IBKR_PORTS = (4001, 4003)
+
+# Operator-facing recovery hint appended to gateway pages. The dashboard button
+# works for a non-technical operator on any OS (one click → POST /api/gateway/restart,
+# which the api container runs via docker.sock). The docker command stays as a
+# fallback for advanced users or when the dashboard itself is unreachable.
+_MANUAL_RESTART_HINT = (
+    "🔧 **Fix:** open the dashboard → **Help** → **Restart Gateway** (one click; "
+    "live re-login needs the IB Key 2FA push). VNC also available on host port 5900.\n"
+    "🔴 Advanced/fallback: `docker compose --env-file .env.compose restart ib_gateway`"
+)
 
 # Auto-restart suppression: read the gateway's configured restart time and
 # suppress gateway/IBKR alerts for this many seconds after it fires.
@@ -206,6 +255,7 @@ def _backfill_trade_log() -> None:
 
         strike      = pos.get("strike")
         delta       = pos.get("delta")
+        iv          = pos.get("iv_atm")
         stock_price = pos.get("latest_price")
         contracts   = pos.get("contracts")
         premium_col = ex.get("premium_collected")
@@ -217,6 +267,7 @@ def _backfill_trade_log() -> None:
             "right":                "P",
             "entry_date":           ex.get("timestamp"),
             "delta_at_entry":       round(delta, 4) if delta is not None else None,
+            "iv_at_entry":          round(iv, 4) if iv is not None else None,
             "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2)
                                     if stock_price and strike else None,
             "premium_per_contract": fill_price,
@@ -288,6 +339,99 @@ def _restart_ibgateway() -> None:
     )
 
 
+# Port the IBC command server listens on inside the gateway container (enabled on
+# loopback by the gateway entrypoint). Sending "RESTART" to it triggers the same
+# soft restart as the nightly AutoRestartTime: the gateway relaunches reusing its
+# authenticated session token, so there is NO re-login and NO 2FA. That's what lets
+# the watchdog self-heal a wedged API listener (port open, handshake dead) without
+# paging a human or risking a 2FA lockout on the live account — unlike a full
+# `docker restart`, which forces a fresh login.
+IBC_COMMAND_PORT = int(os.environ.get("IBC_COMMAND_PORT", "7462"))
+
+
+def _get_gateway_tws_version():
+    """Read the gateway's TWS/Gateway build version (e.g. '10.48.1b') from the
+    ib_gateway container's env (TWS_MAJOR_VRSN) via docker inspect.
+
+    The IBKR API only exposes the protocol serverVersion, not the Gateway build,
+    so we read it from the container image's env. Using `docker inspect` rather
+    than `docker exec` means it works even when the container is stopped — which
+    is exactly when a version skew (exit-4) would have you wanting to see it.
+    Best-effort: returns None if docker is unavailable or the var isn't set.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f",
+             "{{range .Config.Env}}{{println .}}{{end}}", "ib_gateway"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("TWS_MAJOR_VRSN="):
+                return line.split("=", 1)[1].strip() or None
+    except Exception as e:
+        print(f"[api/diag] could not read gateway TWS version: {e}")
+    return None
+
+
+def _soft_restart_ibgateway() -> bool:
+    """Ask IBC for an on-demand soft restart via its command server.
+
+    Returns True only if the command server accepted the RESTART (replies
+    'OK Restarting at ...'). Returns False if the command server is unreachable
+    (e.g. an older gateway image without it enabled), so the caller can fall back
+    to paging a human.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "ib_gateway", "sh", "-c",
+             f"printf 'RESTART\\n' | socat -T5 - "
+             f"TCP:127.0.0.1:{IBC_COMMAND_PORT},connect-timeout=5"],
+            capture_output=True, text=True, timeout=20,
+        )
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+        accepted = "Restarting" in out
+        print(f"[api/watchdog] IBC soft restart → {out!r} (accepted={accepted})")
+        return accepted
+    except Exception as e:
+        print(f"[api/watchdog] IBC soft restart failed: {e}")
+        return False
+
+
+def _full_restart_ibgateway() -> bool:
+    """Full restart of the gateway container — re-runs IBC's login from scratch.
+
+    Unlike the soft restart (which reuses the authenticated session token), this
+    forces a FRESH login by relaunching the container, which is the only thing that
+    clears IBKR's routine "security tokens … have expired … please manually enter
+    your username and password" dialog. That dialog leaves the API port refused and
+    the gateway LOGGED_OUT; the dead session token can't be reused, so a soft restart
+    just relaunches into the same dialog. A fresh login completes automatically on
+    PAPER (no 2FA) and waits on an IB Key 2FA approval on LIVE.
+
+    Scope is the gateway container only — never the whole stack — because the watchdog
+    runs inside the api container and must stay alive to confirm recovery or escalate.
+    Returns True if docker accepted the restart.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "restart", "ib_gateway"],
+            capture_output=True, text=True, timeout=90,
+        )
+        ok = result.returncode == 0
+        print(f"[api/watchdog] full gateway restart → rc={result.returncode} "
+              f"{(result.stderr or '').strip()!r} (ok={ok})")
+        return ok
+    except Exception as e:
+        print(f"[api/watchdog] full gateway restart failed: {e}")
+        return False
+
+
+def _full_restart_in_cooldown(now: datetime) -> bool:
+    """True if a full restart fired too recently (cross-episode lockout guard)."""
+    last = _watchdog_state.get("last_full_restart_at")
+    return last is not None and (now - last).total_seconds() < FULL_RESTART_COOLDOWN
+
+
 def _restart_scheduler() -> None:
     # Plain restart re-runs the shared entrypoint, which re-reads the durable
     # /data/gw_trading_mode file and re-derives IBKR_PORT. Mirrors the gateway:
@@ -298,10 +442,81 @@ def _restart_scheduler() -> None:
         capture_output=True, text=True, timeout=60,
     )
 
+
+def _restart_api_self() -> None:
+    # The api process reads IBKR_PORT/TRADING_MODE once at import (config.py),
+    # so a trading-mode switch only takes effect after the api restarts and the
+    # shared entrypoint re-derives them from /data/gw_trading_mode. The api can't
+    # restart itself synchronously (the docker restart kills this process before
+    # the HTTP response is sent), so this runs as a BackgroundTask: a brief sleep
+    # lets the response flush to the client, then we ask the daemon to restart us.
+    # Once the daemon receives the request it tears down and recreates the
+    # container independently, even though this process dies mid-call.
+    import time
+    time.sleep(1.5)
+    subprocess.run(
+        ["docker", "restart", "yrvi-api-1"],
+        capture_output=True, text=True, timeout=60,
+    )
+
 # ── Watchdog helpers ───────────────────────────────────────────
 
+def _alert_severity(message: str) -> str:
+    """Derive a severity from the leading emoji every alert already carries.
+
+    Keeps the in-app feed colour/priority in sync with the Discord convention
+    without threading a separate severity arg through all ~24 call sites.
+    """
+    msg = message.lstrip()
+    if msg.startswith("✅"):
+        return "resolved"
+    if msg[:1] in ("🚨", "❌", "🔒"):
+        return "critical"
+    if msg[:1] in ("🔄", "⚠"):
+        return "warning"
+    return "info"
+
+
+def _record_alert(message: str) -> None:
+    """Append an alert to the persisted in-app feed (capped ring buffer).
+
+    Thread-safe: called from the watchdog background thread and (via
+    _send_discord_alert) from request handlers. Best-effort — a feed write must
+    never break the alert path, so all errors are swallowed with a log line.
+    """
+    try:
+        with _alerts_lock:
+            alerts: list = []
+            if ALERTS_FILE.exists():
+                try:
+                    alerts = json.loads(ALERTS_FILE.read_text())
+                except Exception:
+                    alerts = []
+            next_id = (alerts[-1].get("id", 0) + 1) if alerts else 1
+            alerts.append({
+                "id":       next_id,
+                "ts":       datetime.now(PST).isoformat(),
+                "severity": _alert_severity(message),
+                "message":  message,
+            })
+            if len(alerts) > ALERTS_MAX:
+                alerts = alerts[-ALERTS_MAX:]
+            # Atomic write so a concurrent reader never sees a half-written file.
+            tmp = ALERTS_FILE.with_name(ALERTS_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(alerts))
+            tmp.replace(ALERTS_FILE)
+    except Exception as e:
+        print(f"[api/alerts] failed to record alert: {e}")
+
+
 def _send_discord_alert(message: str) -> None:
-    """Post a plain-text message to the main Discord webhook. No-ops if not configured."""
+    """Post an alert to the in-app feed AND the main Discord webhook.
+
+    The in-app record happens first and unconditionally, so the dashboard feed
+    works even when Discord isn't configured or is unreachable. The Discord post
+    no-ops if no webhook is set.
+    """
+    _record_alert(message)
     try:
         webhook_url = _read_secret_or_env("discord_webhook_url", "DISCORD_WEBHOOK_URL")
         if not webhook_url:
@@ -323,65 +538,151 @@ def _watchdog_check() -> None:
 
     # ── IB Gateway port reachability ─────────────────────────────
     gw_up = _gateway_running(port)
+
+    # ── Trading intentionally paused (System Control → Pause Trading) ──
+    # The gateway + scheduler are down on purpose. Do NOT auto-restart or page —
+    # that would fight the operator and spam Discord. Reset the down-timers so
+    # resuming later doesn't fire a bogus "recovered after N min" message.
+    # Self-correcting: if the gateway is actually UP, the marker is stale (e.g. a
+    # Restart All or a cold start brought everything back) — clear it and resume
+    # normal supervision rather than staying silent forever.
+    if _trading_paused():
+        if not gw_up:
+            for k in ("gateway_down_since", "last_gateway_alert", "gateway_full_restart_at",
+                      "ibkr_down_since", "last_ibkr_alert", "ibkr_soft_restart_at",
+                      "ibkr_full_restart_at", "scheduler_down_since", "last_scheduler_alert"):
+                _watchdog_state[k] = None
+            return
+        try:
+            TRADING_PAUSED_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
     if not gw_up:
         if _watchdog_state["gateway_down_since"] is None:
             _watchdog_state["gateway_down_since"] = now
-        down_sec = (now - _watchdog_state["gateway_down_since"]).total_seconds()
+        down_sec  = (now - _watchdog_state["gateway_down_since"]).total_seconds()
+        host      = os.environ.get("IBKR_HOST", "ib_gateway")
+        is_live   = port in _LIVE_IBKR_PORTS
+        mins      = int(down_sec / 60)
+        full_at   = _watchdog_state["gateway_full_restart_at"]
+
+        # A refused API port with the gateway LOGGED_OUT is the signature of IBKR's
+        # routine token-expiry dialog ("security tokens … have expired … manually
+        # enter your username and password"). The soft restart can't clear it (the
+        # session token is dead); only a FULL restart re-runs login. So self-heal
+        # with one full restart, then page if it doesn't take. But some port-down
+        # causes must NEVER auto-restart:
+        #   • exit 4   → image/version mismatch, needs a Reset Installation
+        #   • locked   → account locked; restarting risks a deeper lockout
+        #   • failed   → wrong password; restarting just loops failed logins → lockout
+        #   • in the auto-restart window → gateway is already cycling on its own
+        docker_st = _get_docker_container_state()
+        c_exit    = docker_st["exit_code"]
+        login_st  = _gateway_login_status
+        no_restart = (c_exit == 4 or login_st in ("locked", "failed")
+                      or _in_auto_restart_window(now))
+
         if (down_sec >= ALERT_THRESHOLD
-                and _watchdog_state["last_gateway_alert"] is None):
-            _watchdog_state["last_gateway_alert"] = now
-            host = os.environ.get("IBKR_HOST", "ib_gateway")
-            # Check container state for a more specific alert message
-            docker_st  = _get_docker_container_state()
-            c_state    = docker_st["state"]
-            c_exit     = docker_st["exit_code"]
-            login_st   = _gateway_login_status
-            if c_exit == 4:
-                _send_discord_alert(
-                    f"🚨 **YRVI** IB Gateway version mismatch — installed Gateway version not found "
-                    f"(exit code 4). The Docker image updated to a newer Gateway version.\n"
-                    f"🔧 **Fix:** Open the dashboard → Help → Run Diagnostics → click **Reset Installation**. "
-                    f"No CLI needed."
-                )
-            elif login_st == "locked":
-                _send_discord_alert(
-                    f"🔒 **YRVI** IB Gateway account locked out — too many failed login attempts. "
-                    f"Reset your IBKR password in Client Portal, then restart the gateway.\n"
-                    f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
-                )
-            elif login_st == "failed":
-                _send_discord_alert(
-                    f"❌ **YRVI** IB Gateway login failed — wrong IBKR username or password. "
-                    f"Update credentials in the dashboard Settings page, then restart the gateway.\n"
-                    f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
-                )
-            elif _in_auto_restart_window(now):
-                _send_discord_alert(
-                    f"🚨 **YRVI** IB Gateway API port unreachable for {int(down_sec / 60)} min "
-                    f"(`{host}:{port}`). This is likely the scheduled daily restart — "
-                    f"a ✅ recovery message will follow once it's back up. "
-                    f"If it doesn't recover, VNC is available on host port 5900.\n"
-                    f"🔴 Manual restart: "
-                    f"`docker compose --env-file .env.compose restart ib_gateway`"
-                )
+                and _watchdog_state["last_gateway_alert"] is None
+                and full_at is None):
+            if not no_restart:
+                # Restartable cause: fire ONE full restart this episode, gated by the
+                # cross-episode cooldown (lockout guard). Don't set last_gateway_alert
+                # yet — leave the escalation path open in case it doesn't recover.
+                if _full_restart_in_cooldown(now):
+                    _watchdog_state["last_gateway_alert"] = now
+                    _send_discord_alert(
+                        f"🚨 **YRVI** IB Gateway API port unreachable for {mins} min "
+                        f"(`{host}:{port}`) and not logged in. Auto full-restart "
+                        f"suppressed — one fired < {FULL_RESTART_COOLDOWN // 60} min ago "
+                        f"(lockout guard).\n{_MANUAL_RESTART_HINT}"
+                    )
+                elif _full_restart_ibgateway():
+                    _watchdog_state["gateway_full_restart_at"] = now
+                    _watchdog_state["last_full_restart_at"]    = now
+                    if is_live:
+                        _send_discord_alert(
+                            f"🔄 **YRVI** LIVE IB Gateway unreachable for {mins} min "
+                            f"(`{host}:{port}`) — likely IBKR's routine token-expiry "
+                            f"dialog. Auto-recovery: sent a full gateway restart to "
+                            f"re-run login. ⚠️ **LIVE re-login needs IB Key 2FA — check "
+                            f"your phone and approve.** Confirming recovery or escalating "
+                            f"in ~{FULL_RESTART_GRACE // 60} min…"
+                        )
+                    else:
+                        _send_discord_alert(
+                            f"🔄 **YRVI** IB Gateway unreachable for {mins} min "
+                            f"(`{host}:{port}`) — likely IBKR's routine token-expiry "
+                            f"dialog. Auto-recovery: sent a full gateway restart to "
+                            f"re-run login (paper logs in automatically — no 2FA). "
+                            f"Confirming recovery or escalating in ~{FULL_RESTART_GRACE // 60} min…"
+                        )
+                else:
+                    _watchdog_state["last_gateway_alert"] = now
+                    _send_discord_alert(
+                        f"🚨 **YRVI** IB Gateway API port unreachable for {mins} min "
+                        f"(`{host}:{port}`) and not logged in. Auto full-restart could "
+                        f"not be sent (docker error).\n{_MANUAL_RESTART_HINT}"
+                    )
             else:
-                _send_discord_alert(
-                    f"🚨 **YRVI** IB Gateway API port unreachable for {int(down_sec / 60)} min "
-                    f"(`{host}:{port}`). Gateway may not have logged in or is stuck on a dialog. "
-                    f"VNC available on host port 5900.\n"
-                    f"🔴 Manual restart required: "
-                    f"`docker compose --env-file .env.compose restart ib_gateway`"
-                )
+                # Non-restartable cause → targeted page, no auto-restart.
+                _watchdog_state["last_gateway_alert"] = now
+                if c_exit == 4:
+                    _send_discord_alert(
+                        f"🚨 **YRVI** IB Gateway version mismatch — installed Gateway version not found "
+                        f"(exit code 4). The Docker image updated to a newer Gateway version.\n"
+                        f"🔧 **Fix:** Open the dashboard → Help → Run Diagnostics → click **Reset Installation**. "
+                        f"No CLI needed."
+                    )
+                elif login_st == "locked":
+                    _send_discord_alert(
+                        f"🔒 **YRVI** IB Gateway account locked out — too many failed login attempts. "
+                        f"Reset your IBKR password in Client Portal, then restart the gateway.\n"
+                        f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
+                    )
+                elif login_st == "failed":
+                    _send_discord_alert(
+                        f"❌ **YRVI** IB Gateway login failed — wrong IBKR username or password. "
+                        f"Update credentials in the dashboard Settings page, then restart the gateway.\n"
+                        f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
+                    )
+                else:  # auto-restart window
+                    _send_discord_alert(
+                        f"🚨 **YRVI** IB Gateway API port unreachable for {mins} min "
+                        f"(`{host}:{port}`). This is likely the scheduled daily restart — "
+                        f"a ✅ recovery message will follow once it's back up. "
+                        f"If it doesn't recover, VNC is available on host port 5900.\n"
+                        f"🔴 Manual restart: "
+                        f"`docker compose --env-file .env.compose restart ib_gateway`"
+                    )
+        elif (full_at is not None
+                and _watchdog_state["last_gateway_alert"] is None
+                and (now - full_at).total_seconds() >= FULL_RESTART_GRACE):
+            # Full restart fired but the gateway is still down past the grace window.
+            _watchdog_state["last_gateway_alert"] = now
+            twofa = (" — did you approve the IB Key 2FA push on your phone?"
+                     if is_live else "")
+            _send_discord_alert(
+                f"🚨 **YRVI** IB Gateway still unreachable {mins} min in — the auto "
+                f"full-restart did not recover it{twofa}. Manual intervention needed.\n"
+                f"{_MANUAL_RESTART_HINT}"
+            )
     else:
         if (_watchdog_state["gateway_down_since"] is not None
-                and _watchdog_state["last_gateway_alert"] is not None):
+                and (_watchdog_state["last_gateway_alert"] is not None
+                     or _watchdog_state["gateway_full_restart_at"] is not None)):
             down_sec = (now - _watchdog_state["gateway_down_since"]).total_seconds()
+            # Healed by the auto full-restart = we fired one and never had to page.
+            healed = (_watchdog_state["gateway_full_restart_at"] is not None
+                      and _watchdog_state["last_gateway_alert"] is None)
             _send_discord_alert(
                 f"✅ **YRVI** IB Gateway port is reachable again "
-                f"(was down {int(down_sec / 60)} min)."
+                f"(was down {int(down_sec / 60)} min"
+                f"{' — auto full-restart recovered it' if healed else ''})."
             )
-        _watchdog_state["gateway_down_since"] = None
-        _watchdog_state["last_gateway_alert"] = None
+        _watchdog_state["gateway_down_since"]      = None
+        _watchdog_state["last_gateway_alert"]      = None
+        _watchdog_state["gateway_full_restart_at"] = None
 
     # ── IBKR API connection (only when gateway port is up) ────────
     # Port open but ib_insync failing → gateway logged in but API broken (Scenario 3)
@@ -392,11 +693,23 @@ def _watchdog_check() -> None:
             if _watchdog_state["ibkr_down_since"] is None:
                 _watchdog_state["ibkr_down_since"] = now
             down_sec = (now - _watchdog_state["ibkr_down_since"]).total_seconds()
-            if (down_sec >= ALERT_THRESHOLD
-                    and _watchdog_state["last_ibkr_alert"] is None):
-                _watchdog_state["last_ibkr_alert"] = now
-                err = ibkr.get("error") or "unknown error"
+            err = ibkr.get("error") or "unknown error"
+            soft_at = _watchdog_state["ibkr_soft_restart_at"]
+
+            # "Port open but handshake dead" is the wedge signature — a hung API
+            # listener that an IBC soft restart clears by relaunching the gateway
+            # process (no 2FA, no container bounce). So self-heal FIRST and only
+            # page a human if that fails. State machine, all gated on a persistent
+            # outage (>= ALERT_THRESHOLD) and firing each step once per outage:
+            #   1. in the auto-restart window → don't self-heal (gateway is already
+            #      cycling); just inform, matching the old behavior.
+            #   2. first response → send a soft restart. If the command server
+            #      accepts it, note the time and wait. If it doesn't (older image
+            #      without the command server), page a human immediately.
+            #   3. soft restart didn't recover within the grace window → escalate.
+            if down_sec >= ALERT_THRESHOLD and _watchdog_state["last_ibkr_alert"] is None:
                 if _in_auto_restart_window(now):
+                    _watchdog_state["last_ibkr_alert"] = now
                     _send_discord_alert(
                         f"🚨 **YRVI** IB Gateway port is open but IBKR API connection failed "
                         f"for {int(down_sec / 60)} min (`{err}`). "
@@ -406,29 +719,127 @@ def _watchdog_check() -> None:
                         f"🔴 Manual restart: "
                         f"`docker compose --env-file .env.compose restart ib_gateway`"
                     )
-                else:
+                elif soft_at is None:
+                    if _soft_restart_ibgateway():
+                        _watchdog_state["ibkr_soft_restart_at"] = now
+                        _send_discord_alert(
+                            f"🔄 **YRVI** IBKR API unreachable for {int(down_sec / 60)} min "
+                            f"(`{err}`). Auto-recovery: sent an IB Gateway soft restart "
+                            f"(reuses the session — no login, no 2FA). Confirming recovery "
+                            f"or escalating in ~{SOFT_RESTART_GRACE // 60} min…"
+                        )
+                    else:
+                        # The IBC command server is unreachable, so we can't soft-restart.
+                        # Don't page-and-give-up: escalate straight to a full `docker restart`
+                        # (the api container does this via docker.sock), gated by the
+                        # cross-episode cooldown lockout guard. This is exactly the wedge
+                        # the soft path was meant to clear; the full restart re-runs login.
+                        is_live = port in _LIVE_IBKR_PORTS
+                        if _full_restart_in_cooldown(now):
+                            _watchdog_state["last_ibkr_alert"] = now
+                            _send_discord_alert(
+                                f"🚨 **YRVI** IB Gateway API failing {int(down_sec / 60)} min in — "
+                                f"soft restart unavailable (command server unreachable) and a "
+                                f"full-restart escalation is suppressed (one fired < "
+                                f"{FULL_RESTART_COOLDOWN // 60} min ago — lockout guard).\n"
+                                f"{_MANUAL_RESTART_HINT}"
+                            )
+                        elif _full_restart_ibgateway():
+                            # Mark BOTH soft and full as fired so the state machine's
+                            # next pass advances to the full-restart grace-wait branch
+                            # (it dispatches on soft_at) instead of re-entering the soft
+                            # branch and paging once the cooldown kicks in.
+                            _watchdog_state["ibkr_soft_restart_at"] = now
+                            _watchdog_state["ibkr_full_restart_at"] = now
+                            _watchdog_state["last_full_restart_at"] = now
+                            twofa = ("; ⚠️ **LIVE re-login needs IB Key 2FA — check your phone**"
+                                     if is_live else " (paper — no 2FA)")
+                            _send_discord_alert(
+                                f"🔄 **YRVI** IBKR API unreachable for {int(down_sec / 60)} min "
+                                f"(`{err}`); the soft restart was unavailable (command server "
+                                f"unreachable), so escalated straight to a full gateway restart "
+                                f"that re-runs login{twofa}. Confirming recovery or escalating in "
+                                f"~{FULL_RESTART_GRACE // 60} min…"
+                            )
+                        else:
+                            _watchdog_state["last_ibkr_alert"] = now
+                            _send_discord_alert(
+                                f"🚨 **YRVI** IB Gateway port is open but IBKR API connection failed "
+                                f"for {int(down_sec / 60)} min. Error: `{err}`. Auto soft-restart "
+                                f"unavailable (command server not reachable) and the full-restart "
+                                f"escalation could not be sent (docker error).\n"
+                                f"{_MANUAL_RESTART_HINT}"
+                            )
+                elif (_watchdog_state["ibkr_full_restart_at"] is None
+                        and (now - soft_at).total_seconds() >= SOFT_RESTART_GRACE):
+                    # Soft restart (session reuse) didn't clear it within grace →
+                    # escalate to ONE full restart (re-runs login; live = 2FA),
+                    # gated by the cross-episode cooldown (lockout guard).
+                    is_live = port in _LIVE_IBKR_PORTS
+                    if _full_restart_in_cooldown(now):
+                        _watchdog_state["last_ibkr_alert"] = now
+                        _send_discord_alert(
+                            f"🚨 **YRVI** IB Gateway API still failing {int(down_sec / 60)} min in — "
+                            f"the soft restart did not recover it (`{err}`) and a full-restart "
+                            f"escalation is suppressed (one fired < {FULL_RESTART_COOLDOWN // 60} min "
+                            f"ago — lockout guard).\n{_MANUAL_RESTART_HINT}"
+                        )
+                    elif _full_restart_ibgateway():
+                        _watchdog_state["ibkr_full_restart_at"] = now
+                        _watchdog_state["last_full_restart_at"] = now
+                        twofa = ("; ⚠️ **LIVE re-login needs IB Key 2FA — check your phone**"
+                                 if is_live else " (paper — no 2FA)")
+                        _send_discord_alert(
+                            f"🔄 **YRVI** IBKR API still failing {int(down_sec / 60)} min in — the "
+                            f"soft restart didn't clear it, so escalated to a full gateway restart "
+                            f"that re-runs login{twofa}. Confirming recovery or escalating in "
+                            f"~{FULL_RESTART_GRACE // 60} min…"
+                        )
+                    else:
+                        _watchdog_state["last_ibkr_alert"] = now
+                        _send_discord_alert(
+                            f"🚨 **YRVI** IB Gateway API still failing {int(down_sec / 60)} min in — "
+                            f"the soft restart did not recover it (`{err}`) and the full-restart "
+                            f"escalation could not be sent (docker error).\n{_MANUAL_RESTART_HINT}"
+                        )
+                elif (_watchdog_state["ibkr_full_restart_at"] is not None
+                        and (now - _watchdog_state["ibkr_full_restart_at"]).total_seconds()
+                            >= FULL_RESTART_GRACE):
+                    _watchdog_state["last_ibkr_alert"] = now
+                    twofa = (" — did you approve the IB Key 2FA push on your phone?"
+                             if port in _LIVE_IBKR_PORTS else "")
                     _send_discord_alert(
-                        f"🚨 **YRVI** IB Gateway port is open but IBKR API connection failed "
-                        f"for {int(down_sec / 60)} min. Error: `{err}`. "
-                        f"Gateway may be slow to reconnect or stuck on a login dialog. "
-                        f"VNC available on host port 5900.\n"
-                        f"🔴 Manual restart required: "
-                        f"`docker compose --env-file .env.compose restart ib_gateway`"
+                        f"🚨 **YRVI** IB Gateway API still failing {int(down_sec / 60)} min in — "
+                        f"neither the soft nor the full auto-restart recovered it (`{err}`){twofa}. "
+                        f"Manual intervention needed.\n{_MANUAL_RESTART_HINT}"
                     )
         else:
             if (_watchdog_state["ibkr_down_since"] is not None
-                    and _watchdog_state["last_ibkr_alert"] is not None):
+                    and (_watchdog_state["last_ibkr_alert"] is not None
+                         or _watchdog_state["ibkr_soft_restart_at"] is not None
+                         or _watchdog_state["ibkr_full_restart_at"] is not None)):
                 down_sec = (now - _watchdog_state["ibkr_down_since"]).total_seconds()
+                # Healed by an auto-restart = we fired one (soft or full) and never paged.
+                healed = ((_watchdog_state["ibkr_soft_restart_at"] is not None
+                           or _watchdog_state["ibkr_full_restart_at"] is not None)
+                          and _watchdog_state["last_ibkr_alert"] is None)
+                which = ("full" if _watchdog_state["ibkr_full_restart_at"] is not None
+                         else "soft")
                 _send_discord_alert(
                     f"✅ **YRVI** IBKR API connection restored "
-                    f"(was failing for {int(down_sec / 60)} min)."
+                    f"(was failing for {int(down_sec / 60)} min"
+                    f"{f' — auto {which}-restart recovered it' if healed else ''})."
                 )
             _watchdog_state["ibkr_down_since"] = None
             _watchdog_state["last_ibkr_alert"] = None
+            _watchdog_state["ibkr_soft_restart_at"] = None
+            _watchdog_state["ibkr_full_restart_at"] = None
     else:
         # Gateway port is down — clear IBKR state; its episode timer resets when port returns
         _watchdog_state["ibkr_down_since"] = None
         _watchdog_state["last_ibkr_alert"] = None
+        _watchdog_state["ibkr_soft_restart_at"] = None
+        _watchdog_state["ibkr_full_restart_at"] = None
 
     # ── Scheduler heartbeat ───────────────────────────────────────
     sched_ok = _scheduler_pid() is not None
@@ -523,10 +934,18 @@ def _read_weekly_token() -> Optional[str]:
 
 
 def _set_weekly_token() -> None:
-    """Record the token as established. No-op if already set — preserves the
-    original establishment time across the week's daily auto-restarts."""
-    if _read_weekly_token():
-        return
+    """Record the token as established. Preserves a current-week timestamp
+    across the week's daily auto-restarts, but overwrites a stale (pre-reset)
+    one — otherwise a missed Sunday "autorestart file not found" line would
+    freeze the displayed date at last week's value."""
+    existing = _read_weekly_token()
+    if existing:
+        try:
+            if (datetime.fromisoformat(existing).astimezone(ET)
+                    >= _last_weekly_token_reset(datetime.now(PST))):
+                return                     # already current this week — keep original time
+        except Exception:
+            pass                           # unparseable → fall through and rewrite
     try:
         WEEKLY_TOKEN_FILE.write_text(datetime.now(PST).isoformat())
         print("[api/weekly-token] token established — timestamp recorded")
@@ -840,6 +1259,108 @@ def refresh_weekly_token():
             "message": "Gateway restarting — check your phone for the IB Key approval."}
 
 
+@app.post("/api/gateway/restart")
+def restart_gateway():
+    """Operator-triggered full restart of the ib_gateway container — the one-click
+    unwedge for the dashboard.
+
+    This does the same `docker restart ib_gateway` the Discord pages used to ask the
+    operator to run in a terminal, so a non-technical operator on any OS can recover
+    a wedged gateway (port open but API handshake dead, or port refused) without a
+    shell. A full restart re-runs IBC login: automatic on PAPER, an IB Key 2FA push
+    on LIVE (the operator must approve it on their phone).
+
+    A human deliberately clicking this is intentional, so it is NOT gated by the
+    watchdog's auto-restart cooldown — but we record it as the last full restart so
+    the watchdog's lockout guard won't immediately fire another on top of it.
+    """
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=400, detail="Only available in containerized mode")
+    settings = load_settings()
+    is_live = settings.get("ibkr_port", 4004) in _LIVE_IBKR_PORTS
+    if not _full_restart_ibgateway():
+        raise HTTPException(
+            status_code=500,
+            detail="docker restart ib_gateway failed — check the api container logs",
+        )
+    # Record the restart and clear in-flight outage flags so the watchdog evaluates
+    # the freshly-restarted gateway cleanly on its next cycle instead of double-firing.
+    now = datetime.now(PST)
+    _watchdog_state["last_full_restart_at"] = now
+    _watchdog_state["last_gateway_alert"]   = None
+    _watchdog_state["last_ibkr_alert"]      = None
+    print(f"[api/gateway-restart] operator-triggered full restart (live={is_live})")
+    msg = ("Gateway restarting — re-running login. "
+           + ("⚠️ LIVE: approve the IB Key 2FA push on your phone now. "
+              if is_live else "Paper logs in automatically (no 2FA). ")
+           + "Give it ~1–2 min, then re-run diagnostics to confirm it's back.")
+    return {"success": True, "is_live": is_live, "message": msg}
+
+
+@app.post("/api/view-gateway/start")
+def start_view_gateway():
+    """Start the opt-in View Gateway container on demand (compose 'viewer' profile).
+
+    The View Gateway is a small noVNC + websockify sidecar that bridges the IB
+    Gateway's existing x11vnc display (ib_gateway:5900) to the browser, so the
+    operator can *see* the Gateway screen — login, 2FA, an error dialog, or a
+    stuck state. It's opt-in (the 'viewer' compose profile) so it adds zero
+    footprint until this button is clicked. See docs/view-gateway.md.
+
+    Runs `docker compose ... --profile viewer up -d --no-deps view-gateway`, which
+    is idempotent — compose builds the image on first use (when it's missing) and
+    the command is a true no-op when the viewer is already running, so repeat
+    clicks won't recreate the container or drop an active viewing session.
+    `--no-deps` guarantees we never touch the running ib_gateway / secrets
+    containers. Returns the published host port so the dashboard can open the
+    viewer in a new tab.
+    """
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=400, detail="Only available in containerized mode")
+
+    compose_base = [
+        "docker", "compose",
+        "--project-directory", "/host_repo",
+        "--env-file", "/host_repo/.env.compose",
+        "--profile", "viewer",
+    ]
+    try:
+        result = subprocess.run(
+            compose_base + ["up", "-d", "--no-deps", "view-gateway"],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail="View Gateway start timed out — the first build can be slow. Wait a moment and try again.",
+        )
+    if result.returncode != 0:
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+        print(f"[api/view-gateway] start failed: {out}")
+        raise HTTPException(status_code=500, detail=f"Could not start View Gateway: {out[-400:]}")
+
+    # Resolve the actual published host port (honors a customized VIEW_GATEWAY_PORT).
+    host_port = "6080"
+    try:
+        p = subprocess.run(
+            compose_base + ["port", "view-gateway", "6080"],
+            capture_output=True, text=True, timeout=15,
+        )
+        mapped = (p.stdout or "").strip()          # e.g. "127.0.0.1:6080"
+        if ":" in mapped:
+            host_port = mapped.rsplit(":", 1)[1].strip() or host_port
+    except Exception as e:
+        print(f"[api/view-gateway] could not resolve published port, defaulting to 6080: {e}")
+
+    print(f"[api/view-gateway] started (host port {host_port})")
+    return {
+        "success": True,
+        "port": host_port,
+        "message": ("View Gateway is running — opening it now. Pick view-only (default) or "
+                    "control; the password auto-fills from the vnc_server_password secret."),
+    }
+
+
 @app.post("/api/restart-scheduler")
 def restart_scheduler():
     if CONTAINERIZED:
@@ -913,6 +1434,25 @@ class FeedbackRequest(BaseModel):
     message: str
 
 
+# Option A — "Pause Trading": stop only the trading engine (gateway +
+# scheduler). api + web + secrets stay up so the dashboard remains reachable
+# and can resume trading from the browser.
+TRADING_CONTAINERS = [
+    "ib_gateway",
+    "yrvi-scheduler-1",
+]
+
+# Option B — "Restart All": bounce every container. api is last so the HTTP
+# response returns (and the other containers finish restarting) before this
+# container restarts itself.
+RESTART_ALL_CONTAINERS = [
+    "yrvi-secrets-1",
+    "ib_gateway",
+    "yrvi-scheduler-1",
+    "yrvi-web-1",
+    "yrvi-api-1",
+]
+
 # Stop order: api is last so the HTTP response can return before this
 # container kills itself.
 SHUTDOWN_CONTAINERS = [
@@ -947,6 +1487,83 @@ def shutdown_stack(body: ShutdownRequest):
     return {"success": True, "message": "Shutdown initiated"}
 
 
+@app.post("/api/trading/stop")
+def trading_stop():
+    """Option A — Pause Trading: stop the IB Gateway + scheduler only.
+    api/web/secrets keep running so the dashboard stays reachable and can
+    resume from the browser. No confirmation token: fully reversible in-app."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    # Set the pause marker BEFORE stopping, so the watchdog never sees the
+    # gateway drop as an outage (even if it polls mid-stop).
+    try:
+        TRADING_PAUSED_FILE.write_text(datetime.now(PST).isoformat())
+    except Exception:
+        pass
+
+    stopped, failed = [], []
+    for name in TRADING_CONTAINERS:
+        try:
+            r = subprocess.run(["docker", "stop", name],
+                               capture_output=True, text=True, timeout=40)
+            (stopped if r.returncode == 0 else failed).append(name)
+        except Exception:
+            failed.append(name)
+    return {"success": not failed, "stopped": stopped, "failed": failed,
+            "message": "Trading paused — Gateway and scheduler stopped"
+                       if not failed else f"Some containers failed to stop: {failed}"}
+
+
+@app.post("/api/trading/start")
+def trading_start():
+    """Resume trading — start the IB Gateway + scheduler back up.
+    On live, the Gateway restart triggers an IB Key 2FA push."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    # Clear the pause marker so the watchdog resumes normal gateway/scheduler
+    # supervision once they're back up.
+    try:
+        TRADING_PAUSED_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    started, failed = [], []
+    for name in TRADING_CONTAINERS:
+        try:
+            r = subprocess.run(["docker", "start", name],
+                               capture_output=True, text=True, timeout=40)
+            (started if r.returncode == 0 else failed).append(name)
+        except Exception:
+            failed.append(name)
+    return {"success": not failed, "started": started, "failed": failed,
+            "message": "Trading resumed — Gateway and scheduler starting"
+                       if not failed else f"Some containers failed to start: {failed}"}
+
+
+@app.post("/api/restart-all")
+def restart_all():
+    """Option B — Restart All: bounce every container (a clean reboot without
+    a rebuild). api restarts itself last, so the response returns and the other
+    containers finish restarting first; the dashboard reconnects in ~30–60s."""
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=501, detail="Only available in Docker mode")
+
+    def do_restart():
+        time.sleep(1)  # let the HTTP response flush before we start bouncing
+        for name in RESTART_ALL_CONTAINERS:
+            try:
+                subprocess.run(["docker", "restart", name],
+                               capture_output=True, text=True, timeout=60)
+            except Exception:
+                # best-effort — keep going so api (last) still restarts
+                pass
+
+    threading.Thread(target=do_restart, daemon=True).start()
+    return {"success": True, "message": "Restart initiated"}
+
+
 _IBKR_EMPTY: dict = {
     "connected": False, "account_value": None, "buying_power": None,
     "settled_cash": None, "unrealized_pnl": None, "realized_pnl": None,
@@ -960,6 +1577,7 @@ def _get_ibkr_data(settings: dict) -> dict:
         return _ibkr_cache["data"]
 
     result      = dict(_IBKR_EMPTY)
+    prev        = _ibkr_cache.get("data")  # last snapshot; reused if this fetch blanks
     port        = settings.get("ibkr_port", 4004)
     host        = os.environ.get("IBKR_HOST", "127.0.0.1")
     account_env = settings.get("account") or os.environ.get("ACCOUNT", "")
@@ -1008,6 +1626,14 @@ def _get_ibkr_data(settings: dict) -> dict:
                     ib.sleep(0.3)
             pnl_unrl = _safe_float(acct_pnl.unrealizedPnL) if acct_pnl else None
             pnl_real = _safe_float(acct_pnl.realizedPnL)   if acct_pnl else None
+            # When reqPnL hasn't ticked this cycle, the summary tags are usually
+            # absent/0 — which blanks the Unrealized card to +$0.00. Prefer the
+            # last good cached value over that 0 so the card holds steady.
+            prev_summary = prev.get("account_summary") if prev else None
+            if pnl_unrl is None and prev_summary:
+                pnl_unrl = _safe_float(prev_summary.get("unrealized_pnl"))
+            if pnl_real is None and prev_summary:
+                pnl_real = _safe_float(prev_summary.get("realized_pnl"))
             result["unrealized_pnl"]     = (pnl_unrl if pnl_unrl is not None
                                             else _safe_float(summary_dict.get("UnrealizedPnL", 0)))
             result["realized_pnl"]       = (pnl_real if pnl_real is not None
@@ -1053,7 +1679,20 @@ def _get_ibkr_data(settings: dict) -> dict:
                                          ib.reqPnLSingle(acct, "", pos.contract.conId)))
                     except Exception as se:
                         print(f"[api] reqPnLSingle failed for {pos.contract.symbol}: {se}")
-                ib.sleep(3)  # let PnLSingle streams populate
+                # Poll up to ~8s for the PnLSingle streams to tick, breaking
+                # early once every stream has a value. A fixed 3s wait was too
+                # short on slower boxes: a fresh connection subscribing ~10
+                # streams at once frequently missed it, so every price came back
+                # NaN and the whole holdings table blanked for that 30s cache
+                # window (the "prices disappear then come back" flicker).
+                waited = 0.0
+                while waited < 8.0:
+                    ib.sleep(0.5)
+                    waited += 0.5
+                    if pnl_reqs and all(
+                        _safe_float(s.value) is not None for _, s in pnl_reqs
+                    ):
+                        break
                 for con_id, single in pnl_reqs:
                     pnl_lookup[con_id] = single
                     try:
@@ -1072,6 +1711,12 @@ def _get_ibkr_data(settings: dict) -> dict:
                     # Derive per-share price from total value: value / (position * multiplier)
                     denom    = (pos.position or 0) * mult
                     mkt_px   = round(mkt_val / denom, 4) if (mkt_val is not None and denom) else None
+                    # IBKR avgCost for options is the per-contract dollar cost (premium ×
+                    # multiplier); divide by the multiplier so Avg Price is per-share and
+                    # directly comparable to marketPrice (Price). Stocks are unaffected.
+                    avg_cost = _safe_float(pos.avgCost, 4)
+                    if is_opt and avg_cost is not None and mult:
+                        avg_cost = round(avg_cost / mult, 4)
                     portfolio.append({
                         "symbol":        c.symbol,
                         "secType":       c.secType,
@@ -1079,13 +1724,43 @@ def _get_ibkr_data(settings: dict) -> dict:
                         "strike":        _safe_float(c.strike, 4) if is_opt else None,
                         "expiry":        c.lastTradeDateOrContractMonth if is_opt else None,
                         "position":      _safe_float(pos.position, 0),
-                        "avgCost":       _safe_float(pos.avgCost, 4),
+                        "avgCost":       avg_cost,
                         "marketPrice":   mkt_px,
                         "marketValue":   mkt_val,
                         "unrealizedPNL": unrl,
                     })
                 portfolio.sort(key=lambda x: (0 if x["secType"] == "STK" else 1, x["symbol"]))
+                # Don't clobber good prices with blanks: if a PnLSingle stream
+                # still didn't tick, reuse the last cached price for that exact
+                # contract (flagged stale) instead of rendering "—". Self-heals
+                # on the next cycle that ticks.
+                if prev:
+                    def _pkey(x):
+                        return (x.get("symbol"), x.get("secType"), x.get("strike"),
+                                x.get("right"), x.get("expiry"))
+                    prev_by_key = {_pkey(p): p for p in prev.get("portfolio", [])}
+                    for item in portfolio:
+                        if item["marketPrice"] is None:
+                            old = prev_by_key.get(_pkey(item))
+                            if old and old.get("marketPrice") is not None:
+                                item["marketPrice"]   = old["marketPrice"]
+                                item["marketValue"]   = old.get("marketValue")
+                                item["unrealizedPNL"] = old.get("unrealizedPNL")
+                                item["priceStale"]    = True
                 result["portfolio"] = portfolio
+
+                # Account-level Unrealized P&L: prefer the SUM of the per-position
+                # values (which we already have and which match the holdings
+                # table) over the separate account-level reqPnL stream. reqPnL
+                # frequently hands back a PARTIAL aggregate before every position
+                # sums in — on the live box it briefly flipped the card from
+                # -$5,047 to +$22 between refreshes. Only override when every
+                # position has a value, so the card always equals the table.
+                pos_unrl = [it.get("unrealizedPNL") for it in portfolio]
+                if pos_unrl and all(v is not None for v in pos_unrl):
+                    result["unrealized_pnl"] = round(sum(pos_unrl), 2)
+                    if result.get("account_summary"):
+                        result["account_summary"]["unrealized_pnl"] = result["unrealized_pnl"]
             except Exception as pe:
                 print(f"[api] Positions fetch failed (account_summary preserved): {pe}")
 
@@ -1350,6 +2025,14 @@ def _build_diag() -> dict:
     version = version_file.read_text().strip() if version_file.exists() else "unknown"
     check("Version", "ok", f"v{version}")
 
+    # IB Gateway / TWS build version — read from the ib_gateway container env
+    # via docker inspect (the IBKR API only exposes the protocol serverVersion,
+    # not the Gateway build). Surfacing it here makes a future version skew
+    # visible at a glance instead of a mystery exit-4 crash.
+    gw_ver = _get_gateway_tws_version()
+    if gw_ver:
+        check("Gateway Version", "ok", gw_ver)
+
     # ── 7 & 8. Live market data (SPY stock + options) ──────────
     # Only runs when gateway is reachable; adds ~10s to total diag time.
     if _gateway_running(port):
@@ -1416,7 +2099,14 @@ def _build_diag() -> dict:
                 price = tkr.last or tkr.close
                 if price and not _diag_is_nan(price):
                     spy_price = price
-                    check("SPY Price", "ok", f"${price:.2f} (delayed)")
+                    # Label the feed by its actual type rather than assuming
+                    # delayed — live accounts with a real-time subscription
+                    # report marketDataType 1 and were being mislabeled.
+                    _mdt = {1: "real-time", 2: "frozen",
+                            3: "delayed", 4: "delayed (frozen)"}
+                    mdt_label = _mdt.get(getattr(tkr, "marketDataType", None), "")
+                    suffix = f" ({mdt_label})" if mdt_label else ""
+                    check("SPY Price", "ok", f"${price:.2f}{suffix}")
                 else:
                     check("SPY Price", "warn", "No price data — market may be closed")
             except Exception as e:
@@ -1430,7 +2120,16 @@ def _build_diag() -> dict:
                     try:
                         chains = ib.reqSecDefOptParams("SPY", "", "STK", stk_q[0].conId)
                         ib.sleep(1)
-                        chain = next((c for c in chains if c.exchange == "SMART"), None) or next(iter(chains), None)
+                        # reqSecDefOptParams can return several SMART entries —
+                        # including a degenerate single-strike/single-expiry
+                        # artifact. Picking the first SMART match lands the probe
+                        # on an illiquid far-dated strike with no quote, which
+                        # false-flags healthy real-time data as "no bid/ask".
+                        # Choose the richest chain (most strikes, then expiries).
+                        smart = [c for c in chains if c.exchange == "SMART"]
+                        chain = max(smart or chains,
+                                    key=lambda c: (len(c.strikes), len(c.expirations)),
+                                    default=None)
                         if chain:
                             strikes = sorted(chain.strikes)
                             fridays = sorted(e for e in chain.expirations
@@ -1465,18 +2164,35 @@ def _build_diag() -> dict:
                     raise ValueError(f"Could not qualify SPY {expiry} ${strike:.0f}P")
                 contract = qualified[0]
 
+                # The delayed options farm (usopt) takes time to wake up on a
+                # fresh connection — a flat 5s wait routinely misses quotes that
+                # are perfectly available, false-flagging healthy data as
+                # "no bid/ask". The real trader waits 60s for exactly this
+                # (see trader.py near market open). Poll up to ~30s here and
+                # stop as soon as we have a usable two-sided quote.
                 otkr = ib.reqMktData(contract, genericTickList="106", snapshot=False)
-                ib.sleep(5)
+
+                def _greek_delta(t):
+                    for g in (t.modelGreeks, t.lastGreeks, t.bidGreeks, t.askGreeks):
+                        if g is not None and not _diag_is_nan(g.delta):
+                            return g.delta
+                    return None
+
+                bid = ask = delta = None
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    ib.sleep(2)
+                    bid   = otkr.bid
+                    ask   = otkr.ask
+                    delta = _greek_delta(otkr)
+                    ask_seen = not _diag_is_nan(ask) and ask is not None and ask > 0
+                    bid_seen = not _diag_is_nan(bid) and bid is not None and bid > 0
+                    # Stop early once the feed is clearly flowing (ask plus a
+                    # bid or greeks) — matches the success test below.
+                    if ask_seen and (bid_seen or delta is not None):
+                        break
                 ib.cancelMktData(contract)
                 ib.sleep(0.5)
-
-                bid   = otkr.bid
-                ask   = otkr.ask
-                delta = None
-                for greeks in (otkr.modelGreeks, otkr.lastGreeks, otkr.bidGreeks, otkr.askGreeks):
-                    if greeks is not None and not _diag_is_nan(greeks.delta):
-                        delta = greeks.delta
-                        break
 
                 bid_ok   = not _diag_is_nan(bid)   and bid   is not None and bid   > 0
                 ask_ok   = not _diag_is_nan(ask)    and ask   is not None and ask   > 0
@@ -1524,6 +2240,223 @@ def _build_diag() -> dict:
 
 # ── Endpoints ─────────────────────────────────────────────────
 
+@app.get("/api/alerts")
+def get_alerts(limit: int = 100):
+    """Return the in-app alert feed for this box, newest first.
+
+    `latest_id` lets the client compute its own unread count against a
+    locally-stored 'last seen' id — no server-side read state, so the feed stays
+    per-browser and the api never needs to write on a plain view.
+    """
+    with _alerts_lock:
+        alerts: list = []
+        if ALERTS_FILE.exists():
+            try:
+                alerts = json.loads(ALERTS_FILE.read_text())
+            except Exception:
+                alerts = []
+    recent = alerts[-max(1, min(limit, ALERTS_MAX)):][::-1]
+    return {
+        "alerts":    recent,
+        "latest_id": alerts[-1]["id"] if alerts else 0,
+        "count":     len(alerts),
+    }
+
+
+@app.delete("/api/alerts")
+def clear_alerts():
+    """Clear the in-app alert feed (history only — does not touch Discord)."""
+    with _alerts_lock:
+        try:
+            tmp = ALERTS_FILE.with_name(ALERTS_FILE.name + ".tmp")
+            tmp.write_text(json.dumps([]))
+            tmp.replace(ALERTS_FILE)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not clear alerts: {e}")
+    return {"success": True}
+
+
+# Local, offline fallback pool (public-domain WEB/KJV text). Used only when the
+# OurManna fetch fails AND there's no cached verse to fall back to — i.e. a
+# brand-new box during a prolonged outage. Rotated by day-of-year so it still
+# changes daily instead of showing one verse forever.
+# ── Words of Encouragement ──────────────────────────────────────────────────
+# A daily Bible verse on the Help page. Fully self-contained: a hand-curated set
+# of encouraging verses (World English Bible — public domain, so no attribution
+# required) rotated by day-of-year. No external API, no cache, no credentials,
+# no network — it can't go stale, get "stuck," or fail offline. The list cycles
+# about every four months.
+_VERSES = [
+    ("Haven’t I commanded you? Be strong and courageous. Don’t be afraid, neither be dismayed: for the Lord your God is with you wherever you go.", "Joshua 1:9"),
+    ("Be strong and courageous. Don’t be afraid or scared of them; for the Lord your God himself is who goes with you. He will not fail you nor forsake you.", "Deuteronomy 31:6"),
+    ("The Lord himself is who goes before you. He will be with you. He will not fail you nor forsake you. Don’t be afraid. Don’t be discouraged.", "Deuteronomy 31:8"),
+    ("Seek the Lord and his strength. Seek his face forever more.", "1 Chronicles 16:11"),
+    ("The Lord is my shepherd: I shall lack nothing.", "Psalm 23:1"),
+    ("Even though I walk through the valley of the shadow of death, I will fear no evil, for you are with me. Your rod and your staff, they comfort me.", "Psalm 23:4"),
+    ("The Lord is my light and my salvation. Whom shall I fear? The Lord is the strength of my life. Of whom shall I be afraid?", "Psalm 27:1"),
+    ("The Lord is my strength and my shield. My heart has trusted in him, and I am helped. Therefore my heart greatly rejoices. With my song I will thank him.", "Psalm 28:7"),
+    ("The Lord will give strength to his people. The Lord will bless his people with peace.", "Psalm 29:11"),
+    ("For his anger is but for a moment. His favor is for a lifetime. Weeping may stay for the night, but joy comes in the morning.", "Psalm 30:5"),
+    ("Be strong, and let your heart take courage, all you who hope in the Lord.", "Psalm 31:24"),
+    ("I will instruct you and teach you in the way which you shall go. I will counsel you with my eye on you.", "Psalm 32:8"),
+    ("I sought the Lord, and he answered me, and delivered me from all my fears.", "Psalm 34:4"),
+    ("Oh taste and see that the Lord is good. Blessed is the man who takes refuge in him.", "Psalm 34:8"),
+    ("The righteous cry, and the Lord hears, and delivers them out of all their troubles.", "Psalm 34:17"),
+    ("The Lord is near to those who have a broken heart, and saves those who have a crushed spirit.", "Psalm 34:18"),
+    ("Also delight yourself in the Lord, and he will give you the desires of your heart.", "Psalm 37:4"),
+    ("Commit your way to the Lord. Trust also in him, and he will do this.", "Psalm 37:5"),
+    ("I waited patiently for the Lord. He turned to me, and heard my cry.", "Psalm 40:1"),
+    ("Why are you in despair, my soul? Why are you disturbed within me? Hope in God! For I shall still praise him, the saving help of my countenance, and my God.", "Psalm 42:11"),
+    ("God is our refuge and strength, a very present help in trouble.", "Psalm 46:1"),
+    ("Be still, and know that I am God. I will be exalted among the nations. I will be exalted in the earth.", "Psalm 46:10"),
+    ("Cast your burden on the Lord, and he will sustain you. He will never allow the righteous to be moved.", "Psalm 55:22"),
+    ("When I am afraid, I will put my trust in you.", "Psalm 56:3"),
+    ("My soul rests in God alone. My salvation is from him.", "Psalm 62:1"),
+    ("My flesh and my heart fails, but God is the strength of my heart and my portion forever.", "Psalm 73:26"),
+    ("He who dwells in the secret place of the Most High will rest in the shadow of the Almighty.", "Psalm 91:1"),
+    ("I will say of the Lord, He is my refuge and my fortress; my God, in whom I trust.", "Psalm 91:2"),
+    ("In the multitude of my thoughts within me, your comforts delight my soul.", "Psalm 94:19"),
+    ("Praise the Lord, my soul, and don’t forget all his benefits.", "Psalm 103:2"),
+    ("The Lord is on my side. I will not be afraid. What can man do to me?", "Psalm 118:6"),
+    ("This is the day that the Lord has made. We will rejoice and be glad in it!", "Psalm 118:24"),
+    ("Your word is a lamp to my feet, and a light for my path.", "Psalm 119:105"),
+    ("My help comes from the Lord, who made heaven and earth.", "Psalm 121:2"),
+    ("In the day that I called, you answered me. You encouraged me with strength in my soul.", "Psalm 138:3"),
+    ("I will give thanks to you, for I am fearfully and wonderfully made. Your works are wonderful. My soul knows that very well.", "Psalm 139:14"),
+    ("Cause me to hear your loving kindness in the morning, for I trust in you. Cause me to know the way in which I should walk, for I lift up my soul to you.", "Psalm 143:8"),
+    ("He heals the broken in heart, and binds up their wounds.", "Psalm 147:3"),
+    ("Trust in the Lord with all your heart, and don’t lean on your own understanding.", "Proverbs 3:5"),
+    ("In all your ways acknowledge him, and he will make your paths straight.", "Proverbs 3:6"),
+    ("The Lord’s name is a strong tower: the righteous run to him, and are safe.", "Proverbs 18:10"),
+    ("You will keep whoever’s mind is steadfast in perfect peace, because he trusts in you.", "Isaiah 26:3"),
+    ("Haven’t you known? Haven’t you heard? The everlasting God, the Lord, The Creator of the ends of the earth, doesn’t faint. He isn’t weary. His understanding is unsearchable.", "Isaiah 40:28"),
+    ("He gives power to the weak. He increases the strength of him who has no might.", "Isaiah 40:29"),
+    ("But those who wait for the Lord will renew their strength. They will mount up with wings like eagles. They will run, and not be weary. They will walk, and not faint.", "Isaiah 40:31"),
+    ("Don’t you be afraid, for I am with you. Don’t be dismayed, for I am your God. I will strengthen you. Yes, I will help you. Yes, I will uphold you with the right hand of my righteousness.", "Isaiah 41:10"),
+    ("For I, the Lord your God, will hold your right hand, saying to you, Don’t be afraid. I will help you.", "Isaiah 41:13"),
+    ("But now thus says the Lord who created you, Jacob, and he who formed you, Israel: Don’t be afraid, for I have redeemed you. I have called you by your name. You are mine.", "Isaiah 43:1"),
+    ("When you pass through the waters, I will be with you; and through the rivers, they will not overflow you. When you walk through the fire, you will not be burned, and flame will not scorch you.", "Isaiah 43:2"),
+    ("and even to old age I am he, and even to gray hairs will I carry you. I have made, and I will bear; yes, I will carry, and will deliver.", "Isaiah 46:4"),
+    ("For the mountains may depart, and the hills be removed; but my loving kindness shall not depart from you, neither shall my covenant of peace be removed, says the Lord who has mercy on you.", "Isaiah 54:10"),
+    ("For you shall go out with joy, and be led out with peace: the mountains and the hills shall break out before you into singing; and all the trees of the fields shall clap their hands.", "Isaiah 55:12"),
+    ("and the Lord will guide you continually, and satisfy your soul in dry places, and make strong your bones; and you shall be like a watered garden, and like a spring of water, whose waters don’t fail.", "Isaiah 58:11"),
+    ("For I know the thoughts that I think toward you, says the Lord, thoughts of peace, and not of evil, to give you hope and a future.", "Jeremiah 29:11"),
+    ("The Lord appeared of old to me, saying, Yes, I have loved you with an everlasting love: therefore with loving kindness have I drawn you.", "Jeremiah 31:3"),
+    ("Call to me, and I will answer you, and will show you great things, and difficult, which you don’t know.", "Jeremiah 33:3"),
+    ("Ah Lord GOD! Behold, you have made the heavens and the earth by your great power and by your outstretched arm; there is nothing too hard for you.", "Jeremiah 32:17"),
+    ("It is because of the Lord’s loving kindnesses that we are not consumed, because his compassion doesn’t fail.", "Lamentations 3:22"),
+    ("They are new every morning; great is your faithfulness.", "Lamentations 3:23"),
+    ("Don’t rejoice against me, my enemy. When I fall, I will arise. When I sit in darkness, the Lord will be a light to me.", "Micah 7:8"),
+    ("The Lord is good, a stronghold in the day of trouble; and he knows those who take refuge in him.", "Nahum 1:7"),
+    ("The Lord, your God, is in your midst, a mighty one who will save. He will rejoice over you with joy. He will calm you in his love. He will rejoice over you with singing.", "Zephaniah 3:17"),
+    ("See the birds of the sky, that they don’t sow, neither do they reap, nor gather into barns. Your heavenly Father feeds them. Aren’t you of much more value than they?", "Matthew 6:26"),
+    ("Therefore don’t be anxious for tomorrow, for tomorrow will be anxious for itself. Each day’s own evil is sufficient.", "Matthew 6:34"),
+    ("Come to me, all you who labor and are heavily burdened, and I will give you rest.", "Matthew 11:28"),
+    ("Take my yoke upon you, and learn from me, for I am gentle and lowly in heart; and you will find rest for your souls.", "Matthew 11:29"),
+    ("For my yoke is easy, and my burden is light.", "Matthew 11:30"),
+    ("But Jesus, when he heard the message spoken, immediately said to the ruler of the synagogue, Don’t be afraid, only believe.", "Mark 5:36"),
+    ("For everything spoken by God is possible.", "Luke 1:37"),
+    ("Don’t be afraid, little flock, for it is your Father’s good pleasure to give you the Kingdom.", "Luke 12:32"),
+    ("For God so loved the world, that he gave his one and only Son, that whoever believes in him should not perish, but have eternal life.", "John 3:16"),
+    ("Don’t let your heart be troubled. Believe in God. Believe also in me.", "John 14:1"),
+    ("Peace I leave with you. My peace I give to you; not as the world gives, give I to you. Don’t let your heart be troubled, neither let it be fearful.", "John 14:27"),
+    ("I have told you these things, that in me you may have peace. In the world you have oppression; but cheer up! I have overcome the world.", "John 16:33"),
+    ("We know that all things work together for good for those who love God, to those who are called according to his purpose.", "Romans 8:28"),
+    ("What then shall we say about these things? If God is for us, who can be against us?", "Romans 8:31"),
+    ("No, in all these things, we are more than conquerors through him who loved us.", "Romans 8:37"),
+    ("rejoicing in hope; enduring in troubles; continuing steadfastly in prayer.", "Romans 12:12"),
+    ("Now may the God of hope fill you with all joy and peace in believing, that you may abound in hope, in the power of the Holy Spirit.", "Romans 15:13"),
+    ("No temptation has taken you except what is common to man. God is faithful, who will not allow you to be tempted above what you are able, but will with the temptation also make the way of escape, that you may be able to endure it.", "1 Corinthians 10:13"),
+    ("But now faith, hope, and love remain—these three. The greatest of these is love.", "1 Corinthians 13:13"),
+    ("Therefore, my beloved brothers, be steadfast, immovable, always abounding in the Lord’s work, because you know that your labor is not in vain in the Lord.", "1 Corinthians 15:58"),
+    ("Watch! Stand firm in the faith! Be courageous! Be strong!", "1 Corinthians 16:13"),
+    ("Therefore we don’t faint, but though our outward man is decaying, yet our inward man is renewed day by day.", "2 Corinthians 4:16"),
+    ("For our light affliction, which is for the moment, works for us more and more exceedingly an eternal weight of glory.", "2 Corinthians 4:17"),
+    ("for we walk by faith, not by sight.", "2 Corinthians 5:7"),
+    ("And God is able to make all grace abound to you, that you, always having all sufficiency in everything, may abound to every good work.", "2 Corinthians 9:8"),
+    ("He has said to me, My grace is sufficient for you, for my power is made perfect in weakness. Most gladly therefore I will rather glory in my weaknesses, that the power of Christ may rest on me.", "2 Corinthians 12:9"),
+    ("Let us not be weary in doing good, for we will reap in due season, if we don’t give up.", "Galatians 6:9"),
+    ("Now to him who is able to do exceedingly abundantly above all that we ask or think, according to the power that works in us.", "Ephesians 3:20"),
+    ("being confident of this very thing, that he who began a good work in you will complete it until the day of Jesus Christ.", "Philippians 1:6"),
+    ("In nothing be anxious, but in everything, by prayer and petition with thanksgiving, let your requests be made known to God.", "Philippians 4:6"),
+    ("And the peace of God, which surpasses all understanding, will guard your hearts and your thoughts in Christ Jesus.", "Philippians 4:7"),
+    ("Finally, brothers, whatever things are true, whatever things are honorable, whatever things are just, whatever things are pure, whatever things are lovely, whatever things are of good report; if there is any virtue, and if there is any praise, think about these things.", "Philippians 4:8"),
+    ("I can do all things through Christ, who strengthens me.", "Philippians 4:13"),
+    ("My God will supply every need of yours according to his riches in glory in Christ Jesus.", "Philippians 4:19"),
+    ("And let the peace of God rule in your hearts, to which also you were called in one body; and be thankful.", "Colossians 3:15"),
+    ("And whatever you do, work heartily, as for the Lord, and not for men.", "Colossians 3:23"),
+    ("Therefore exhort one another, and build each other up, even as you also do.", "1 Thessalonians 5:11"),
+    ("Rejoice always.", "1 Thessalonians 5:16"),
+    ("Pray without ceasing.", "1 Thessalonians 5:17"),
+    ("In everything give thanks, for this is the will of God in Christ Jesus toward you.", "1 Thessalonians 5:18"),
+    ("Now may the Lord of peace himself give you peace at all times in all ways. The Lord be with you all.", "2 Thessalonians 3:16"),
+    ("For God didn’t give us a spirit of fear, but of power, love, and self-control.", "2 Timothy 1:7"),
+    ("Let us therefore draw near with boldness to the throne of grace, that we may receive mercy, and may find grace for help in time of need.", "Hebrews 4:16"),
+    ("let us hold fast the confession of our hope without wavering; for he who promised is faithful.", "Hebrews 10:23"),
+    ("Now faith is assurance of things hoped for, proof of things not seen.", "Hebrews 11:1"),
+    ("Therefore let us also, seeing we are surrounded by so great a cloud of witnesses, lay aside every weight and the sin which so easily entangles us, and let us run with patience the race that is set before us.", "Hebrews 12:1"),
+    ("Be free from the love of money, content with such things as you have, for he has said, I will in no way leave you, neither will I in any way forsake you.", "Hebrews 13:5"),
+    ("So that with good courage we say, The Lord is my helper. I will not fear. What can man do to me?", "Hebrews 13:6"),
+    ("Jesus Christ is the same yesterday, today, and forever.", "Hebrews 13:8"),
+    ("But if any of you lacks wisdom, let him ask of God, who gives to all liberally and without reproach; and it will be given to him.", "James 1:5"),
+    ("Blessed is the man who endures temptation, for when he has been approved, he will receive the crown of life, which the Lord promised to those who love him.", "James 1:12"),
+    ("Draw near to God, and he will draw near to you. Cleanse your hands, you sinners; and purify your hearts, you double-minded.", "James 4:8"),
+    ("Humble yourselves therefore under the mighty hand of God, that he may exalt you in due time.", "1 Peter 5:6"),
+    ("casting all your worries on him, because he cares for you.", "1 Peter 5:7"),
+    ("But may the God of all grace, who called you to his eternal glory by Christ Jesus, after you have suffered a little while, perfect, establish, strengthen, and settle you.", "1 Peter 5:10"),
+    ("You are of God, little children, and have overcome them; because greater is he who is in you than he who is in the world.", "1 John 4:4"),
+    ("There is no fear in love; but perfect love casts out fear, because fear has punishment. He who fears is not made perfect in love.", "1 John 4:18"),
+    ("He will wipe away from them every tear from their eyes. Death will be no more; neither will there be mourning, nor crying, nor pain, any more. The first things have passed away.", "Revelation 21:4"),
+]
+
+
+# Blue Letter Bible book codes for the books used in _VERSES, so each verse can
+# link back to the source (WEB) for verification. All codes verified against
+# blueletterbible.org/web/<code>/<ch>/<v>/. Only the books we actually use.
+_BLB_CODES = {
+    "Joshua": "jos", "Deuteronomy": "deu", "1 Chronicles": "1ch", "Psalm": "psa",
+    "Proverbs": "pro", "Isaiah": "isa", "Jeremiah": "jer", "Lamentations": "lam",
+    "Micah": "mic", "Nahum": "nah", "Zephaniah": "zep", "Matthew": "mat",
+    "Mark": "mar", "Luke": "luk", "John": "jhn", "Romans": "rom",
+    "1 Corinthians": "1co", "2 Corinthians": "2co", "Galatians": "gal",
+    "Ephesians": "eph", "Philippians": "php", "Colossians": "col",
+    "1 Thessalonians": "1th", "2 Thessalonians": "2th", "2 Timothy": "2ti",
+    "Hebrews": "heb", "James": "jas", "1 Peter": "1pe", "1 John": "1jo",
+    "Revelation": "rev",
+}
+
+
+def _blb_url(reference: str) -> str:
+    """Build a Blue Letter Bible (WEB) verse URL from a 'Book C:V' reference."""
+    m = re.match(r"^(.*?)\s+(\d+):(\d+)$", reference.strip())
+    if not m:
+        return ""
+    book, chapter, verse = m.group(1), m.group(2), m.group(3)
+    code = _BLB_CODES.get(book)
+    if not code:
+        return ""
+    return f"https://www.blueletterbible.org/web/{code}/{chapter}/{verse}/"
+
+
+@app.get("/api/verse-of-the-day")
+def get_verse_of_the_day():
+    """Daily 'Words of Encouragement' verse for the Help page.
+
+    Deterministic and fully self-contained: the verse is chosen by day-of-year
+    from the curated public-domain (WEB) list above. Same verse all day, a new
+    one each day, identical across restarts — no external dependency, no cache.
+    Includes a Blue Letter Bible link so the verse can be verified at the source.
+    """
+    now = datetime.now(PST)
+    text, reference = _VERSES[now.timetuple().tm_yday % len(_VERSES)]
+    return {
+        "text": text,
+        "reference": reference,
+        "date": now.strftime("%Y-%m-%d"),
+        "source_url": _blb_url(reference),
+    }
+
+
 @app.get("/api/status")
 def get_status():
     settings = load_settings()
@@ -1540,14 +2473,22 @@ def get_status():
         "ibkr_error":         ibkr.get("error"),
         "account_value":      ibkr["account_value"],
         "buying_power":       ibkr["buying_power"],
+        "settled_cash":       ibkr.get("settled_cash"),
         "unrealized_pnl":     ibkr.get("unrealized_pnl"),
         "net_liquidation":    ibkr.get("account_value"),
         "account":            ibkr["account"],
         "next_execution":       _next_execution(),
         "trading_mode":         settings.get("trading_mode", "paper"),
+        "dry_run":              settings.get("dry_run", False),
         "execution_time":       settings.get("execution_time", "10:00"),
         "wheel_count":          wheel_count,
         "gateway_login_status": _gateway_login_status,
+        "trading_paused":       _trading_paused(),
+        # Cash sweep visibility: the open parked position (if any) + the last live
+        # decision (buy or skip-with-reason) so the dashboard can show what happened.
+        "cash_park":            state.get("cash_park"),
+        "cash_park_last_eval":  state.get("cash_park_last_eval"),
+        "cash_park_enabled":    settings.get("cash_park_enabled", False),
         **_weekly_token_status(),
     }
 
@@ -1592,6 +2533,7 @@ def get_positions():
             "simulated":             ex.get("simulated", False),
             "exec_timestamp":        ex.get("exec_timestamp") or ex.get("timestamp"),
             "delta_at_entry":        tl.get("delta_at_entry") or ex.get("delta_at_entry"),
+            "iv_at_entry":           tl.get("iv_at_entry") or ex.get("iv_at_entry"),
             "stock_price_at_entry":  stock_at_entry,
             "buffer_pct_at_entry":   buffer_at_entry,
         })
@@ -1607,6 +2549,7 @@ def get_positions():
         enriched_portfolio.append({
             **item,
             "delta_at_entry":       tl.get("delta_at_entry"),
+            "iv_at_entry":          tl.get("iv_at_entry"),
             "buffer_pct_at_entry":  tl.get("buffer_pct_at_entry"),
             "premium_per_contract": tl.get("premium_per_contract"),
             "total_premium":        tl.get("total_premium"),
@@ -1621,6 +2564,7 @@ def get_positions():
         "monday_context":  state.get("monday_context", {}),
         "portfolio":       enriched_portfolio,
         "account_summary": ibkr.get("account_summary"),  # None when IBKR disconnected
+        "excluded_tickers": load_settings().get("excluded_tickers", []),
     }
 
 @app.get("/api/performance")
@@ -1629,14 +2573,29 @@ def get_performance():
     ytd = load_ytd()
     initial_fund_budget = settings.get("fund_budget", 250_000)
     compound_enabled    = settings.get("compound_enabled", True)
+    goal_pct            = settings.get("goal_pct", 0.24)
+
+    # Net Liq drives both the compound yield denominator AND the account-value
+    # growth bar, so fetch it once regardless of compound mode.
+    cached  = _ibkr_cache.get("data")
+    net_liq = cached.get("account_value") if cached else None
+
     if compound_enabled:
         # Use net_liq for yield display — buying_power reflects only undeployed cash
         # and is misleading as a fund-size denominator when capital is tied up in CSPs.
-        cached  = _ibkr_cache.get("data")
-        net_liq = cached.get("account_value") if cached else None
-        budget  = net_liq or initial_fund_budget
+        budget = net_liq or initial_fund_budget
     else:
         budget = initial_fund_budget
+
+    # The GOAL is anchored to contributed capital (fund_budget), NOT net_liq —
+    # the target must not chase the account around as it grows or shrinks.
+    capital        = initial_fund_budget
+    annual_target  = round(capital * goal_pct)          # premium income goal ($)
+    account_target = round(capital * (1 + goal_pct))    # total account-value target
+    monthly_target = round(annual_target / 12)          # 2%/month at the 24% default
+    net_growth     = round(net_liq - capital, 2) if net_liq is not None else None
+    net_growth_pct = (round(net_growth / capital * 100, 2)
+                      if net_liq is not None and capital else None)
 
     raw_weeks = ytd.get("weeks", [])
     # Normalize and recompute yield_pct against current budget so stale stored
@@ -1655,7 +2614,7 @@ def get_performance():
     total_realized = round(sum(w["total_realized"] for w in weeks), 2)
     weeks_traded = ytd.get("weeks_traded", 0)
     avg_yield = (total / weeks_traded / budget * 100) if weeks_traded and budget else 0.0
-    progress_pct = (total / ANNUAL_TARGET * 100) if ANNUAL_TARGET else 0.0
+    progress_pct = (total / annual_target * 100) if annual_target else 0.0
 
     def _fix_week_yield(w):
         if not w:
@@ -1671,87 +2630,104 @@ def get_performance():
         "avg_yield_pct":  round(avg_yield, 3),
         "best_week":      _fix_week_yield(ytd.get("best_week")),
         "worst_week":     _fix_week_yield(ytd.get("worst_week")),
-        "annual_target":  ANNUAL_TARGET,
+        "annual_target":  annual_target,
         "progress_pct":   round(progress_pct, 1),
+        "capital":        capital,
+        "goal_pct":       goal_pct,
+        "account_target": account_target,
+        "monthly_target": monthly_target,
+        "net_liq":        net_liq,
+        "net_growth":     net_growth,
+        "net_growth_pct": net_growth_pct,
     }
 
 @app.get("/api/screener")
 def run_screener():
-    """Run screener + position sizer. Takes ~10 seconds."""
+    """
+    Preview the FULL Monday sequence (wheel check + CSP pipeline) with zero side
+    effects — a dry run of exactly what the scheduler / Run Now will execute.
+    Connects to IBKR to query option chains for the covered-call decisions, so it
+    takes ~20–40s. Places no orders, writes no state, posts no Discord.
+    """
     settings = load_settings()
     try:
-        import importlib
-        import sys
-        for mod_name in ["config", "screener", "position_sizer"]:
+        import importlib, sys
+        for mod_name in ["config", "screener", "position_sizer", "trader",
+                         "wheel_manager", "monday_runner"]:
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
+        from monday_runner import run_monday
 
-        from screener import get_top_targets
-        from position_sizer import size_all
+        initial_fund_budget = settings.get("fund_budget", 250_000)
+        compound_enabled    = settings.get("compound_enabled", True)
 
-        n                    = settings.get("num_positions", 5)
-        initial_fund_budget  = settings.get("fund_budget", 250_000)
-        compound_enabled     = settings.get("compound_enabled", True)
+        # Pass cached account summary so the dry preview needs no extra IBKR
+        # connection for budgeting (min(bp, net_liq) — see scheduler for rationale).
+        account_summary = None
+        cached       = _ibkr_cache.get("data")
+        buying_power = cached.get("buying_power") if cached else None
+        net_liq      = cached.get("account_value") if cached else None
+        if compound_enabled and buying_power and net_liq:
+            account_summary = (min(buying_power, net_liq), net_liq)
 
-        if compound_enabled:
-            # Use min(buying_power, net_liq): for cash/Roth accounts buying_power < net_liq
-            # (reflects reserved CSP cash); for margin/paper accounts buying_power is inflated
-            # (4x+) so net_liq wins. min() gives the correct deployable budget in both cases.
-            cached       = _ibkr_cache.get("data")
-            buying_power = cached.get("buying_power") if cached else None
-            net_liq      = cached.get("account_value") if cached else None
-            if buying_power and net_liq:
-                budget = min(buying_power, net_liq)
-            else:
-                budget = buying_power or net_liq or initial_fund_budget
-        else:
-            budget = initial_fund_budget
+        outcome = run_monday(dry_run=True, account_summary=account_summary)
+        wheel   = outcome.get("wheel", {})
+        csp     = outcome.get("csp", {})
+        cash_park_eval = outcome.get("cash_park")
 
-        # When compounding, BuyingPower already accounts for wheel holdings and open CSPs,
-        # so no manual deduction is needed. When not compounding, subtract reserved capital.
+        positions     = csp.get("positions", [])
+        total_premium = csp.get("total_premium", 0)
+        total_capital = csp.get("total_capital", 0)
+
+        # Roll the Monday covered calls into a combined top-line (CSP + CC) so the
+        # dashboard summary is the whole plan, mirroring the Discord weekly plan.
+        from discord_poster import wheel_plan_totals
+        wheel_activity   = wheel.get("wheel_activity", [])
+        cc_capital, _    = wheel_plan_totals(wheel_activity)
+        cc_premium       = wheel.get("cc_premium", 0.0)
+        combined_capital = total_capital + cc_capital
+        combined_premium = total_premium + cc_premium
+
+        # Current holdings (post-plan view comes from wheel_activity below)
         state           = load_state()
         wheel_holdings  = state.get("wheel_holdings", [])
-        active_holdings = [h for h in wheel_holdings if h.get("shares", 0) > 0]
-        reserved_capital   = round(sum(
-            h["shares"] * h.get("assigned_strike", 0.0) for h in active_holdings
-        ), 2)
-        active_wheel_count = len(active_holdings)
-        adjusted_budget    = budget if compound_enabled else budget - reserved_capital
-        target_fills       = n
-        held_map           = {h["ticker"]: h for h in active_holdings}
-
-        all_targets = get_top_targets(n * 2, always_include=set(held_map.keys()))
-
-        # Split: tickers we already hold → CC; everything else → CSP
-        cc_targets  = []
-        csp_targets = []
-        for t in all_targets:
-            if t["ticker"] in held_map:
-                t["action_type"] = "CC"
-                t["shares"]      = held_map[t["ticker"]]["shares"]
-                cc_targets.append(t)
-            else:
-                csp_targets.append(t)
-
-        positions = size_all(csp_targets, budget=adjusted_budget, num_positions=target_fills,
-                             cc_targets=cc_targets)
-
-        total_premium = sum(p.get("premium_total", 0) for p in positions)
-        total_capital = sum(p.get("capital_used", 0) for p in positions)
 
         return {
             "positions":          positions,
-            "raw_targets":        all_targets,
+            "raw_targets":        csp.get("raw_targets", []),
             "total_premium":      total_premium,
             "total_capital":      total_capital,
             "blended_yield":      round(total_premium / total_capital * 100 if total_capital else 0, 3),
-            "budget":               adjusted_budget,
-            "total_budget":         budget,
+            # Combined CSP + CC top-line (what the summary cards / Discord show):
+            "combined_capital":   round(combined_capital, 2),
+            "combined_premium":   round(combined_premium, 2),
+            "combined_yield":     round(combined_premium / combined_capital * 100 if combined_capital else 0, 3),
+            "wheel_cc_capital":   cc_capital,
+            "budget":               csp.get("effective_budget", 0),
+            # Display top-line for the Capital Allocation waterfall. Use the real
+            # net liq (account_summary[1]) — NOT account_summary[0], which is
+            # min(BuyingPower, NetLiq) and on cash/Roth accounts resolves to
+            # buying power, breaking the "net liq − reserved = available" math.
+            "total_budget":         (account_summary[1] if account_summary else initial_fund_budget),
             "initial_fund_budget":  initial_fund_budget,
-            "compound_enabled":     compound_enabled,
-            "reserved_capital":     reserved_capital,
-            "active_wheel_count":   active_wheel_count,
+            "compound_enabled":     csp.get("compound_enabled", compound_enabled),
+            "cash_account":         csp.get("cash_account", False),
+            "buying_power":         csp.get("buying_power"),
+            "reserved_capital":     wheel.get("reserved_capital", 0.0),
+            "active_wheel_count":   wheel.get("active_wheel_count", 0),
             "wheel_holdings":       wheel_holdings,
+            # Preview of the Monday wheel decisions (the part that used to be invisible):
+            "wheel_plan":           wheel.get("wheel_activity", []),
+            "wheel_freed_capital":  wheel.get("freed_capital", 0.0),
+            "wheel_cc_premium":     wheel.get("cc_premium", 0.0),
+            "wheel_shares_sold_pnl": wheel.get("shares_sold_pnl", 0.0),
+            # Recovery reconciliation — positions already open in IBKR that a re-run skips:
+            "already_open_put_tickers": csp.get("already_open_put_tickers", []),
+            "target_fills":         csp.get("target_fills", 0),
+            "num_positions":        settings.get("num_positions", 5),
+            # Cash sweep decision for this plan (buy / skip + reason), or None when off:
+            "cash_park":            cash_park_eval,
+            "dry_run":              True,
             "run_at":               datetime.now(PST).isoformat(),
         }
     except Exception as e:
@@ -1767,6 +2743,7 @@ def get_settings_endpoint():
 
 class SettingsUpdate(BaseModel):
     fund_budget:              Optional[float] = None
+    goal_pct:                 Optional[float] = None
     num_positions:            Optional[int]   = None
     min_position_size:        Optional[float] = None
     max_position_size:        Optional[float] = None
@@ -1774,12 +2751,20 @@ class SettingsUpdate(BaseModel):
     min_buffer_pct:           Optional[float] = None
     earnings_filter_days:              Optional[int]   = None
     wheel_cc_ignore_earnings_filter:   Optional[bool]  = None
+    wheel_retention_market_cap_min:    Optional[float] = None
+    wheel_sell_when_cc_below_assigned: Optional[bool]  = None
+    wheel_cover_all_shares:            Optional[bool]  = None
+    wheel_allow_add_to_position:       Optional[bool]  = None
     wheel_stop_loss_enabled:           Optional[bool]  = None
     stop_loss_pct:                     Optional[float] = None
+    excluded_tickers:                  Optional[list[str]] = None
     compound_enabled:                  Optional[bool]  = None
+    cash_account:                      Optional[bool]  = None
     max_spread_pct:           Optional[float] = None
     min_bid_yield_pct:        Optional[float] = None
     max_spread_hard_cap:      Optional[float] = None
+    min_oi_notional:          Optional[float] = None
+    min_oi_floor:             Optional[int]   = None
     dry_run:                  Optional[bool]  = None
     ibkr_port:                Optional[int]   = None
     discord_webhook_enabled:       Optional[bool]  = None
@@ -1788,14 +2773,51 @@ class SettingsUpdate(BaseModel):
     auto_restart_time:             Optional[str]   = None
     auto_restart_suppress_mins:    Optional[int]   = None
     auto_update_enabled:           Optional[bool]  = None
+    show_verse_of_the_day:         Optional[bool]  = None
+    cash_park_enabled:             Optional[bool]  = None
+    cash_park_instrument:          Optional[str]   = None
+    cash_park_include_premiums:    Optional[bool]  = None
 
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdate):
     current = load_settings()
     updates = {k: v for k, v in body.dict().items() if v is not None}
+    if "excluded_tickers" in updates:
+        updates["excluded_tickers"] = sorted({
+            t.strip().upper() for t in updates["excluded_tickers"] if t and t.strip()
+        })
     current.update(updates)
     save_settings(current)
     return current
+
+
+class ExcludeToggle(BaseModel):
+    ticker:   str
+    excluded: bool
+
+@app.post("/api/excluded-tickers")
+def toggle_excluded(body: ExcludeToggle):
+    """Add/remove a single ticker from the wheel-exclusion list — backs the
+    per-holding checkbox on the dashboard. Excluded tickers get no new CSPs, no
+    covered calls, are never sold, and are never adopted into wheel_holdings."""
+    s   = load_settings()
+    cur = {t.strip().upper() for t in s.get("excluded_tickers", []) if t and t.strip()}
+    sym = body.ticker.strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    if body.excluded:
+        cur.add(sym)
+    else:
+        cur.discard(sym)
+    s["excluded_tickers"] = sorted(cur)
+    save_settings(s)
+    return {"excluded_tickers": s["excluded_tickers"]}
+
+# NOTE: the /api/holding-tranches editor was removed when cost basis moved to
+# IBKR avgCost as the source of truth (closed issue #68). A user-set cost basis
+# would just be overwritten by the broker's avgCost on the next detection/wheel
+# check, so hand-editing tranches no longer has any effect. `tranches` remains a
+# read-only assignment-history breadcrumb written by wheel_manager.
 
 @app.get("/api/settings/timezone")
 def get_timezone():
@@ -1896,7 +2918,7 @@ class TradingModeRequest(BaseModel):
     confirmation: str
 
 @app.post("/api/trading-mode")
-def set_trading_mode(body: TradingModeRequest):
+def set_trading_mode(body: TradingModeRequest, background_tasks: BackgroundTasks):
     if body.confirmation != "CONFIRM":
         raise HTTPException(status_code=400, detail="confirmation must be exactly 'CONFIRM'")
     if body.mode not in ("paper", "live"):
@@ -1923,8 +2945,13 @@ def set_trading_mode(body: TradingModeRequest):
     except Exception as e:
         print(f"[api/trading-mode] failed to write gw_trading_mode: {e}")
 
-    # Keep .env.compose in sync so containers always get the right port on restart.
-    env_file = BASE_DIR / ".env.compose"
+    # Keep .env.compose in sync so a plain `docker compose up` (no entrypoint
+    # re-derivation, e.g. before /data/gw_trading_mode exists) still lands on the
+    # right port. When containerized this must target the bind-mounted host file
+    # at /host_repo/.env.compose — BASE_DIR is /app inside the container, so
+    # writing there only touches the ephemeral copy and the host file goes stale.
+    host_env_file = Path("/host_repo/.env.compose")
+    env_file = host_env_file if host_env_file.exists() else BASE_DIR / ".env.compose"
     try:
         if env_file.exists():
             lines = env_file.read_text().splitlines()
@@ -1951,6 +2978,12 @@ def set_trading_mode(body: TradingModeRequest):
     # Restart scheduler too so it re-reads /data/gw_trading_mode and re-derives
     # IBKR_PORT — otherwise it keeps trading on the previous mode's port.
     _restart_scheduler()
+
+    # Restart the api as well: like the scheduler it caches IBKR_PORT from its
+    # env at import (config.py), so without this it keeps dialing the previous
+    # mode's port (e.g. screener "Run Now" hitting 4004 after switching to live).
+    # Deferred to a BackgroundTask so the response below reaches the client first.
+    background_tasks.add_task(_restart_api_self)
 
     save_settings(current)
 
@@ -2005,6 +3038,8 @@ def get_trade_history():
     weekly_summaries = [
         {**w,
          "premium_collected": w.get("premium_collected", w.get("realized", 0)),
+         "shares_sold_pnl":   w.get("shares_sold_pnl", 0),
+         "total_realized":    w.get("total_realized", w.get("realized", 0)),
          "yield_pct": round(
              w.get("premium_collected", w.get("realized", 0)) / budget * 100, 3
          ) if budget else w.get("yield_pct", 0)}
@@ -2013,9 +3048,10 @@ def get_trade_history():
 
     return {
         "current_week": {
-            "run_date":   state.get("run_date"),
-            "executions": enriched,
-            "weekly_pnl": state.get("weekly_pnl", {}),
+            "run_date":       state.get("run_date"),
+            "executions":     enriched,
+            "weekly_pnl":     state.get("weekly_pnl", {}),
+            "wheel_activity": state.get("monday_context", {}).get("wheel_activity", []),
         },
         "weekly_summaries": weekly_summaries,
         "total_premium":    ytd.get("total_premium", 0),
@@ -2031,6 +3067,43 @@ _GITHUB_VERSION_URL = (
     "https://raw.githubusercontent.com/controllinghand/"
     "you_rock_fund/main/VERSION"
 )
+
+# ── One-time post-upgrade notes ───────────────────────────────────────
+# For releases needing a step the upgrade physically CANNOT do for itself: the
+# build runs inside the api container, which has neither /Applications nor
+# AppKit, so anything touching the host's installed app is out of reach.
+# Keyed by the version that introduced the step; an upgrade crossing that
+# version emits the note once. This exists because a CHANGELOG doesn't reach
+# anyone — the friend boxes are standalone and Discord is the only channel.
+# Keep entries rare: every one of these interrupts someone.
+# Intentionally empty. 5.2.63's launcher-icon note lived here until v5.2.67
+# taught yrvi-launch.sh to install the icon itself on the next launch — an alert
+# telling operators to run a script that already ran is worse than silence. Add
+# an entry only for a step that genuinely cannot be automated.
+UPGRADE_NOTES: dict[str, str] = {}
+
+
+def _version_tuple(v: str):
+    """(5, 2, 63) from '5.2.63' / 'v5.2.63'; None if unparseable (e.g. 'unknown')."""
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _notes_crossed(current: str, latest: str) -> list[str]:
+    """Notes for versions in (current, latest] — the steps THIS upgrade newly needs.
+
+    Half-open by design: a box already on 5.2.63 has had 5.2.63's note, but one
+    jumping 5.2.62 → 5.2.65 still must get it.
+    """
+    cur, lat = _version_tuple(current), _version_tuple(latest)
+    if cur is None or lat is None:
+        return []
+    return [
+        note for ver, note in sorted(UPGRADE_NOTES.items(), key=lambda kv: _version_tuple(kv[0]) or ())
+        if (v := _version_tuple(ver)) and cur < v <= lat
+    ]
 
 @app.get("/api/version/check")
 def version_check():
@@ -2088,18 +3161,30 @@ def version_upgrade():
     # so pulling via "origin" (which may be an SSH remote) would fail.
     _GIT_HTTPS = "https://github.com/controllinghand/you_rock_fund.git"
 
+    # git 2.35.2+ refuses to operate on a repo whose files are owned by a
+    # different user than the one running git ("detected dubious ownership").
+    # /host_repo is bind-mounted and owned by the host user, not the container's
+    # git user, so mark it safe. safe.directory is only honored from global/system
+    # config (git ignores it from -c / the command line), so it must be written
+    # to the global gitconfig before any git command touches the repo.
+    _git_env = {**os.environ, "HOME": os.environ.get("HOME", "/root")}
+    subprocess.run(
+        ["git", "config", "--global", "--replace-all", "safe.directory", str(host_repo)],
+        capture_output=True, env=_git_env,
+    )
+
     # Discard any local modifications to tracked files (e.g. VERSION) so the
     # pull never aborts with "your local changes would be overwritten".
     subprocess.run(
         ["git", "checkout", "--", "."],
-        capture_output=True, cwd=str(host_repo),
+        capture_output=True, cwd=str(host_repo), env=_git_env,
     )
 
     try:
         pull = subprocess.run(
             ["git", "pull", _GIT_HTTPS, "main"],
             capture_output=True, text=True, timeout=60,
-            cwd=str(host_repo),
+            cwd=str(host_repo), env=_git_env,
         )
         output_parts.append(
             f"$ git pull {_GIT_HTTPS} main\n{(pull.stdout + pull.stderr).strip()}"
@@ -2110,6 +3195,18 @@ def version_upgrade():
         return {"success": False, "output": "git pull timed out after 60s — upgrade aborted"}
     except Exception as e:
         return {"success": False, "output": f"git pull failed: {e}"}
+
+    # ── Post-upgrade notes ────────────────────────────────────
+    # Emitted HERE — after the pull, before the build — on purpose. These notes
+    # describe host-side steps that depend only on the pulled files being on
+    # disk, so they're already actionable and stay valid even if the build below
+    # fails. Emitting before Popen also means the alert is safely written before
+    # the build restarts this very container.
+    for _note in _notes_crossed(current, latest):
+        try:
+            _send_discord_alert(f"{_note}\n(upgrade {current} → {latest})")
+        except Exception as e:
+            logger.warning(f"post-upgrade note failed to send: {e}")
 
     # ── Step 2: yrvi-build.sh all --paper ────────────────────
     # Run from /host_repo so docker compose sends updated host files as the
@@ -2123,8 +3220,12 @@ def version_upgrade():
         return {"success": False, "output": "\n\n".join(output_parts)}
 
     upgrade_log = Path("/data/upgrade.log")
+    upgrade_result = Path("/data/upgrade_result.json")
     try:
         upgrade_log.write_text("")  # clear any previous run
+        # Clear the previous run's failed_services too — otherwise a poll mid-build
+        # would read the prior run's result until this run finishes and overwrites it.
+        upgrade_result.write_text("")
         log_fh = open(upgrade_log, "w")
         _mode_flag = "--live" if load_settings().get("trading_mode") == "live" else "--paper"
         _env = os.environ.copy()
@@ -2151,12 +3252,32 @@ def version_upgrade():
 @app.get("/api/upgrade/log")
 def upgrade_log_read():
     import re
+    import time as _time
     log = Path("/data/upgrade.log")
     if not log.exists():
-        return {"content": ""}
+        return {"content": "", "failed_services": [], "slow": False}
     raw = log.read_text(errors="replace")
     clean = re.sub(r'\x1b\[[0-9;]*[mGKHFABCDJsur]', '', raw)
-    return {"content": clean}
+
+    # Authoritative failure signal — written by yrvi-build.sh's "all" path once
+    # builds run per-service. A clean upgrade can still have api succeed while
+    # web/scheduler silently stay stale; the dashboard must check this rather
+    # than only api's own /api/version/check before declaring "done".
+    failed_services = []
+    result_file = Path("/data/upgrade_result.json")
+    if result_file.exists():
+        try:
+            failed_services = json.loads(result_file.read_text()).get("failed_services", [])
+        except Exception:
+            pass
+
+    # Soft, informational-only notice — NOT a failure signal. Threshold is 240s
+    # (not the original 90s) because a legitimate npm install/vite build on a
+    # slow/resource-constrained box can run several minutes with no stdout; a
+    # short threshold would false-positive on exactly the hardware this targets.
+    slow = (_time.time() - log.stat().st_mtime) > 240
+
+    return {"content": clean, "failed_services": failed_services, "slow": slow}
 
 
 @app.get("/api/health")
@@ -2217,42 +3338,17 @@ def manual_run():
         raise HTTPException(status_code=409, detail="A run is already in progress")
 
     def _run():
-        _run_status.update({"executing": True, "started_at": datetime.now().isoformat(), "result": None, "error": None})
+        _run_status.update({"executing": True, "started_at": datetime.now().isoformat(),
+                            "result": None, "error": None, "ticker_results": [],
+                            "current_ticker": None, "current_stage": None})
         try:
             import importlib, sys
-            for mod in ["config", "screener", "position_sizer", "trader"]:
+            for mod in ["config", "screener", "position_sizer", "trader",
+                        "wheel_manager", "monday_runner"]:
                 if mod in sys.modules:
                     importlib.reload(sys.modules[mod])
-            from screener import get_top_targets
-            from position_sizer import size_all
-            from trader import execute_positions
+            from monday_runner import run_monday
 
-            settings             = load_settings()
-            n                    = settings.get("num_positions", 5)
-            initial_fund_budget  = settings.get("fund_budget", 250_000)
-            compound_enabled     = settings.get("compound_enabled", True)
-
-            if compound_enabled:
-                cached       = _ibkr_cache.get("data")
-                buying_power = cached.get("buying_power") if cached else None
-                net_liq      = cached.get("account_value") if cached else None
-                if buying_power and net_liq:
-                    budget = min(buying_power, net_liq)
-                else:
-                    budget = buying_power or net_liq or initial_fund_budget
-            else:
-                budget = initial_fund_budget
-
-            state           = load_state()
-            wheel_holdings  = state.get("wheel_holdings", [])
-            active_holdings = [h for h in wheel_holdings if h.get("shares", 0) > 0]
-            reserved_capital   = round(sum(
-                h["shares"] * h.get("assigned_strike", 0.0) for h in active_holdings
-            ), 2)
-            effective_budget = budget if compound_enabled else budget - reserved_capital
-
-            all_targets    = get_top_targets(n * 2)
-            positions      = size_all(all_targets[:n], budget=effective_budget)
             _ticker_results = []
 
             def _progress(ticker=None, stage=None, result=None):
@@ -2262,51 +3358,50 @@ def manual_run():
                 _run_status["current_stage"]  = stage
                 _run_status["ticker_results"] = list(_ticker_results)
 
-            execute_positions(positions, extra_targets=all_targets, status_callback=_progress)
+            # Heads-up to Discord (+ in-app bell) that a manual run was triggered,
+            # so the feed shows it distinctly from the scheduled Monday job.
+            _send_discord_alert("🔧 Manual run started — wheel check + CSP pipeline")
+
+            # Full Monday sequence, live: wheel check (sell shares / write CCs) then CSPs.
+            # manual=True tags the weekly-results post as a manual Run Now.
+            outcome = run_monday(dry_run=False, progress_callback=_progress, manual=True)
             _run_status["current_ticker"] = None
             _run_status["current_stage"]  = None
 
-            # Update weekly_pnl and post to Discord
-            state       = load_state()
-            results     = state.get("executions", [])
-            filled      = [r for r in results if r.get("status") in ("filled", "partial_fill", "dry_run")]
-            csp_premium = sum(r.get("premium_collected", 0) for r in filled)
-            pnl         = state.get("weekly_pnl", {})
-            state["weekly_pnl"] = {
-                **pnl,
-                "week_start":     datetime.now(PST).strftime("%Y-%m-%d"),
-                "csp_premium":    round(csp_premium, 2),
-                "total_realized": round(csp_premium + pnl.get("cc_premium", 0) + pnl.get("shares_sold_pnl", 0), 2),
-                "last_updated":   datetime.now().isoformat(),
-            }
-            with open(STATE_FILE, "w") as f:
-                json.dump(state, f, indent=2)
-
-            from discord_poster import is_enabled, post_weekly_results
-            if is_enabled():
-                post_weekly_results(load_state(), fund_budget=effective_budget)
-
+            wheel = outcome.get("wheel", {})
+            csp   = outcome.get("csp", {})
             _run_status.update({
                 "executing": False,
                 "result": {
-                    "fills":     len(filled),
-                    "premium":   round(csp_premium, 2),
-                    "completed": datetime.now().isoformat(),
+                    "fills":         csp.get("fills", 0),
+                    "premium":       csp.get("csp_premium", 0),
+                    "cc_premium":    wheel.get("cc_premium", 0),
+                    "freed_capital": wheel.get("freed_capital", 0),
+                    "completed":     datetime.now().isoformat(),
                 }
             })
+
+            # Concise completion summary (separate from the full weekly-results embed).
+            _send_discord_alert(
+                f"✅ Manual run finished — {csp.get('fills', 0)} new CSP fill(s), "
+                f"${csp.get('csp_premium', 0):,.0f} premium · "
+                f"CC ${wheel.get('cc_premium', 0):,.0f} · "
+                f"freed ${wheel.get('freed_capital', 0):,.0f}"
+            )
         except Exception as e:
             import logging
             logging.getLogger(__name__).error(f"Manual run failed: {e}", exc_info=True)
             _run_status.update({"executing": False, "error": str(e), "result": None})
+            _send_discord_alert(f"❌ Manual run failed — {e}")
 
     threading.Thread(target=_run, daemon=True).start()
-    return {"success": True, "message": "Pipeline started"}
+    return {"success": True, "message": "Monday sequence started (wheel check + CSP pipeline)"}
 
 
 @app.post("/api/test-run")
 def test_run():
     """Trigger a DRY RUN of the CSP pipeline — no real orders placed. For testing status UI."""
-    import threading, os
+    import threading
 
     if _run_status["executing"]:
         raise HTTPException(status_code=409, detail="A run is already in progress")
@@ -2315,8 +3410,6 @@ def test_run():
         _run_status.update({"executing": True, "started_at": datetime.now().isoformat(),
                             "result": None, "error": None, "ticker_results": [],
                             "current_ticker": None, "current_stage": None})
-        # Temporarily force DRY_RUN on
-        os.environ["DRY_RUN"] = "true"
         try:
             import importlib, sys
             for mod in ["config", "screener", "position_sizer", "trader"]:
@@ -2328,7 +3421,7 @@ def test_run():
 
             settings    = load_settings()
             n           = settings.get("num_positions", 5)
-            all_targets = get_top_targets(n * 2)
+            all_targets = get_top_targets(None)  # full pool → dry preview matches live fallback depth
             positions   = size_all(all_targets[:n])
             _ticker_results = []
 
@@ -2339,7 +3432,11 @@ def test_run():
                 _run_status["current_stage"]  = stage
                 _run_status["ticker_results"] = list(_ticker_results)
 
-            execute_positions(positions, extra_targets=all_targets, status_callback=_progress)
+            # Force dry_run explicitly — this endpoint always simulates, regardless
+            # of the Settings toggle. (The old os.environ["DRY_RUN"] dance was dead
+            # code: execute_positions reads the toggle from settings.json, not env.)
+            execute_positions(positions, extra_targets=all_targets,
+                              status_callback=_progress, dry_run=True)
             _run_status["current_ticker"] = None
             _run_status["current_stage"]  = None
 
@@ -2350,8 +3447,6 @@ def test_run():
             import logging
             logging.getLogger(__name__).error(f"Test run failed: {e}", exc_info=True)
             _run_status.update({"executing": False, "error": str(e), "result": None})
-        finally:
-            os.environ.pop("DRY_RUN", None)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"success": True, "message": "Dry run started — no real orders will be placed"}

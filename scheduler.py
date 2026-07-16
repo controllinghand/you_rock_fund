@@ -7,9 +7,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
-from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, get_settings
+from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, get_settings, MODE_LABEL
 from secrets_client import get_secret
-from market_calendar import is_first_trading_day_of_week, is_market_holiday
+from market_calendar import is_first_trading_day_of_week, is_market_holiday, is_last_trading_day_of_week
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +63,7 @@ def _discord_alert(message: str) -> None:
         _vf = Path(__file__).parent / "VERSION"
         _v  = f"v{_vf.read_text().strip()}" if _vf.exists() else "?"
         _tag = f"`{_v} · {ACCOUNT}`" if ACCOUNT else f"`{_v}`"
-        requests.post(webhook_url, json={"content": f"{message}\n{_tag}"}, timeout=5)
+        requests.post(webhook_url, json={"content": f"{message}\n{MODE_LABEL} · {_tag}"}, timeout=5)
     except Exception as e:
         log.warning(f"Discord alert failed: {e}")
 
@@ -128,13 +128,28 @@ def _load_settings() -> dict:
     except FileNotFoundError:
         return {}
 
+# Earliest allowed Monday execution. The wheel check runs 5 min before execution
+# and MUST be both after the 6:30 AM PST open (to price CCs) and before the CSP
+# pipeline (to free capital first). 7:00 puts the wheel check at 6:55 — ~25 min
+# after open — which is safe on live AND on paper's 15-min-delayed feed. Anything
+# earlier would run the wheel check at/pre-open with no greeks (no CCs written).
+_MIN_EXEC_HOUR = 7
+_MIN_EXEC_MIN  = 0
+
 def _parse_exec_time(settings: dict) -> tuple:
-    """Return (hour, minute) PST for configured Monday execution time."""
+    """Return (hour, minute) PST for configured Monday execution time, floored to
+    the earliest safe time so the wheel check never lands at/before market open."""
     try:
         h, m = map(int, settings.get("execution_time", "10:00").split(":"))
-        return h, m
     except Exception:
         return 10, 0
+    if (h, m) < (_MIN_EXEC_HOUR, _MIN_EXEC_MIN):
+        log.warning(f"⚠️  Configured execution_time {h:02d}:{m:02d} is earlier than the "
+                    f"{_MIN_EXEC_HOUR:02d}:{_MIN_EXEC_MIN:02d} floor — the wheel check would run "
+                    f"at/before market open with no option greeks. Using "
+                    f"{_MIN_EXEC_HOUR:02d}:{_MIN_EXEC_MIN:02d} instead.")
+        return _MIN_EXEC_HOUR, _MIN_EXEC_MIN
+    return h, m
 
 def _offset_time(hour: int, minute: int, delta_minutes: int) -> tuple:
     """Subtract delta_minutes from (hour, minute), return new (hour, minute)."""
@@ -159,48 +174,40 @@ def run_screener_preview():
     log.info(f"📋 SATURDAY PREVIEW — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
     try:
-        from screener import get_top_targets
-        from position_sizer import size_all
-
-        state        = _load_state()
-        holdings     = state.get("wheel_holdings", [])
-        active       = [h for h in holdings if h.get("shares", 0) > 0]
-        held_map     = {h["ticker"]: h for h in active}
-        reserved     = round(sum(
-            h.get("shares", 0) * h.get("assigned_strike", 0.0) for h in active
-        ), 2)
-        active_count = len(active)
-        all_targets  = get_top_targets(10, always_include=set(held_map.keys()))
-
-        # Split: tickers we already hold → CC; everything else → CSP
-        cc_targets  = []
-        csp_targets = []
-        for t in all_targets:
-            if t["ticker"] in held_map:
-                t["action_type"] = "CC"
-                t["shares"]      = held_map[t["ticker"]]["shares"]
-                cc_targets.append(t)
-            else:
-                csp_targets.append(t)
+        # Delegate to the shared Monday runner (dry_run) so the Saturday Discord
+        # preview is the EXACT same plan as the dashboard's Run Screener / This
+        # Week and Monday's live run — same CSP sizing and the same wheel-check
+        # decisions (CC / defer / sell). A user checking Discord sees what they'd
+        # see on the dashboard, even when away from their system.
+        from monday_runner import run_monday
 
         settings         = _load_settings()
         compound_enabled = settings.get("compound_enabled", True)
-        if compound_enabled:
-            # BuyingPower from IBKR already reflects all open positions (including manual
-            # trades outside the app and wheel stock), so use it directly as the CSP budget.
-            buying_power, _ = _fetch_account_summary(TOTAL_FUND_BUDGET)
-            budget          = buying_power
-        else:
-            budget = TOTAL_FUND_BUDGET - reserved
-        positions    = size_all(csp_targets, budget=budget, num_positions=NUM_POSITIONS,
-                                cc_targets=cc_targets)
-        exec_time    = settings.get("execution_time", "10:00")
-        log.info(f"\n📋 {len(positions)} positions queued for Monday {exec_time} PST  "
-                 f"(budget=${budget:,.0f}{'  compounding ON' if compound_enabled else ''})")
+        fund_budget      = settings.get("fund_budget", TOTAL_FUND_BUDGET)
+
+        # Pre-fetch the account summary so the dry preview reuses a single
+        # read-only connection for budgeting (mirrors the dashboard path and
+        # avoids a second IBKR connect inside the CSP pipeline).
+        account_summary = _fetch_account_summary(fund_budget) if compound_enabled else None
+
+        outcome   = run_monday(dry_run=True, account_summary=account_summary)
+        wheel     = outcome.get("wheel", {})
+        csp       = outcome.get("csp", {})
+        positions = csp.get("positions", [])
+
+        exec_time = settings.get("execution_time", "10:00")
+        log.info(f"\n📋 {len(positions)} CSP(s) queued for Monday {exec_time} PST  "
+                 f"(budget=${csp.get('effective_budget', 0):,.0f}"
+                 f"{'  compounding ON' if compound_enabled else ''})")
 
         from discord_poster import is_enabled, post_weekly_plan
         if is_enabled():
-            post_weekly_plan(positions)
+            post_weekly_plan(
+                positions,
+                wheel_plan=wheel.get("wheel_activity", []),
+                freed_capital=wheel.get("freed_capital", 0.0),
+                cc_premium=wheel.get("cc_premium", 0.0),
+            )
             log.info("✅ Weekly plan posted to Discord")
     except Exception as e:
         log.error(f"❌ Preview error: {e}", exc_info=True)
@@ -208,17 +215,20 @@ def run_screener_preview():
         loop.close()
 
 
-# ── Friday 4:15PM — assignment detection ──────────────────────
+# ── Saturday 8AM — assignment detection ───────────────────────
+# Runs Saturday morning (not Friday afternoon) so IBKR has posted the
+# prior day's option assignments/expirations overnight. Detecting on
+# Friday 4:15PM misreported assigned puts as "expired worthless".
 
 def run_assignment_detection():
     loop = _new_loop()
     now  = datetime.now(PST)
     if is_market_holiday(now.date()):
-        log.info(f"⏭️  FRIDAY ASSIGNMENT DETECTION skipped — market holiday ({now.strftime('%Y-%m-%d')})")
+        log.info(f"⏭️  SATURDAY ASSIGNMENT DETECTION skipped — market holiday ({now.strftime('%Y-%m-%d')})")
         loop.close()
         return
     log.info("\n" + "=" * 65)
-    log.info(f"🔍 FRIDAY ASSIGNMENT DETECTION — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info(f"🔍 SATURDAY ASSIGNMENT DETECTION — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
     try:
         from wheel_manager import detect_assignments
@@ -227,7 +237,7 @@ def run_assignment_detection():
 
         called_away = detect_assignments()
 
-        from discord_poster import is_enabled, post_friday_summary
+        from discord_poster import is_enabled, post_weekly_review
         if is_enabled():
             state_after  = _load_state()
             today        = now.date().isoformat()
@@ -236,11 +246,17 @@ def run_assignment_detection():
                             and h.get("assignment_date") == today]
             settings      = _load_settings()
             fund_budget   = settings.get("fund_budget", TOTAL_FUND_BUDGET)
-            post_friday_summary(state_after, called_away or [], new_ones,
-                                fund_budget=fund_budget)
+            goal_pct      = settings.get("goal_pct", 0.24)
+            try:
+                _, net_liq = _fetch_account_summary(fund_budget)
+            except Exception:
+                net_liq = None
+            post_weekly_review(state_after, called_away or [], new_ones,
+                                fund_budget=fund_budget, capital=fund_budget,
+                                goal_pct=goal_pct, net_liq=net_liq)
     except Exception as e:
         log.error(f"❌ Assignment detection error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Friday assignment detection failed: `{type(e).__name__}: {e}`")
+        _discord_alert(f"🚨 **YRVI** Saturday assignment detection failed: `{type(e).__name__}: {e}`")
     finally:
         loop.close()
 
@@ -284,134 +300,91 @@ def run_discord_preview():
         loop.close()
 
 
-# ── Monday 9:55AM — wheel check (runs before CSP pipeline) ────
-
-def run_wheel_check_job():
-    loop = _new_loop()
-    now  = datetime.now(PST)
-    if not is_first_trading_day_of_week(now.date()):
-        log.info(f"⏭️  WHEEL CHECK skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
-        loop.close()
-        return
-    log.info("\n" + "=" * 65)
-    log.info(f"🔄 WHEEL CHECK — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
-    log.info("=" * 65)
-    if not _ibkr_reachable():
-        msg = "IB Gateway unreachable before Monday wheel check — jobs will likely fail"
-        log.error(f"❌ {msg}")
-        _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
-    try:
-        from wheel_manager import run_wheel_check
-        freed, skip, reserved = run_wheel_check()
-        log.info(f"✅ Wheel check done — freed ${freed:,.0f}  "
-                 f"reserved ${reserved:,.0f}  skip {skip or 'none'}")
-    except Exception as e:
-        log.error(f"❌ Wheel check error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Monday wheel check failed: `{type(e).__name__}: {e}`")
-    finally:
-        loop.close()
-
-
-# ── Monday 10AM — CSP execution pipeline ──────────────────────
+# ── Monday — wheel check → CSP pipeline (one chained job) ─────
 
 def run_pipeline():
+    """Run the wheel check and the CSP pipeline back-to-back in one job.
+
+    The wheel check's results are handed to the CSP pipeline IN MEMORY rather
+    than via state.json. The two used to be separate cron jobs 5 min apart, but
+    when the wheel check actually sells covered calls it runs the order-escalation
+    ladder and can take 6+ min — overrunning the pipeline's start, which then read
+    a stale monday_context (cc_premium=0, active_wheel_count=0, reserved=0). That
+    dropped CC premium from the weekly total and made the pipeline over-fill CSP
+    slots against capital already tied up in wheel stock. Chaining them (the same
+    sequence as monday_runner.run_monday / the dashboard's Run Now) removes the race.
+    """
     loop = _new_loop()
     now  = datetime.now(PST)
     if not is_first_trading_day_of_week(now.date()):
-        log.info(f"⏭️  CSP PIPELINE skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
+        log.info(f"⏭️  MONDAY RUN skipped — not the first trading day of the week ({now.strftime('%A %Y-%m-%d')})")
         loop.close()
         return
     log.info("\n" + "=" * 65)
-    log.info(f"⏰ WEEKLY EXECUTION — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info(f"🗓️  MONDAY RUN — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
     if not _ibkr_reachable():
-        msg = "IB Gateway unreachable before Monday CSP pipeline — trades will not execute"
+        msg = "IB Gateway unreachable before Monday run — trades will not execute"
         log.error(f"❌ {msg}")
         _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
-    try:
-        from screener import get_top_targets
-        from position_sizer import size_all
-        from trader import execute_positions
+    # ── Live progress feed ───────────────────────────────────────────
+    # Written from the very first second so the dashboard can swap the
+    # Next-Execution countdown for live "Working on X" status for the WHOLE
+    # workflow — both the wheel-check (CC) phase AND the CSP phase. Earlier this
+    # only covered the CSP phase, so the multi-minute CC-selling phase showed
+    # nothing. /api/run-status serves this file. Best-effort — never breaks the run.
+    import json as _json
+    _progress_file  = "/data/run_progress.json"
+    _ticker_results = []
+    _phase          = {"name": "wheel check"}
 
-        # Read context left by wheel_check (9:55AM)
-        state         = _load_state()
-        context       = state.get("monday_context", {})
-        skip_tickers       = set(context.get("skip_tickers", []))
-        freed_capital      = context.get("freed_capital", 0.0)
-        reserved_capital   = context.get("reserved_capital", 0.0)
-        active_wheel_count = context.get("active_wheel_count", 0)
-
-        if skip_tickers:
-            log.info(f"  🚫 Skipping tickers (wheel exits): {skip_tickers}")
-        if freed_capital > 0:
-            log.info(f"  💰 Freed capital added to pool: ${freed_capital:,.0f}")
-        if reserved_capital > 0:
-            log.info(f"  🔒 Capital reserved for {active_wheel_count} wheel holding(s): "
-                     f"${reserved_capital:,.0f}")
-
-        all_targets = get_top_targets(10)
-        if not all_targets:
-            log.error("❌ No targets returned — aborting"); return
-
-        # Filter out wheel-exit tickers so they don't re-enter as CSPs this week
-        filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
-        if len(filtered_targets) < len(all_targets):
-            log.info(f"  Filtered {len(all_targets) - len(filtered_targets)} ticker(s) "
-                     f"from screener results")
-
-        settings         = get_settings()
-        compound_enabled = settings.get("compound_enabled", True)
-        if compound_enabled:
-            # BuyingPower already reflects all open positions (manual trades, wheel stock,
-            # open CSPs) so it is the true available cash. Add freed_capital as a safety net
-            # in case the 9:55AM wheel stock sales haven't settled in IBKR yet.
-            buying_power, net_liq = _fetch_account_summary(TOTAL_FUND_BUDGET)
-            effective_budget      = buying_power + freed_capital
-            log.info(f"  📊 Budget: buying_power=${buying_power:,.0f}  net_liq=${net_liq:,.0f}  "
-                     f"freed=${freed_capital:,.0f}  effective=${effective_budget:,.0f}  (compounding ON)")
-        else:
-            effective_budget = TOTAL_FUND_BUDGET + freed_capital - reserved_capital
-            log.info(f"  📊 Budget: base=${TOTAL_FUND_BUDGET:,.0f}  freed=${freed_capital:,.0f}  "
-                     f"reserved=${reserved_capital:,.0f}  effective=${effective_budget:,.0f}  (compounding OFF)")
-        target_fills     = max(1, NUM_POSITIONS - active_wheel_count)
-        if target_fills < NUM_POSITIONS:
-            log.info(f"  🔢 Targeting {target_fills} CSP(s) "
-                     f"({active_wheel_count} wheel holding(s) active)")
-        positions = size_all(filtered_targets, budget=effective_budget,
-                             num_positions=target_fills)
-        if not positions:
-            log.error("❌ No positions sized — aborting"); return
-
-        # Write executing status to shared file so API can expose it
-        import json as _json
-        _progress_file = "/data/run_progress.json"
-        _ticker_results = []
-
-        def _sched_progress(ticker=None, stage=None, result=None):
-            if result:
-                _ticker_results.append(result)
-            try:
-                _json.dump({
-                    "executing": True,
-                    "current_ticker": ticker,
-                    "current_stage": stage,
-                    "ticker_results": list(_ticker_results),
-                }, open(_progress_file, "w"))
-            except Exception:
-                pass
-
-        _sched_progress(ticker=None, stage="starting")
-        results = execute_positions(positions, extra_targets=filtered_targets,
-                                    target_fills=target_fills, status_callback=_sched_progress)
-
-        # Clear progress file now that execution is done
+    def _sched_progress(ticker=None, stage=None, result=None):
+        if result:
+            _ticker_results.append(result)
         try:
-            _json.dump({"executing": False, "current_ticker": None, "current_stage": None,
+            _json.dump({
+                "executing":      True,
+                "current_phase":  _phase["name"],
+                "current_ticker": ticker,
+                "current_stage":  stage,
+                "ticker_results": list(_ticker_results),
+            }, open(_progress_file, "w"))
+        except Exception:
+            pass
+
+    def _clear_progress():
+        try:
+            _json.dump({"executing": False, "current_phase": None,
+                        "current_ticker": None, "current_stage": None,
                         "ticker_results": _ticker_results}, open(_progress_file, "w"))
         except Exception:
             pass
 
+    # Flip the feed to "executing" before any IBKR work so the dashboard hides
+    # the countdown immediately, not only once the CSP phase starts.
+    _sched_progress(ticker=None, stage="starting wheel check")
+
+    try:
+        # ── Step 1: wheel check (stop-loss sells + covered calls) ──
+        # Its return dict IS the pipeline context (skip_tickers, freed_capital,
+        # reserved_capital, active_wheel_count, cc_premium, shares_sold_pnl, …).
+        # progress_callback streams per-ticker CC/sell activity to the feed.
+        from wheel_manager import run_wheel_check
+        context = run_wheel_check(progress_callback=_sched_progress)
+        log.info(f"✅ Wheel check done — freed ${context['freed_capital']:,.0f}  "
+                 f"reserved ${context['reserved_capital']:,.0f}  skip {context['skip_tickers'] or 'none'}")
+
+        # ── Step 2: CSP pipeline, driven by the wheel check's live results ──
+        _phase["name"] = "CSP pipeline"
+        _sched_progress(ticker=None, stage="screening candidates")
+        from monday_runner import run_csp_pipeline
+        outcome = run_csp_pipeline(context, dry_run=False, progress_callback=_sched_progress)
+
+        # Clear progress file now that execution is done
+        _clear_progress()
+
         # ── Systemic market data failure alert ────────────────
+        results    = outcome.get("results", [])
         actionable = [r for r in results if r.get("status") not in
                       ("skipped_contract_size", "skipped_delta")]
         if actionable and all(r.get("status") == "failed_market_data" for r in actionable):
@@ -420,37 +393,24 @@ def run_pipeline():
                 "Check IB Gateway → data farm connections and paper account market data subscriptions."
             )
 
-        # ── Build weekly P&L ──────────────────────────────────
-        filled          = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
-        csp_premium     = sum(r.get("premium_collected", 0) for r in results)
-        cc_premium      = context.get("cc_premium", 0.0)
-        shares_sold_pnl = context.get("shares_sold_pnl", 0.0)
-        total_realized  = round(csp_premium + cc_premium + shares_sold_pnl, 2)
+        log.info(f"\n✅ Done — {outcome.get('fills', 0)}/{outcome.get('target_fills', 0)} CSP fills  |  "
+                 f"CSP ${outcome.get('csp_premium', 0):,.0f}  "
+                 f"Total realized ${outcome.get('total_realized', 0):,.0f}")
 
-        state = _load_state()   # reload — execute_positions merges but may have written it
-        state["weekly_pnl"] = {
-            "week_start":       now.strftime("%Y-%m-%d"),
-            "csp_premium":      round(csp_premium, 2),
-            "cc_premium":       round(cc_premium, 2),
-            "shares_sold_pnl":  round(shares_sold_pnl, 2),
-            "total_realized":   total_realized,
-            "last_updated":     datetime.now().isoformat()
-        }
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-
-        from discord_poster import is_enabled, post_weekly_results
-        if is_enabled():
-            post_weekly_results(_load_state(), fund_budget=effective_budget)
-
-        log.info(f"\n✅ Done — {len(filled)}/{target_fills} CSP fills  |  "
-                 f"CSP ${csp_premium:,.0f}  CC ${cc_premium:,.0f}  "
-                 f"Shares sold P&L ${shares_sold_pnl:,.0f}  "
-                 f"Total realized ${total_realized:,.0f}")
+        # ── Step 3: cash sweep — park the week's undeployed remainder ──
+        # No-op unless enabled in Settings. Self-guarded (all slots filled, 10%
+        # net-liq cap, no margin) and never raises into the run.
+        try:
+            from cash_park import maybe_buy_park
+            maybe_buy_park(outcome, context, dry_run=False)
+        except Exception as e:
+            log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
 
     except Exception as e:
-        log.error(f"❌ Pipeline error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Monday CSP pipeline failed: `{type(e).__name__}: {e}`")
+        log.error(f"❌ Monday run error: {e}", exc_info=True)
+        _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
+        # Don't leave the feed stuck on "executing" — restore the countdown.
+        _clear_progress()
     finally:
         loop.close()
 
@@ -528,6 +488,33 @@ def run_risk_monitor():
         loop.close()
 
 
+# ── Thu/Fri 12:30PM — cash-sweep end-of-week sell ─────────────
+# Scheduled on BOTH Thursday and Friday; the job only actually sells on whichever
+# is the week's last trading day (Friday normally, Thursday when Friday is a market
+# holiday such as Good Friday). sell_park() itself no-ops when there's nothing
+# parked, so a Thursday firing in a normal week is a cheap check.
+
+def run_cash_park_sell():
+    loop = _new_loop()
+    now  = datetime.now(PST)
+    if not is_last_trading_day_of_week(now.date()):
+        log.info(f"⏭️  CASH SWEEP SELL skipped — {now.strftime('%A %Y-%m-%d')} is not "
+                 f"the last trading day of the week")
+        loop.close()
+        return
+    log.info("\n" + "=" * 65)
+    log.info(f"💵 CASH SWEEP SELL — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info("=" * 65)
+    try:
+        from cash_park import sell_park
+        sell_park(dry_run=False)
+    except Exception as e:
+        log.error(f"❌ Cash sweep sell error: {e}", exc_info=True)
+        _discord_alert(f"🚨 **YRVI** Cash sweep sell job failed: `{type(e).__name__}: {e}`")
+    finally:
+        loop.close()
+
+
 # ── Scheduler main ─────────────────────────────────────────────
 
 def main():
@@ -541,7 +528,14 @@ def main():
         h12  = h % 12 or 12
         return f"{h12}:{m:02d} {ampm} PST"
 
-    scheduler = BlockingScheduler(timezone=PST)
+    # job_defaults: survive brief host suspends (e.g. laptop maintenance sleep).
+    # If the host freezes across a job's fire time, run it on wake as long as we
+    # woke within 30 min — bounded so an overnight/weekend sleep can't fire a
+    # trade hours late. coalesce collapses a backlog into a single run.
+    scheduler = BlockingScheduler(
+        timezone=PST,
+        job_defaults={"misfire_grace_time": 1800, "coalesce": True},
+    )
 
     scheduler.add_job(
         run_screener_preview,
@@ -550,28 +544,34 @@ def main():
     )
     scheduler.add_job(
         run_assignment_detection,
-        trigger="cron", day_of_week="fri", hour=16, minute=15,
-        id="friday_assignment", name="Friday Assignment Detection"
+        trigger="cron", day_of_week="sat", hour=8, minute=0,
+        id="saturday_assignment", name="Saturday Assignment Detection"
     )
     scheduler.add_job(
         run_discord_preview,
         trigger="cron", day_of_week="mon,tue", hour=prev_h, minute=prev_m,
         id="monday_discord_preview", name="Weekly Discord Preview"
     )
-    scheduler.add_job(
-        run_wheel_check_job,
-        trigger="cron", day_of_week="mon,tue", hour=wheel_h, minute=wheel_m,
-        id="monday_wheel_check", name="Weekly Wheel Check"
-    )
+    # Wheel check → CSP pipeline run as ONE chained job (no state.json hand-off
+    # race). It fires at the wheel-check time so CCs are still priced near the
+    # open; the CSP pipeline then runs immediately after the wheel check returns.
     scheduler.add_job(
         run_pipeline,
-        trigger="cron", day_of_week="mon,tue", hour=exec_h, minute=exec_m,
-        id="monday_execution", name="Weekly CSP Execution"
+        trigger="cron", day_of_week="mon,tue", hour=wheel_h, minute=wheel_m,
+        id="monday_execution", name="Weekly Wheel Check + CSP Execution"
     )
     scheduler.add_job(
         run_risk_monitor,
         trigger="cron", day_of_week="tue,wed,thu", hour=9, minute=0,
         id="daily_risk_monitor", name="Daily Risk Monitor"
+    )
+    # Cash-sweep sell — fires Thu+Fri; run_cash_park_sell only acts on the week's
+    # last trading day (Friday, or Thursday when Friday is a holiday). 12:30 PM PST
+    # leaves ample liquidity and clears the position well before the close.
+    scheduler.add_job(
+        run_cash_park_sell,
+        trigger="cron", day_of_week="thu,fri", hour=12, minute=30,
+        id="cash_park_sell", name="Cash Sweep End-of-Week Sell"
     )
     scheduler.add_job(
         run_auto_update,
@@ -591,9 +591,9 @@ def main():
     log.info("   • Friday     4:15 PM PST  — assignment detection (skipped on Good Friday)")
     log.info("   • Saturday   6:00 PM PST  — screener preview")
     log.info(f"   • Mon/Tue*  {fmt(prev_h, prev_m):>11}  — Discord preview (if webhook set)")
-    log.info(f"   • Mon/Tue*  {fmt(wheel_h, wheel_m):>11}  — wheel check (stop loss + CCs)")
-    log.info(f"   • Mon/Tue*  {fmt(exec_h, exec_m):>11}  — CSP execution  ← configured")
+    log.info(f"   • Mon/Tue*  {fmt(wheel_h, wheel_m):>11}  — wheel check (stop loss + CCs) → CSP execution  ← configured {fmt(exec_h, exec_m)}")
     log.info("   • Tue–Thu    9:00 AM PST  — daily risk monitor (skipped on holidays)")
+    log.info("   • Thu/Fri   12:30 PM PST  — cash-sweep sell (last trading day only; if enabled)")
     log.info("   • Wed–Fri    3:00 AM PST  — auto-update check (if enabled in settings)")
     log.info("   * Shifts to Tuesday when Monday is a market holiday")
     log.info("   Press Ctrl+C to stop")

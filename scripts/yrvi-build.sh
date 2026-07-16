@@ -258,75 +258,173 @@ echo ""
 printf "${BOLD}Step 3 / 4   Build and restart${NC}\n"
 echo "──────────────────────────────────────────────────────"
 
+# `timeout` is GNU coreutils — present in the api container (debian) but NOT on
+# the Mac host, where this script also runs directly (manual recovery, dry-run
+# checks). Without this guard, every build would be marked failed on macOS
+# (command not found, exit 127) even when the build itself succeeds.
+if   command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
+else TIMEOUT_BIN=""; fi
+BUILD_TIMEOUT_SECS=900   # 15 min per service — generous for npm/vite + pip installs
+run_with_build_timeout() {
+    if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$BUILD_TIMEOUT_SECS" "$@"; else "$@"; fi
+}
+
 if [ "$DRY_RUN" = true ]; then
     if [ "$CONTAINER" = "all" ]; then
-        info "Would run: docker compose --env-file .env.compose build"
-        info "Would run: docker compose --env-file .env.compose up -d --no-deps ib_gateway secrets scheduler web"
-        info "Would run: docker compose --env-file .env.compose up -d --no-deps api"
+        info "Would build+restart all 5 services in dependency order:"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build secrets"
+        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets   (then wait until healthy)"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build --pull ib_gateway"
+        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
+        for svc in scheduler web api; do
+            info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build $svc"
+            info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
+        done
     else
         info "Would run: docker compose --env-file .env.compose up -d --build $CONTAINER"
     fi
 else
     info "Building and restarting ${CONTAINER}..."
     if [ "$CONTAINER" = "all" ]; then
-        # Phase 1: build all images (no container changes yet)
-        docker compose --env-file .env.compose build
-        # Phase 2: restart every service except api first. When this script runs
-        # inside the api container (upgrade button), docker compose would kill
-        # this process when it recreates the api container — doing api last means
-        # all other services are already updated before that happens.
-        docker compose --env-file .env.compose up -d --no-deps ib_gateway secrets scheduler web
-        # Phase 3: restart api.
-        # When this script runs inside the api container (upgrade button), calling
-        # "docker compose up api" would stop the old api container — killing this
-        # process before the new container is created. Instead, spawn an independent
-        # sidecar container that is outside the api cgroup and survives the restart.
-        if [ -f "/.dockerenv" ]; then
-            # /host_repo is the container-internal path. For "docker run -v" we need
-            # the real host path — find it by inspecting this container's own mounts.
-            CONTAINER_ID=$(hostname)
-            HOST_REPO_PATH=$(docker inspect "$CONTAINER_ID" \
-                --format '{{range .Mounts}}{{if eq .Destination "/host_repo"}}{{.Source}}{{end}}{{end}}' \
-                2>/dev/null || true)
-            # Normalise platform-specific path formats returned by docker inspect:
-            #   Windows native / Hyper-V:  C:\Users\...  → /c/Users/...
-            #   Windows WSL2 Docker Desktop: /run/desktop/mnt/host/c/... → /c/...
-            if echo "$HOST_REPO_PATH" | grep -qE '^[A-Za-z]:\\'; then
-                DRIVE=$(echo "$HOST_REPO_PATH" | cut -c1 | tr 'A-Z' 'a-z')
-                REST=$(echo "$HOST_REPO_PATH" | cut -c3- | tr '\\' '/')
-                HOST_REPO_PATH="/${DRIVE}/${REST}"
-            elif echo "$HOST_REPO_PATH" | grep -qE '^/run/desktop/mnt/host/'; then
-                HOST_REPO_PATH=$(echo "$HOST_REPO_PATH" | sed 's|^/run/desktop/mnt/host||')
-            fi
-            info "Host repo path: ${HOST_REPO_PATH}"
-            if [ -z "$HOST_REPO_PATH" ]; then
-                warn "Could not resolve /host_repo host path — restart api manually"
+        BUILD_FAILED=()
+
+        # ── secrets FIRST ──────────────────────────────────────────
+        # Every other service depends on the secrets container being healthy
+        # (it serves credentials at their startup), so rebuild it, force a
+        # restart, and WAIT for healthy before touching anything that needs it.
+        info "Building secrets..."
+        if run_with_build_timeout docker compose --env-file .env.compose build secrets; then
+            docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets
+            info "Waiting for secrets container to become healthy..."
+            SECRETS_HEALTHY=""
+            for _ in $(seq 1 30); do
+                if [ "$(docker inspect --format '{{.State.Health.Status}}' yrvi-secrets-1 2>/dev/null)" = "healthy" ]; then
+                    SECRETS_HEALTHY=1; break
+                fi
+                sleep 2
+            done
+            if [ -n "$SECRETS_HEALTHY" ]; then
+                ok "secrets built, restarted and healthy"
             else
-                docker rm -f yrvi-api-restarter 2>/dev/null || true
-                # Pass HOST_REPO_PATH as an env var so the sidecar can give
-                # docker compose the real host path via --project-directory.
-                # Without this, compose resolves "." in volumes as /workspace
-                # (the sidecar's path), which doesn't exist on the Mac host,
-                # causing the api container to exit instantly with no logs.
-                docker run --rm -d \
-                    --name yrvi-api-restarter \
-                    -v /var/run/docker.sock:/var/run/docker.sock \
-                    -v "${HOST_REPO_PATH}":"${HOST_REPO_PATH}" \
-                    -e "HOST_PROJ=${HOST_REPO_PATH}" \
-                    --entrypoint "" \
-                    yrvi-api:local \
-                    bash -c 'sleep 2 && docker compose --project-directory "$HOST_PROJ" --env-file "$HOST_PROJ/.env.compose" up -d --no-deps --force-recreate api'
-                ok "api restart handed off to sidecar — will complete in ~5s"
+                warn "secrets did not report healthy within 60s — dependents may be degraded"
+                BUILD_FAILED+=("secrets")
             fi
         else
-            docker compose --env-file .env.compose up -d --no-deps api
+            warn "secrets build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+            BUILD_FAILED+=("secrets")
+        fi
+
+        # ── ib_gateway ─────────────────────────────────────────────
+        # --pull so a routine upgrade auto-adopts a newer upstream TWS/gateway
+        # image whenever one is available. The volume-shadow + JRE-pointer
+        # self-heals in docker/ib-gateway/entrypoint.sh recover any version skew
+        # on first boot (with a 🔄 Discord alert). NOTE: restarting the gateway
+        # forces an IB Key 2FA approval on the LIVE box, every upgrade.
+        info "Building ib_gateway (--pull — may adopt a newer upstream TWS)..."
+        if run_with_build_timeout docker compose --env-file .env.compose build --pull ib_gateway; then
+            docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway
+            ok "ib_gateway built and restarted (approve IB Key 2FA on the live box)"
+        else
+            warn "ib_gateway build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+            BUILD_FAILED+=("ib_gateway")
+        fi
+
+        # ── scheduler, web ─────────────────────────────────────────
+        # Built+restarted independently so a stuck/crashed build of ONE service
+        # can never block the others — each gets its own bounded build
+        # (run_with_build_timeout) and its own immediate restart.
+        for svc in scheduler web; do
+            info "Building ${svc}..."
+            if run_with_build_timeout docker compose --env-file .env.compose build "$svc"; then
+                docker compose --env-file .env.compose up -d --no-deps "$svc"
+                ok "${svc} built and restarted"
+            else
+                warn "${svc} build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+                BUILD_FAILED+=("$svc")
+            fi
+        done
+
+        # api last — same self-restart-sidecar reasoning as before (its own
+        # build is now independent too, so a scheduler/web failure can't block it).
+        info "Building api..."
+        if run_with_build_timeout docker compose --env-file .env.compose build api; then
+            # When this script runs inside the api container (upgrade button), calling
+            # "docker compose up api" would stop the old api container — killing this
+            # process before the new container is created. Instead, spawn an independent
+            # sidecar container that is outside the api cgroup and survives the restart.
+            if [ -f "/.dockerenv" ]; then
+                # /host_repo is the container-internal path. For "docker run -v" we need
+                # the real host path — find it by inspecting this container's own mounts.
+                CONTAINER_ID=$(hostname)
+                HOST_REPO_PATH=$(docker inspect "$CONTAINER_ID" \
+                    --format '{{range .Mounts}}{{if eq .Destination "/host_repo"}}{{.Source}}{{end}}{{end}}' \
+                    2>/dev/null || true)
+                # Normalise platform-specific path formats returned by docker inspect:
+                #   Windows native / Hyper-V:  C:\Users\...  → /c/Users/...
+                #   Windows WSL2 Docker Desktop: /run/desktop/mnt/host/c/... → /c/...
+                if echo "$HOST_REPO_PATH" | grep -qE '^[A-Za-z]:\\'; then
+                    DRIVE=$(echo "$HOST_REPO_PATH" | cut -c1 | tr 'A-Z' 'a-z')
+                    REST=$(echo "$HOST_REPO_PATH" | cut -c3- | tr '\\' '/')
+                    HOST_REPO_PATH="/${DRIVE}/${REST}"
+                elif echo "$HOST_REPO_PATH" | grep -qE '^/run/desktop/mnt/host/'; then
+                    HOST_REPO_PATH=$(echo "$HOST_REPO_PATH" | sed 's|^/run/desktop/mnt/host||')
+                fi
+                info "Host repo path: ${HOST_REPO_PATH}"
+                if [ -z "$HOST_REPO_PATH" ]; then
+                    warn "Could not resolve /host_repo host path — restart api manually"
+                else
+                    docker rm -f yrvi-api-restarter 2>/dev/null || true
+                    # Pass HOST_REPO_PATH as an env var so the sidecar can give
+                    # docker compose the real host path via --project-directory.
+                    # Without this, compose resolves "." in volumes as /workspace
+                    # (the sidecar's path), which doesn't exist on the Mac host,
+                    # causing the api container to exit instantly with no logs.
+                    docker run --rm -d \
+                        --name yrvi-api-restarter \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v "${HOST_REPO_PATH}":"${HOST_REPO_PATH}" \
+                        -e "HOST_PROJ=${HOST_REPO_PATH}" \
+                        --entrypoint "" \
+                        yrvi-api:local \
+                        bash -c 'sleep 2 && docker compose --project-directory "$HOST_PROJ" --env-file "$HOST_PROJ/.env.compose" up -d --no-deps --force-recreate api'
+                    ok "api restart handed off to sidecar — will complete in ~5s"
+                fi
+            else
+                docker compose --env-file .env.compose up -d --no-deps api
+            fi
+            ok "api built and started"
+        else
+            warn "api build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
+            BUILD_FAILED+=("api")
+        fi
+
+        # Persist machine-readable result for the dashboard. Guard the empty-array
+        # case explicitly — printf '"%s",' with no args still emits one empty-string
+        # element, which would write {"failed_services": [""]} on a clean run and
+        # make the dashboard's length>0 check report a phantom failure.
+        if [ ${#BUILD_FAILED[@]} -gt 0 ]; then
+            FAILED_JSON=$(printf '"%s",' "${BUILD_FAILED[@]}" | sed 's/,$//')
+        else
+            FAILED_JSON=""
+        fi
+        printf '{"failed_services": [%s]}\n' "$FAILED_JSON" > /data/upgrade_result.json 2>/dev/null || true
+
+        if [ ${#BUILD_FAILED[@]} -gt 0 ]; then
+            printf "  ${RED}❌${NC}  Build failed for: %s — other services were still upgraded\n" "${BUILD_FAILED[*]}" >&2
+            info "Check logs: docker compose --env-file .env.compose logs --tail=100 <service>"
+            info "Retry: bash scripts/yrvi-build.sh <service> --${TRADING_MODE}"
+            if [ ${#WRITTEN_SECRET_FILES[@]} -gt 0 ]; then
+                for f in "${WRITTEN_SECRET_FILES[@]}"; do rm -f "$f"; done
+            fi
+            exit 1
         fi
     else
         docker compose --env-file .env.compose up -d --build "$CONTAINER"
         # Re-query after rebuild — container ID changes after docker compose replaces the container
         CONTAINER_ID=$(docker compose --env-file .env.compose ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
+        ok "${CONTAINER} built and started"
     fi
-    ok "${CONTAINER} built and started"
 fi
 
 # ── Step 4: Wait for healthy ───────────────────────────────────
@@ -381,7 +479,12 @@ else
     else
         # For a single container: inspect health directly (same logic as yrvi-restart.sh)
         while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
+            # Null-safe: containers without a HEALTHCHECK (web, ib_gateway) have a
+            # nil .State.Health. Accessing .State.Health.Status directly makes the Go
+            # template error on newer Docker, which used to fall through to the 60s
+            # timeout. The {{if .State.Health}} guard yields an empty string instead,
+            # which the "no healthcheck" branch below treats as running=success.
+            HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$CONTAINER_ID" 2>/dev/null || echo "error")
             STATUS=$(docker inspect --format='{{.State.Status}}'        "$CONTAINER_ID" 2>/dev/null || echo "error")
 
             if [ "$STATUS" = "exited" ] || [ "$STATUS" = "dead" ]; then

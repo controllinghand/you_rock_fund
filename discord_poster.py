@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 
-from config import MAX_PER_POSITION, TRADING_MODE, ACCOUNT
+from config import MAX_PER_POSITION, TRADING_MODE, ACCOUNT, MODE_LABEL
 from secrets_client import get_secret
 
 load_dotenv()
@@ -19,11 +19,10 @@ load_dotenv()
 WEBHOOK_URL = get_secret("discord_webhook_url", "DISCORD_WEBHOOK_URL")
 YTD_FILE      = "ytd_tracker.json"
 PST           = ZoneInfo("America/Los_Angeles")
-ANNUAL_TARGET = 100_000
 
 _version_file = Path(__file__).parent / "VERSION"
 _VERSION = f"v{_version_file.read_text().strip()}" if _version_file.exists() else "unknown"
-_FOOTER  = f"You Rock Volatility Income Fund · {_VERSION}"
+_FOOTER  = f"You Rock Volatility Income Fund · {_VERSION} · {MODE_LABEL}"
 
 COLOR_GREEN  = 0x2ECC71   # yield ≥ 1%
 COLOR_YELLOW = 0xF1C40F   # yield 0.5–1%
@@ -175,16 +174,26 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
 
         else:
             label = SKIP_LABEL.get(status, status)
-            if status == "skipped_liquidity" and ex.get("spread_pct") is not None:
+            if status == "skipped_liquidity":
                 reason = ex.get("reason")
-                if reason == "spread_illiquid":
-                    label = f"skipped — spread too wide (illiquid) ({ex['spread_pct']*100:.1f}%)"
-                elif reason == "spread_low_yield":
-                    label = f"skipped — spread too wide, low yield ({ex['spread_pct']*100:.1f}%)"
-                elif reason == "spread_low_yield_unfilled":
-                    label = f"skipped — spread too wide, limit unfilled ({ex['spread_pct']*100:.1f}%)"
-                else:
-                    label = f"skipped — spread too wide ({ex['spread_pct']*100:.1f}%)"
+                if reason == "oi":
+                    oi   = ex.get("open_interest")
+                    notl = ex.get("oi_notional")
+                    if oi is not None and notl is not None:
+                        label = f"skipped — open interest too thin (OI {oi:.0f}, ${notl:,.0f} notional)"
+                    elif oi is not None:
+                        label = f"skipped — open interest too thin (OI {oi:.0f})"
+                    else:
+                        label = "skipped — open interest too thin"
+                elif ex.get("spread_pct") is not None:
+                    if reason == "spread_illiquid":
+                        label = f"skipped — spread too wide (illiquid) ({ex['spread_pct']*100:.1f}%)"
+                    elif reason == "spread_low_yield":
+                        label = f"skipped — spread too wide, low yield ({ex['spread_pct']*100:.1f}%)"
+                    elif reason == "spread_low_yield_unfilled":
+                        label = f"skipped — spread too wide, limit unfilled ({ex['spread_pct']*100:.1f}%)"
+                    else:
+                        label = f"skipped — spread too wide ({ex['spread_pct']*100:.1f}%)"
             strike_str = f"{_fmt_strike(strike)} strike  |  " if strike is not None else ""
             lines.append(f"{emoji} **{ticker}**  |  {strike_str}{label}")
 
@@ -216,6 +225,12 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         if "spread_low_yield_unfilled" in reasons:
             footnotes.append(
                 "* Spread too wide, limit unfilled = mid yield qualified but no fill at limit price"
+            )
+        if "oi" in reasons:
+            sample_oi       = next((ex for ex in skip_exs if ex.get("min_oi_notional") is not None), {})
+            min_oi_notional = sample_oi.get("min_oi_notional", 1_000_000)
+            footnotes.append(
+                f"* Open interest too thin = OI × strike × 100 < ${min_oi_notional:,.0f} notional (price-neutral liquidity floor)"
             )
     if "skipped_contract_size" in statuses:
         footnotes.append(f"* Contract too large = single contract exceeds ${MAX_PER_POSITION:,.0f} max position size")
@@ -252,8 +267,78 @@ def _yield_emoji(yield_pct: float) -> str:
     return "🔴"
 
 
-def post_weekly_plan(positions: list):
-    """Post Saturday evening weekly trading plan to Discord."""
+def wheel_plan_totals(wheel_plan: list) -> tuple:
+    """Sum the capital and premium of the newly-written covered calls in a plan.
+
+    CC capital uses each holding's cost basis (assigned_strike × shares) — the same
+    base the per-holding income % is computed against — so a combined blended yield
+    (CSP + CC) pairs each premium with the capital that actually earned it. Only
+    `cc_opened` rows count: already-covered / deferred / sold holdings contribute no
+    new premium this week, so including their capital would understate the yield.
+    Returns (cc_capital, cc_premium).
+    """
+    cc_capital = 0.0
+    cc_premium = 0.0
+    for a in wheel_plan or []:
+        if a.get("action") != "cc_opened":
+            continue
+        cc_premium += a.get("cc_premium", 0.0) or 0.0
+        cc_capital += (a.get("assigned_strike") or 0.0) * (a.get("shares", 0) or 0)
+    return round(cc_capital, 2), round(cc_premium, 2)
+
+
+def _wheel_plan_lines(wheel_plan: list) -> list:
+    """Render wheel-check decisions as Discord lines, mirroring the This Week
+    'Monday Wheel Plan' rows (CC opened / deferred / already-covered / sold)."""
+    lines = []
+    for a in wheel_plan or []:
+        action = a.get("action", "")
+        ticker = a.get("ticker", "?")
+        if action == "cc_opened":
+            prem   = a.get('cc_premium', 0)
+            strike = a.get('cc_strike')
+            cost   = a.get('assigned_strike')
+            shares = a.get('shares', 0)
+            yield_str = ""
+            if cost and shares:
+                yield_str = f" | {prem / (cost * shares) * 100:.2f}% income"
+            cost_str = ""
+            if a.get("below_assigned") and cost and strike:
+                cost_str = f" | ⚠️ below cost ${cost:.2f} ({(strike - cost) / cost * 100:.1f}%)"
+            lines.append(
+                f"✅ **{ticker}** — Write CC @ {_fmt_strike(strike)} | "
+                f"δ{a.get('cc_delta', 0):.2f} | ~${prem:,.0f} | exp {a.get('cc_expiry', '?')}"
+                f"{yield_str}{cost_str}"
+            )
+        elif action == "cc_deferred":
+            lines.append(
+                f"⏳ **{ticker}** — CC could not be priced (deferred); "
+                f"{a.get('shares', '')} sh kept, no sale"
+            )
+        elif action in ("cc_already_open", "held_covered"):
+            exp = a.get("cc_expiry")
+            lines.append(f"♻️ **{ticker}** — Already covered by open CC"
+                         + (f" (exp {exp})" if exp else "") + " — skip")
+        elif action == "cc_failed":
+            lines.append(f"⚠️ **{ticker}** — CC could not be priced @ {_fmt_strike(a.get('cc_strike'))}")
+        elif isinstance(action, str) and action.startswith("sold"):
+            reason = action.replace("sold_", "").replace("_", " ") or "sold"
+            lines.append(
+                f"📤 **{ticker}** — Sell {a.get('shares', '')} sh ({reason}) | "
+                f"~${a.get('proceeds', 0):,.0f} proceeds | P&L ${a.get('realized_pnl', 0):,.0f}"
+            )
+        else:
+            lines.append(f"• **{ticker}** — {action}")
+    return lines
+
+
+def post_weekly_plan(positions: list, wheel_plan: list = None,
+                     freed_capital: float = 0.0, cc_premium: float = 0.0):
+    """Post Saturday evening weekly trading plan to Discord.
+
+    wheel_plan (optional): wheel-check decisions from run_monday's dry-run, shown
+    as a 'Monday Wheel Plan' section so Discord mirrors the This Week dashboard.
+    """
     if not WEBHOOK_URL:
         return
 
@@ -293,27 +378,88 @@ def post_weekly_plan(positions: list):
         total_capital += capital_used
         total_premium += premium_total
 
-    blended_yield = (total_premium / total_capital * 100) if total_capital else 0.0
+    # Roll the covered calls into the top-line so the summary is the whole plan
+    # (CSP + CC), not CSP-only. Pure-CSP weeks are unchanged (cc_* = 0).
+    cc_capital, _ = wheel_plan_totals(wheel_plan)
+    combined_capital = total_capital + cc_capital
+    combined_premium = total_premium + cc_premium
+    combined_yield   = (combined_premium / combined_capital * 100) if combined_capital else 0.0
     run_time = now.strftime("%I:%M %p %Z").lstrip("0")
+
+    fields = []
+
+    # Monday Wheel Plan first — mirrors the This Week dashboard section (CC / defer
+    # / sell decisions). The CSP legs are already listed in the embed description
+    # above, so emitting the wheel plan here puts BOTH the CSP and CC blocks ahead
+    # of the combined summary below — which is the whole point: the summary reads
+    # as the grand total of the entire plan, not just the CSP section.
+    wheel_lines = _wheel_plan_lines(wheel_plan)
+    if wheel_lines:
+        body = "\n".join(wheel_lines)
+        if len(body) > 1024:                      # Discord field value hard cap
+            body = body[:1000].rsplit("\n", 1)[0] + "\n… (truncated)"
+        fields.append({
+            "name":  f"🗓️ Monday Wheel Plan  ·  CC ${cc_premium:,.0f} · Freed ${freed_capital:,.0f}",
+            "value": body,
+            "inline": False,
+        })
+
+    # Combined CSP + CC totals — placed at the BOTTOM, under both blocks, so it's
+    # unambiguously the total of the whole plan rather than the CSP section alone.
+    fields += [
+        {"name": "Capital Deployed (CSP + CC)", "value": f"${combined_capital:,.0f}", "inline": True},
+        {"name": "Est. Premium (CSP + CC)",     "value": f"${combined_premium:,.0f}", "inline": True},
+        {"name": "Blended Yield",               "value": f"{combined_yield:.2f}%",     "inline": True},
+    ]
+
+    fields.append({"name": "​", "value": "Results posted Monday after execution ✅",
+                   "inline": False})
 
     _post({"embeds": [{
         "title":       f"📋 YRVI Week of {next_monday} — Trading Plan [{mode_label}]",
-        "description": "\n".join(lines) if lines else "No positions sized.",
+        "description": "\n".join(lines) if lines else "No CSP positions sized.",
         "color":       0x0099FF,
-        "fields": [
-            {"name": "Capital Deployed", "value": f"${total_capital:,.0f}", "inline": True},
-            {"name": "Est. Premium",     "value": f"${total_premium:,.0f}", "inline": True},
-            {"name": "Blended Yield",    "value": f"{blended_yield:.2f}%",  "inline": True},
-            {"name": "​",           "value": "Results posted Monday after execution ✅",
-             "inline": False},
-        ],
+        "fields":      fields,
         "footer":    {"text": f"Screener run {run_time} · {_VERSION} · {mode_label}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 
 
-def post_weekly_results(state: dict, fund_budget: float = 250_000):
-    """Post rich embed after Monday CSP execution completes."""
+def _goal_lines(ytd_total: float, capital: float, goal_pct: float,
+                net_liq: float = None, bold: bool = False) -> list:
+    """Two-goal status block for the weekly posts:
+      • Premium Goal — gross income collected vs the annual target (capital × goal_pct)
+      • Account Value — live Net Liq vs (capital + target), with the +/- growth
+    The account line is omitted when net_liq is unavailable (e.g. IBKR down).
+    `bold` wraps the labels in ** for the rich-embed (results) post.
+    """
+    b = "**" if bold else ""
+    annual_target  = capital * goal_pct
+    account_target = capital * (1 + goal_pct)
+    prem_pct = (ytd_total / annual_target * 100) if annual_target else 0
+    lines = [
+        f"{b}Premium Goal:{b} {prem_pct:.1f}% — "
+        f"${ytd_total:,.0f} / ${annual_target:,.0f} ({goal_pct * 100:.0f}%/yr)"
+    ]
+    if net_liq is not None and capital:
+        growth     = net_liq - capital
+        growth_pct = growth / capital * 100
+        sign       = "+" if growth >= 0 else "−"
+        emoji      = "🟢" if growth >= 0 else "🔴"
+        lines.append(
+            f"{b}Account Value:{b} {emoji} ${net_liq:,.0f} / ${account_target:,.0f} "
+            f"({sign}${abs(growth):,.0f}, {sign}{abs(growth_pct):.1f}% vs ${capital:,.0f} capital)"
+        )
+    return lines
+
+
+def post_weekly_results(state: dict, fund_budget: float = 250_000,
+                         capital: float = None, goal_pct: float = 0.24,
+                         net_liq: float = None, manual: bool = False):
+    """Post rich embed after Monday CSP execution completes.
+
+    manual=True tags the footer so it's clear the run was a manual Run Now rather
+    than the scheduled Monday job."""
     if not WEBHOOK_URL:
         return
 
@@ -325,12 +471,21 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
     total_realized  = pnl.get("total_realized", 0.0)
 
     premium_collected = csp_premium + cc_premium
-    yield_pct = premium_collected / fund_budget * 100 if fund_budget else 0
-    ytd       = _update_ytd(week_start, premium_collected, shares_sold_pnl, fund_budget)
+    # Goal is anchored to contributed capital (static fund_budget setting), not
+    # the compound deployment budget — keep the two from drifting apart.
+    if capital is None:
+        capital = fund_budget
+    # Yield denominator = the week's deployment budget. On a zero-CSP-slot week
+    # the caller passes fund_budget=0 (no CSPs were sized), which would zero the
+    # yield and paint the whole post red — title 🔴, red sidebar, 0.00% — despite
+    # CC premium having been collected. Fall back to net_liq, then contributed
+    # capital, so the yield reflects reality and matches the dashboard.
+    denom = fund_budget or net_liq or capital or 0
+    yield_pct = premium_collected / denom * 100 if denom else 0
+    ytd       = _update_ytd(week_start, premium_collected, shares_sold_pnl, denom)
 
-    avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100) \
-                   if ytd["weeks_traded"] and fund_budget else 0
-    progress_pct = ytd["total_premium"] / ANNUAL_TARGET * 100
+    avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / denom * 100) \
+                   if ytd["weeks_traded"] and denom else 0
 
     fields = [
         {"name": "CSP Premium",      "value": f"${csp_premium:,.0f}",     "inline": True},
@@ -356,9 +511,21 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
                 prem   = a.get("cc_premium", 0)
                 strike = a.get("cc_strike", 0)
                 delta  = a.get("cc_delta", 0)
+                cost   = a.get("assigned_strike")
+                shares = a.get("shares", 0)
+                # Income yield = premium / capital tied up in the stock (cost × shares).
+                yield_str = ""
+                if cost and shares:
+                    yld = prem / (cost * shares) * 100
+                    yield_str = f"  ({yld:.2f}% income)"
+                # Flag below-cost CCs and show the cost basis + gap.
+                cost_str = ""
+                if a.get("below_assigned") and cost:
+                    gap = (strike - cost) / cost * 100
+                    cost_str = f"  ⚠️ below cost ${cost:.2f} ({gap:.1f}%)"
                 activity_lines.append(
                     f"🔄 **{ticker}** CC @ ${strike:.2f}  δ{delta:.2f}  "
-                    f"${prem:,.0f} premium"
+                    f"${prem:,.0f} premium{yield_str}{cost_str}"
                 )
             elif action == "sold_earnings_this_week":
                 dte     = a.get("days_to_earnings", "?")
@@ -397,14 +564,21 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
         f"**Total Premium:** ${ytd['total_premium']:,.0f}",
         f"**Weeks Traded:** {ytd['weeks_traded']}",
         f"**Avg Yield/Week:** {avg_yield:.2f}%",
-        f"**Progress:** {progress_pct:.1f}% toward ${ANNUAL_TARGET:,} annual target",
+        *_goal_lines(ytd["total_premium"], capital, goal_pct, net_liq, bold=True),
     ]
+    def _week_yield(week: dict, prem: float) -> float:
+        # Legacy week entries predate the yield_pct field — fall back to
+        # computing it from the week's premium so the post never crashes.
+        if "yield_pct" in week:
+            return week["yield_pct"]
+        return prem / denom * 100 if denom else 0
+
     if best:
         best_prem = best.get("premium_collected", best.get("realized", 0))
-        ytd_lines.append(f"**Best Week:** ${best_prem:,.0f} ({best['yield_pct']:.2f}%)")
+        ytd_lines.append(f"**Best Week:** ${best_prem:,.0f} ({_week_yield(best, best_prem):.2f}%)")
     if worst and best and worst["week_start"] != best["week_start"]:
         worst_prem = worst.get("premium_collected", worst.get("realized", 0))
-        ytd_lines.append(f"**Worst Week:** ${worst_prem:,.0f} ({worst['yield_pct']:.2f}%)")
+        ytd_lines.append(f"**Worst Week:** ${worst_prem:,.0f} ({_week_yield(worst, worst_prem):.2f}%)")
     fields.append({"name": "📊 YTD Stats", "value": "\n".join(ytd_lines), "inline": False})
 
     holdings = [h for h in state.get("wheel_holdings", []) if h.get("shares", 0) > 0]
@@ -427,7 +601,7 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000):
                      f"${total_realized:,.0f} realized ({yield_pct:.2f}%)",
         "color":     _yield_color(yield_pct),
         "fields":    fields,
-        "footer":    {"text": _FOOTER},
+        "footer":    {"text": _FOOTER + (" · Manual run" if manual else "")},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 
@@ -508,8 +682,9 @@ def post_emergency_share_sale(result: dict):
     })
 
 
-def post_friday_summary(state: dict, called_away: list, new_assignments: list,
-                        fund_budget: float = 250_000):
+def post_weekly_review(state: dict, called_away: list, new_assignments: list,
+                        fund_budget: float = 250_000, capital: float = None,
+                        goal_pct: float = 0.24, net_liq: float = None):
     """
     Post Friday end-of-week summary — how every position resolved.
     Replaces the individual assignment + called-away alerts with one rich embed.
@@ -615,15 +790,17 @@ def post_friday_summary(state: dict, called_away: list, new_assignments: list,
     # YTD — read-only (already updated Monday after CSP execution)
     ytd = _load_ytd()
     if ytd.get("weeks_traded"):
-        avg_yield    = ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100
-        progress_pct = ytd["total_premium"] / ANNUAL_TARGET * 100
+        if capital is None:
+            capital = fund_budget
+        avg_yield  = ytd["total_premium"] / ytd["weeks_traded"] / fund_budget * 100 if fund_budget else 0
+        goal_block = "\n".join(_goal_lines(ytd["total_premium"], capital, goal_pct, net_liq))
         fields.append({
             "name": "📊 YTD Stats",
             "value": (
                 f"Total Premium: ${ytd['total_premium']:,.0f}\n"
                 f"Weeks Traded: {ytd['weeks_traded']}\n"
                 f"Avg Yield/Week: {avg_yield:.2f}%\n"
-                f"Progress: {progress_pct:.1f}% toward ${ANNUAL_TARGET:,.0f} annual target"
+                f"{goal_block}"
             ),
             "inline": False,
         })

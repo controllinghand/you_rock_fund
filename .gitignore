@@ -27,3 +27,9 @@ docker/secrets/*
 !docker/secrets/README.md
 .claude/
 AGENTS.md
+
+# Local backups (e.g. gateway /data volume snapshots) — never commit
+*.tar.gz
+
+# Local dev install id (boxes use /data/install_id)
+.install_id

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>YRVI · View Gateway</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f1115; color: #e6e6e6;
+    }
+    .card {
+      max-width: 460px; width: 90%; padding: 32px 28px; border-radius: 14px;
+      background: #171a21; box-shadow: 0 8px 40px rgba(0,0,0,.45); text-align: center;
+    }
+    h1 { font-size: 20px; margin: 0 0 6px; }
+    .sub { font-size: 13px; color: #9aa4b2; margin: 0 0 24px; }
+    a.btn {
+      display: block; text-decoration: none; padding: 14px 18px; border-radius: 10px;
+      font-weight: 600; margin: 10px 0; transition: filter .15s;
+    }
+    a.btn:hover { filter: brightness(1.12); }
+    .primary { background: #2f6feb; color: #fff; }
+    .danger { background: transparent; color: #e0a23c; border: 1px solid #6b5320; font-weight: 500; font-size: 14px; }
+    .note { font-size: 12px; color: #77808e; margin-top: 20px; line-height: 1.5; }
+    code { background: #232733; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>IB Gateway — View Gateway</h1>
+    <p class="sub">Inspect the IB Gateway screen (login, 2FA, dialogs, status).</p>
+
+    <!-- VIEW-ONLY is the default: noVNC will not send any pointer/keyboard events.
+         view.html auto-fills the VNC password, so no prompt. -->
+    <a class="btn primary" href="view.html">
+      👁  Open viewer (view-only)
+    </a>
+
+    <!-- CONTROL is deliberate and clearly marked, so accidental clicks/typing are unlikely. -->
+    <a class="btn danger" href="view.html?control=1"
+       onclick="return confirm('Enable KEYBOARD + MOUSE control of IB Gateway?\n\nClicks and typing WILL be sent to the live Gateway. Only use this to complete a login or 2FA prompt.');">
+      ⚠️  Enable keyboard / mouse control
+    </a>
+
+    <p class="note">
+      Password auto-fills from the <code>vnc_server_password</code> secret.<br>
+      Local-only · bound to <code>127.0.0.1</code>.
+    </p>
+  </div>
+</body>
+</html>

@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react'
-import { Sun, Moon, Monitor } from 'lucide-react'
+import { Sun, Moon, Monitor, Menu } from 'lucide-react'
 import axios from 'axios'
 import { useThemeContext } from '../ThemeProvider.jsx'
+import AlertsBell from './AlertsBell.jsx'
 
 function Indicator({ ok, label }) {
   return (
@@ -24,6 +25,25 @@ const THEME_ICONS = {
   system: <Monitor size={14} />,
 }
 
+// How long the gateway must be continuously unreachable before the StatusBar
+// offers a one-click restart. A gateway that just restarted (upgrade, nightly
+// restart, soft restart) is normally disconnected for a minute or two while it
+// logs back in — that's healthy startup, not a wedge. Waiting ~2 min (the
+// watchdog itself waits 10) means the button only appears when it's actually
+// stuck, so nobody is tempted to restart a gateway that's already recovering
+// (which on live would fire a needless IB Key 2FA push).
+const RESTART_BTN_GRACE_MS = 120000
+
+// True when the gateway looks like it needs a manual restart: port down, or port
+// up but the API handshake is dead — but NOT a credential problem (locked/failed),
+// where a restart just risks a deeper lockout.
+function gatewayNeedsRecovery(s) {
+  return !!s
+    && s.gateway_login_status !== 'failed'
+    && s.gateway_login_status !== 'locked'
+    && (!s.gateway_running || !s.ibkr_connected)
+}
+
 function versionDiff(current, latest) {
   const parse = v => (v || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0)
   const [cM, cN, cP] = parse(current)
@@ -34,11 +54,15 @@ function versionDiff(current, latest) {
   return 'same'
 }
 
-export default function StatusBar() {
+export default function StatusBar({ onMenuClick }) {
   const [status, setStatus]       = useState(null)
   const [pidFlash, setPidFlash]   = useState(false)
   const prevPid                   = useRef(null)
   const { theme, setTheme }       = useThemeContext()
+
+  const [gwRestarting, setGwRestarting]   = useState(false)
+  const [gwRestartFlash, setGwRestartFlash] = useState(null)  // {msg, color} | null
+  const [ibkrDownSince, setIbkrDownSince] = useState(null)    // ms timestamp | null
 
   const [versionInfo, setVersionInfo]     = useState(null)
   const [vChecking, setVChecking]         = useState(false)
@@ -48,10 +72,16 @@ export default function StatusBar() {
   const [upgradeOutput, setUpgradeOutput] = useState('')
   const [buildLog, setBuildLog]           = useState('')
   const [elapsedSecs, setElapsedSecs]     = useState(0)
+  const [failedServices, setFailedServices] = useState([])   // services that failed to build/restart
+  const [slowNotice, setSlowNotice]       = useState(false)  // soft "taking longer than expected" — not a failure
   const pollRef      = useRef(null)
   const timerRef     = useRef(null)
   const logBoxRef    = useRef(null)
   const startTimeRef = useRef(null)
+  // Read synchronously inside the version-check tick — failed_services arrives
+  // via a separate poll call in the same interval, so state (async) can't be
+  // trusted to be up to date yet when the version-check callback runs.
+  const failedServicesRef = useRef([])
 
   // Auto-scroll build log to bottom as new lines arrive
   useEffect(() => {
@@ -70,6 +100,11 @@ export default function StatusBar() {
         setTimeout(() => setPidFlash(false), 2000)
       }
       prevPid.current = newPid
+      // Stamp when the gateway first went unreachable, so the restart button can
+      // wait out the normal login window before appearing. Cleared on recovery.
+      setIbkrDownSince(prev =>
+        gatewayNeedsRecovery(r.data) ? (prev ?? Date.now()) : null
+      )
     }).catch(() => {})
     fetch()
     const t = setInterval(fetch, 30000)
@@ -94,6 +129,34 @@ export default function StatusBar() {
   const flash = (msg, color) => {
     setVFlash({ msg, color })
     setTimeout(() => setVFlash(null), 2500)
+  }
+
+  // ── Wedged-gateway recovery (one-click full restart) ─────────
+  const restartGateway = async () => {
+    if (gwRestarting) return
+    if (!window.confirm(
+      'Restart the IB Gateway?\n\n' +
+      'This recovers a wedged gateway by re-running login. On a LIVE account you ' +
+      'must approve an IB Key 2FA push on your phone; paper logs in automatically. ' +
+      'Takes ~1–2 minutes.'
+    )) return
+    setGwRestarting(true)
+    setGwRestartFlash(null)
+    try {
+      await axios.post('/api/gateway/restart')
+      setGwRestartFlash({ msg: 'Restart sent — recovering…', color: 'text-amber-400' })
+      // Restart the grace clock: the gateway is now re-running login, so fall back
+      // to the calm "connecting…" state instead of immediately re-offering the button.
+      setIbkrDownSince(Date.now())
+    } catch (err) {
+      setGwRestartFlash({
+        msg: err.response?.data?.detail ?? 'Restart failed',
+        color: 'text-red-400',
+      })
+    } finally {
+      setGwRestarting(false)
+      setTimeout(() => setGwRestartFlash(null), 6000)
+    }
   }
 
   const checkVersionNow = () => {
@@ -129,6 +192,9 @@ export default function StatusBar() {
     setUpgradePhase('waiting_up')
     setBuildLog('')
     setElapsedSecs(0)
+    setFailedServices([])
+    setSlowNotice(false)
+    failedServicesRef.current = []
     startTimeRef.current = Date.now()
 
     // Elapsed-time ticker (every second)
@@ -145,10 +211,12 @@ export default function StatusBar() {
         return
       }
 
-      // Version check — detects when upgrade is complete
+      // Version check — detects when the api container is upgraded. NOT
+      // sufficient on its own: failed_services (below) is the authoritative
+      // signal, since api can succeed while scheduler/web silently stay stale.
       axios.get('/api/version/check', { timeout: 2000 })
         .then(r => {
-          if (r.data?.current && r.data.current === expectedVersion) {
+          if (r.data?.current && r.data.current === expectedVersion && failedServicesRef.current.length === 0) {
             stopPoll()
             setUpgradePhase('done')
             setTimeout(() => window.location.reload(), 2000)
@@ -156,9 +224,20 @@ export default function StatusBar() {
         })
         .catch(() => {})
 
-      // Log poll — streams live build output
+      // Log poll — streams live build output, the authoritative failed_services
+      // list, and a soft (non-failure) "taking longer than expected" notice.
       axios.get('/api/upgrade/log', { timeout: 2000 })
-        .then(r => { if (r.data?.content) setBuildLog(r.data.content) })
+        .then(r => {
+          if (r.data?.content) setBuildLog(r.data.content)
+          const failed = r.data?.failed_services || []
+          failedServicesRef.current = failed
+          setFailedServices(failed)
+          setSlowNotice(!!r.data?.slow)
+          if (failed.length > 0) {
+            stopPoll()
+            setUpgradePhase('error')
+          }
+        })
         .catch(() => {})
     }, 3000)
   }
@@ -195,7 +274,23 @@ export default function StatusBar() {
     setUpgradeOutput('')
     setBuildLog('')
     setElapsedSecs(0)
+    setFailedServices([])
+    setSlowNotice(false)
+    failedServicesRef.current = []
   }
+
+  // Gateway needs recovery (raw signal). Split into two UI states by how long it's
+  // been down: within the grace window it's probably just logging in → show a calm
+  // "connecting…" hint; past the grace window it's likely wedged → offer the button.
+  // Operator intentionally paused trading (System Control → Pause Trading). The
+  // gateway + scheduler are down ON PURPOSE, so suppress the "connecting…" hint and
+  // the wedged-gateway recovery button — this is expected, not an outage.
+  const paused = status?.trading_paused === true
+
+  const gwUnhealthy = gatewayNeedsRecovery(status) && !paused
+  const gwDownMs    = gwUnhealthy && ibkrDownSince ? Date.now() - ibkrDownSince : 0
+  const gwConnecting  = gwUnhealthy && gwDownMs <  RESTART_BTN_GRACE_MS
+  const gwShowRestart = gwUnhealthy && gwDownMs >= RESTART_BTN_GRACE_MS
 
   // ── Derived version state ─────────────────────────────────────
   const isLive    = status?.trading_mode === 'live'
@@ -216,31 +311,99 @@ export default function StatusBar() {
   return (
     <>
       {/* ── Top bar ────────────────────────────────────────────── */}
-      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-6 gap-6 shrink-0">
-        {/* Status pills */}
-        <div className="flex items-center gap-4">
-          <Indicator
-            ok={status?.gateway_running && status?.gateway_login_status !== 'failed' && status?.gateway_login_status !== 'locked'}
-            label={
-              status?.gateway_login_status === 'locked' ? 'Gateway · locked out' :
-              status?.gateway_login_status === 'failed' ? 'Gateway · login failed' :
-              'Gateway'
-            }
-          />
+      {/* lg:overflow-x-auto — at lg+ the pills stop scrolling and the bar carries
+          its full content, which can exceed a narrow desktop window (it already
+          did before any of this: ~1232px of content in 1072px at 1280). Without
+          this it silently clips with no way to reach the right-hand items. Under
+          lg the pills scroll instead and everything else stays pinned, so the bar
+          itself must NOT scroll — nesting the two would fight. */}
+      <div className="h-12 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 flex items-center px-3 lg:px-6 gap-3 lg:gap-6 shrink-0 lg:overflow-x-auto">
+        {/* Drawer toggle — mobile only; the sidebar is always visible at lg+. */}
+        <button
+          type="button"
+          onClick={onMenuClick}
+          aria-label="Open navigation menu"
+          className="lg:hidden -ml-1 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-200 shrink-0"
+        >
+          <Menu size={18} />
+        </button>
 
-          {/* Scheduler with PID-change flash */}
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
-              pidFlash                         ? 'bg-green-300 shadow-[0_0_6px_2px_rgba(74,222,128,0.6)]' :
-              status?.scheduler_pid != null    ? 'bg-green-400' : 'bg-red-500'
-            }`} />
-            <span className={`text-xs transition-colors duration-500 ${
-              pidFlash                         ? 'text-green-400 font-semibold' :
-              status?.scheduler_pid != null    ? 'text-gray-700 dark:text-gray-300' : 'text-red-400'
-            }`}>Scheduler</span>
-          </div>
+        {/* Status pills. Under lg this is the ONLY element allowed to flex and
+            scroll — everything after it (mode badge, alerts, theme) is shrink-0
+            and stays visible at any phone width. The mode badge in particular
+            must never require a swipe: you always need to know LIVE vs PAPER. */}
+        <div className="flex items-center gap-2 lg:gap-4 flex-1 lg:flex-none min-w-0 overflow-x-auto lg:overflow-x-visible">
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you (Settings → System Control). The gateway is stopped on purpose — Resume Trading to bring it back.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">Gateway · paused</span>
+            </div>
+          ) : (
+            <Indicator
+              ok={status?.gateway_running && status?.gateway_login_status !== 'failed' && status?.gateway_login_status !== 'locked'}
+              label={
+                status?.gateway_login_status === 'locked' ? 'Gateway · locked out' :
+                status?.gateway_login_status === 'failed' ? 'Gateway · login failed' :
+                'Gateway'
+              }
+            />
+          )}
 
-          <Indicator ok={status?.ibkr_connected} label="IBKR" />
+          {/* Logging in — probably just a normal restart/reconnect; let it resolve */}
+          {gwConnecting && !gwRestarting && (
+            <span className="flex items-center gap-1.5 text-xs text-amber-500" title="Gateway is logging in — this usually clears on its own in a minute or two">
+              <svg className="animate-spin w-2.5 h-2.5" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Gateway connecting…
+            </span>
+          )}
+
+          {/* Still down past the grace window → likely wedged, offer one-click recovery */}
+          {(gwShowRestart || gwRestarting) && (
+            <button
+              onClick={restartGateway}
+              disabled={gwRestarting}
+              title="Gateway still unreachable after a couple minutes — restart it to recover (live needs IB Key 2FA)"
+              className="text-xs px-2 py-0.5 rounded border border-red-700 text-red-400 hover:bg-red-900/30 disabled:opacity-60 disabled:cursor-wait font-medium transition-colors"
+            >
+              {gwRestarting ? 'Restarting…' : 'Restart Gateway'}
+            </button>
+          )}
+          {gwRestartFlash && (
+            <span className={`text-xs font-medium ${gwRestartFlash.color}`}>
+              {gwRestartFlash.msg}
+            </span>
+          )}
+
+          {/* Scheduler with PID-change flash (or a paused state when trading is paused) */}
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you — the scheduler is stopped on purpose.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">Scheduler · paused</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <div className={`w-2 h-2 rounded-full transition-colors duration-500 ${
+                pidFlash                         ? 'bg-green-300 shadow-[0_0_6px_2px_rgba(74,222,128,0.6)]' :
+                status?.scheduler_pid != null    ? 'bg-green-400' : 'bg-red-500'
+              }`} />
+              <span className={`text-xs transition-colors duration-500 ${
+                pidFlash                         ? 'text-green-400 font-semibold' :
+                status?.scheduler_pid != null    ? 'text-gray-700 dark:text-gray-300' : 'text-red-400'
+              }`}>Scheduler</span>
+            </div>
+          )}
+
+          {paused ? (
+            <div className="flex items-center gap-1.5" title="Trading paused by you — no IBKR connection while the gateway is stopped.">
+              <div className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="text-xs text-amber-500">IBKR · paused</span>
+            </div>
+          ) : (
+            <Indicator ok={status?.ibkr_connected} label="IBKR" />
+          )}
 
           {/* Version pill — click to check for updates */}
           {versionInfo && (
@@ -264,7 +427,7 @@ export default function StatusBar() {
                 }
                 <span className={`text-xs ${
                   pillColor === 'green'  ? 'text-gray-700 dark:text-gray-300' :
-                  pillColor === 'yellow' ? 'text-yellow-400' :
+                  pillColor === 'yellow' ? 'text-yellow-600 dark:text-yellow-400' :
                   pillColor === 'red'    ? 'text-red-400' : 'text-gray-500'
                 }`}>
                   {vChecking
@@ -286,7 +449,7 @@ export default function StatusBar() {
                   onClick={() => setShowConfirm(true)}
                   className={`text-xs px-2 py-0.5 rounded border font-medium transition-colors ${
                     pillColor === 'yellow'
-                      ? 'border-yellow-600 text-yellow-400 hover:bg-yellow-900/30'
+                      ? 'border-yellow-600 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-100 dark:hover:bg-yellow-900/30'
                       : 'border-red-700 text-red-400 hover:bg-red-900/30'
                   }`}
                 >
@@ -297,10 +460,12 @@ export default function StatusBar() {
           )}
         </div>
 
-        <div className="w-px h-5 bg-gray-200 dark:bg-gray-800" />
+        <div className="hidden lg:block w-px h-5 bg-gray-200 dark:bg-gray-800" />
 
-        {/* Account info */}
-        <div className="flex items-center gap-4 text-xs">
+        {/* Account info — hidden under lg. Every figure here (account value,
+            unrealized, buying power, settled cash) is already a card on the
+            Dashboard, so on a phone this is duplication that overflowed the bar. */}
+        <div className="hidden lg:flex items-center gap-4 text-xs">
           <span className="text-gray-500">Account</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.account_value)}</span>
           {status?.unrealized_pnl != null && status.unrealized_pnl !== 0 && (
@@ -313,25 +478,37 @@ export default function StatusBar() {
           )}
           <span className="text-gray-500">Buying Power</span>
           <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.buying_power)}</span>
+          {status?.settled_cash != null && (
+            <>
+              <span className="text-gray-500">Settled Cash</span>
+              <span className="text-gray-900 dark:text-white font-medium font-mono">{fmt(status?.settled_cash)}</span>
+            </>
+          )}
           {(status?.wheel_count ?? 0) > 0 && (
-            <span className="text-yellow-400 font-medium">🔄 {status.wheel_count} wheel{status.wheel_count !== 1 ? 's' : ''}</span>
+            <span className="text-yellow-600 dark:text-yellow-400 font-medium">🔄 {status.wheel_count} wheel{status.wheel_count !== 1 ? 's' : ''}</span>
           )}
         </div>
 
-        <div className="flex-1" />
+        {/* Spacer — lg+ only. Under lg the pills flex instead. */}
+        <div className="hidden lg:block lg:flex-1" />
 
         {/* Mode badge */}
-        <span className={`text-xs font-bold px-3 py-1 rounded-full border ${
+        <span className={`shrink-0 text-xs font-bold px-3 py-1 rounded-full border ${
           isLive
-            ? 'bg-green-900/50 text-green-400 border-green-700 animate-pulse'
-            : 'bg-blue-900/40 text-blue-400 border-blue-800'
+            ? 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/50 dark:text-green-400 dark:border-green-700 animate-pulse'
+            : 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-400 dark:border-blue-800'
         }`}>
           {isLive ? '🟢 LIVE' : '📄 PAPER'}
         </span>
 
+        {/* Account number — hidden under lg. It costs ~70px the phone doesn't
+            have, and it's an account number on a screen you read in public. */}
         {status?.account && (
-          <span className="text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
+          <span className="hidden lg:inline text-xs text-gray-500 dark:text-gray-600">{status.account}</span>
         )}
+
+        {/* Alerts bell */}
+        <AlertsBell />
 
         {/* Theme toggle */}
         <button
@@ -349,9 +526,16 @@ export default function StatusBar() {
           <div className="bg-white dark:bg-gray-900 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl border border-gray-200 dark:border-gray-700">
             <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Upgrade YRVI?</h2>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
-              This will pull the latest code and rebuild the containers.
-              The dashboard will automatically reconnect when complete. Continue?
+              This pulls the latest code and rebuilds + restarts the entire stack
+              (including the IB Gateway). The dashboard will automatically reconnect
+              when complete. Continue?
             </p>
+            {isLive && (
+              <p className="text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-lg px-3 py-2 mb-3">
+                📱 This restarts the IB Gateway — have your phone ready to approve
+                the <strong>IB Key 2FA</strong> push, or the gateway won’t reconnect.
+              </p>
+            )}
             <p className="text-sm font-mono text-gray-400 dark:text-gray-500 mb-6">
               v{versionInfo?.current} → v{versionInfo?.latest}
             </p>
@@ -388,18 +572,35 @@ export default function StatusBar() {
             <div className="w-full max-w-2xl">
               <div className="flex items-center gap-3 mb-5">
                 <span className="text-2xl">⚠️</span>
-                <h2 className="text-white text-xl font-bold">Build taking longer than expected</h2>
+                <h2 className="text-white text-xl font-bold">
+                  {failedServices.length > 0 ? 'Upgrade partially failed' : 'Build taking longer than expected'}
+                </h2>
               </div>
+              {failedServices.length > 0 && (
+                <p className="text-red-400 text-sm mb-3">
+                  {failedServices.join(', ')} failed to build/restart and {failedServices.length === 1 ? 'is' : 'are'} still on the previous version.
+                  Other services were upgraded successfully.
+                </p>
+              )}
               {(upgradeOutput || buildLog) && (
                 <pre className="bg-gray-950 text-green-300 text-xs font-mono p-4 rounded-lg overflow-auto max-h-72 mb-5 whitespace-pre-wrap break-all">
                   {upgradeOutput}{buildLog ? '\n\n' + buildLog : ''}
                 </pre>
               )}
               <p className="text-yellow-400 text-sm mb-5">
-                The git pull succeeded — containers may still be building. Run manually if needed:{' '}
-                <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
-                  bash scripts/yrvi-build.sh all --paper
-                </code>
+                {failedServices.length > 0 ? (
+                  <>Retry the failed service(s):{' '}
+                    <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
+                      bash scripts/yrvi-build.sh {failedServices[0]} --paper
+                    </code>
+                  </>
+                ) : (
+                  <>The git pull succeeded — containers may still be building. Run manually if needed:{' '}
+                    <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded text-yellow-300">
+                      bash scripts/yrvi-build.sh all --paper
+                    </code>
+                  </>
+                )}
               </p>
               <button
                 onClick={closeUpgrade}
@@ -413,7 +614,8 @@ export default function StatusBar() {
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mb-5" />
               <h2 className="text-white text-xl font-semibold mb-1">Upgrading YRVI…</h2>
               <p className="text-gray-400 text-sm mb-1">Rebuilding containers — dashboard will reload automatically</p>
-              <p className="text-gray-600 text-xs mb-6 font-mono">{elapsedSecs}s elapsed · typically 1–2 min</p>
+              <p className="text-gray-600 text-xs mb-1 font-mono">{elapsedSecs}s elapsed · typically 1–2 min</p>
+              <p className="text-yellow-500 text-xs mb-5 h-4">{slowNotice ? 'Build is taking longer than expected…' : ''}</p>
               {(upgradeOutput || buildLog) && (
                 <pre
                   ref={logBoxRef}

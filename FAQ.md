@@ -6,35 +6,36 @@ Common issues and fixes for You Rock Club members setting up YRVI on a Mac Mini.
 
 ### Q: Docker fails with "address already in use" on port 5900
 
-**A:** macOS Screen Sharing uses port 5900, which conflicts with IB Gateway's VNC port.
+**A:** macOS Screen Sharing is binding port 5900 in a way that collides with IB Gateway's VNC port. (Normally they coexist — the gateway binds IPv4 `127.0.0.1:5900` while Screen Sharing answers on the LAN IP / IPv6 — but a boot-order race can occasionally cause this.)
 
-Turn it off before starting YRVI:
-
-**System Settings → General → Sharing → Screen Sharing → toggle OFF**
-
-Then restart the stack:
+Easiest fix — give the gateway its own port. In `.env.compose` set:
+```
+IB_GATEWAY_VNC_PORT=5901
+```
+then restart:
 ```bash
 docker compose --env-file .env.compose down
 ./setup_docker.sh --paper
 ```
+Now connect your VNC client to `127.0.0.1:5901` instead.
 
-> Use SSH for remote terminal access instead — Screen Sharing cannot run alongside YRVI.
->
-> Enable SSH: **System Settings → General → Sharing → Remote Login → On**
->
-> Then connect with: `ssh [your-user]@[MAC_MINI_IP]`
+Alternatively, turn Screen Sharing off (**System Settings → General → Sharing → Screen Sharing → OFF**) and keep the gateway on 5900.
+
+> For remote *terminal* access, use SSH: **System Settings → General → Sharing → Remote Login → On**, then `ssh [your-user]@[MAC_MINI_IP]`.
 
 ---
 
 ### Q: I need to check the IB Gateway screen (e.g. it's stuck on a 2FA or confirmation dialog)
 
-**A:** The IB Gateway runs headless inside Docker but exposes a VNC session on port 5900. macOS's built-in Screen Sharing won't work for this — it refuses to connect to localhost. Use **RealVNC Viewer** (free) instead:
+**A:** There's now a **View Gateway** viewer built into the dashboard — no VNC client to download.
 
-1. Download: https://www.realvnc.com/en/connect/download/viewer/
-2. Open RealVNC Viewer and connect to: `127.0.0.1:5900`
-3. Password: `ibgateway123!test` (unless you set a custom VNC Password in secrets)
+1. Open the dashboard (**http://localhost:3000**) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway**. A new browser tab opens.
+3. Click **👁 Open viewer (view-only)** to watch the screen, or **⚠️ Enable keyboard / mouse control** if you need to click through a 2FA/confirmation dialog.
 
-You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it.
+The password auto-fills from your `vnc_server_password` secret, so there's nothing to type. You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it. See [docs/view-gateway.md](docs/view-gateway.md) for details.
+
+> Older versions told you to install RealVNC or TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port is still there at `127.0.0.1:5900` if you ever want an external client as a fallback; on macOS use the literal `127.0.0.1`, never `localhost`.)
 
 ---
 

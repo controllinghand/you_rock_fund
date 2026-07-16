@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>IB Gateway — Viewer</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0f1115; color: #e6e6e6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #screen { width: 100vw; height: 100vh; }
+    #status {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      background: rgba(20,23,30,.92); border: 1px solid #2a2f3a; border-radius: 8px;
+      padding: 8px 14px; font-size: 13px; z-index: 10; display: none;
+    }
+    #status.show { display: block; }
+    #status.err { border-color: #7a2a2a; color: #ff9a9a; }
+    #badge {
+      position: fixed; bottom: 10px; left: 10px; z-index: 10; font-size: 11px;
+      background: rgba(20,23,30,.85); border: 1px solid #2a2f3a; border-radius: 6px;
+      padding: 4px 8px; color: #9aa4b2;
+    }
+  </style>
+</head>
+<body>
+  <div id="status" class="show">Connecting to IB Gateway…</div>
+  <div id="badge"></div>
+  <div id="screen"></div>
+
+  <!-- Written at container startup by the entrypoint: window.__VNC_CONFIG__ = { password }.
+       Served same-origin over loopback only — never placed in the URL, history, or logs. -->
+  <script src="vnc-config.js"></script>
+  <script type="module">
+    import RFB from './core/rfb.js';
+
+    const params  = new URLSearchParams(location.search);
+    const control = params.get('control') === '1';           // deliberate opt-in
+    const cfg     = window.__VNC_CONFIG__ || {};
+    let   password = cfg.password || '';
+
+    const statusEl = document.getElementById('status');
+    const badgeEl  = document.getElementById('badge');
+    badgeEl.textContent = control ? '⚠️ CONTROL — keyboard/mouse enabled' : '👁 view-only';
+
+    const setStatus = (text, isErr = false) => {
+      statusEl.textContent = text;
+      statusEl.classList.toggle('err', isErr);
+      statusEl.classList.toggle('show', !!text);
+    };
+
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${wsProto}://${location.host}/websockify`;
+
+    const rfb = new RFB(document.getElementById('screen'), url, {
+      credentials: { password },
+    });
+    rfb.viewOnly      = !control;   // view-only by default; sends no input
+    rfb.scaleViewport = true;       // fit the Gateway window to the browser
+
+    rfb.addEventListener('connect', () => setStatus(''));
+
+    // If the auto-filled password is wrong/missing, fall back to a manual prompt
+    // instead of dead-ending the user.
+    rfb.addEventListener('credentialsrequired', () => {
+      const pw = window.prompt('VNC password (the vnc_server_password secret):', '');
+      if (pw !== null) { password = pw; rfb.sendCredentials({ password }); }
+    });
+
+    rfb.addEventListener('securityfailure', (e) => {
+      setStatus(`Authentication failed${e.detail?.reason ? ': ' + e.detail.reason : ''}. Reload to retry.`, true);
+    });
+    rfb.addEventListener('disconnect', (e) => {
+      if (!e.detail?.clean) setStatus('Disconnected — IB Gateway VNC not reachable. Is the gateway running?', true);
+    });
+  </script>
+</body>
+</html>

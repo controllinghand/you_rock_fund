@@ -11,11 +11,11 @@ run_daily_monitor():
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from ib_insync import IB, Stock
 
-from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_RISK, ACCOUNT
+from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_RISK, ACCOUNT, ACCOUNT_TYPE, gateway_unreachable_message, probe_port, get_settings
 from screener import get_all_candidates
 
 STATE_FILE = "state.json"
@@ -47,8 +47,17 @@ def _save_state(state: dict):
 
 
 def _connect() -> IB:
+    log.info(f"🔌 Connecting to IB Gateway {IBKR_HOST}:{IBKR_PORT} ({ACCOUNT_TYPE}, clientId={IBKR_CLIENT_ID_RISK})")
     ib = IB()
-    ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID_RISK)
+    try:
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID_RISK)
+    except TimeoutError:
+        port_open = probe_port(IBKR_HOST, IBKR_PORT)
+        log.warning(
+            f"⚠️  IBKR connect timed out ({ACCOUNT_TYPE}, {IBKR_HOST}:{IBKR_PORT}) — "
+            f"TCP port {'OPEN (API handshake hung)' if port_open else 'CLOSED (gateway not listening)'}"
+        )
+        raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
     ib.reqMarketDataType(3)
     log.info(f"✅ Connected to IBKR (clientId={IBKR_CLIENT_ID_RISK})")
     return ib
@@ -97,8 +106,16 @@ def _build_weekly_pnl(state: dict) -> dict:
 
     total_realized = round(csp_premium + cc_premium + shares_sold_pnl, 2)
 
+    # Floor run_date to its Monday so this matches reconciler / monday_runner keying.
+    _rd = state.get("run_date", "")[:10]
+    if _rd:
+        _d = date.fromisoformat(_rd)
+        week_start = (_d - timedelta(days=_d.weekday())).strftime("%Y-%m-%d")
+    else:
+        week_start = ""
+
     return {
-        "week_start":           state.get("run_date", "")[:10],
+        "week_start":           week_start,
         "csp_premium":          round(csp_premium, 2),
         "cc_premium":           round(cc_premium, 2),
         "shares_sold_pnl":      round(shares_sold_pnl, 2),
@@ -127,7 +144,9 @@ def run_daily_monitor():
 
     # Fetch screener tickers once — used for all holdings
     log.info("\n📡 Checking screener eligibility...")
-    screener_tickers = get_all_candidates()
+    # Held-position membership check: use retention mode so a held name isn't
+    # flagged "dropped from screener" over an entry-only delta/buffer miss.
+    screener_tickers = get_all_candidates(retention=True)
     if screener_tickers:
         log.info(f"  {len(screener_tickers)} ticker(s) currently pass screener filters")
     else:
@@ -147,8 +166,13 @@ def run_daily_monitor():
     try:
         log.info(f"\n  Monitoring {len(holdings)} wheel holding(s):\n")
 
+        excluded = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
+
         for h in holdings:
             ticker          = h["ticker"]
+            if ticker.upper() in excluded:
+                log.info(f"  [{ticker}]  🚫 excluded from the wheel — skipping monitor")
+                continue
             shares          = h.get("shares", 0)
             assigned_strike = h.get("assigned_strike", 0.0)
             cc_strike       = h.get("current_cc_strike")

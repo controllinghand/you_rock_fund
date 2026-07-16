@@ -82,3 +82,27 @@ def is_first_trading_day_of_week(d: date | None = None) -> bool:
         monday = d - timedelta(days=1)
         return is_market_holiday(monday)
     return False
+
+
+def is_last_trading_day_of_week(d: date | None = None) -> bool:
+    """True if d is the last trading day of its (Mon–Fri) week.
+
+    Normal week  → Friday (not a holiday).
+    Holiday week → Thursday (when Friday is a holiday, e.g. Good Friday).
+
+    Used by the cash-sweep sell job, which is scheduled Thu+Fri and only acts on
+    whichever of those is the week's final trading day — so the parked position is
+    always liquidated before the weekend without a Friday order on a holiday.
+    """
+    if d is None:
+        d = date.today()
+    wd = d.weekday()
+    if wd > 4 or is_market_holiday(d):       # weekend or holiday → not a trading day
+        return False
+    # Any later weekday this week that is still a trading day? Then d isn't last.
+    nxt = d + timedelta(days=1)
+    while nxt.weekday() <= 4:                 # Mon–Fri only (stop at Saturday)
+        if not is_market_holiday(nxt):
+            return False
+        nxt += timedelta(days=1)
+    return True

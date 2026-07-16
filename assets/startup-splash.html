@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Starting YRVI…</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --panel:   #161b22;
+    --border:  #30363d;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --accent:  #2f81f7;
+    --green:   #3fb950;
+    --amber:   #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    width: 100%;
+    max-width: 460px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 30px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  }
+  .brand {
+    font-size: 13px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  h1 {
+    font-size: 20px;
+    margin: 0 0 22px;
+    font-weight: 600;
+  }
+  .spinner-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+  .spinner {
+    width: 26px; height: 26px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .9s linear infinite;
+    flex: 0 0 auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .elapsed { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 14px; }
+
+  ul.steps { list-style: none; margin: 0 0 20px; padding: 0; }
+  ul.steps li {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 0;
+    color: var(--muted);
+    transition: color .25s;
+  }
+  ul.steps li.active { color: var(--text); }
+  ul.steps li.done   { color: var(--text); }
+  .dot {
+    width: 18px; height: 18px; flex: 0 0 auto;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px;
+  }
+  li.active .dot {
+    border-color: var(--accent);
+    border-top-color: transparent;
+    animation: spin .9s linear infinite;
+  }
+  li.done .dot {
+    border-color: var(--green);
+    background: var(--green);
+    color: #0d1117;
+  }
+  .note {
+    font-size: 13px;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+    margin: 0;
+  }
+  .note.slow { color: var(--amber); }
+  .hint {
+    font-size: 13px;
+    color: var(--amber);
+    background: rgba(210,153,34,.10);
+    border: 1px solid rgba(210,153,34,.30);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 0 0 16px;
+  }
+  .hint[hidden] { display: none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">You Rock Volatility Income Fund</div>
+    <h1>Starting the trading system…</h1>
+
+    <div class="spinner-row">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="elapsed">Elapsed <span id="elapsed">0:00</span></div>
+    </div>
+
+    <ul class="steps">
+      <li id="step-boot" class="active"><span class="dot"></span><span>Starting Docker &amp; containers</span></li>
+      <li id="step-api"><span class="dot"></span><span>Waiting for the API</span></li>
+      <li id="step-dash"><span class="dot"></span><span>Opening the dashboard</span></li>
+    </ul>
+
+    <p class="hint" id="docker-hint" hidden>
+      If Docker Desktop wasn’t already running, it’s booting now — a cold start
+      can take 1–2 minutes before the containers even begin.
+    </p>
+
+    <p class="note" id="note">
+      This usually takes about a minute. A cold start (Docker not yet running)
+      can take up to ~2 minutes. You can leave this tab open — it switches to the
+      dashboard automatically when everything is ready.
+    </p>
+  </div>
+
+<script>
+  var API_URL  = "http://localhost:8000/api/status";
+  var DASH_URL = "http://localhost:3000";
+  var started  = Date.now();
+  var apiUp    = false;
+  var redirecting = false;
+  var anyResponse = false;   // has EITHER port answered yet?
+
+  function fmt(ms) {
+    var s = Math.floor(ms / 1000);
+    var m = Math.floor(s / 60);
+    return m + ":" + String(s % 60).padStart(2, "0");
+  }
+  function tickElapsed() {
+    var el = document.getElementById("elapsed");
+    if (el) el.textContent = fmt(Date.now() - started);
+  }
+  setInterval(tickElapsed, 1000);
+
+  function setStep(id, state) {
+    var li = document.getElementById(id);
+    if (!li) return;
+    li.classList.remove("active", "done");
+    if (state) li.classList.add(state);
+    if (state === "done") li.querySelector(".dot").textContent = "✓";
+  }
+
+  // no-cors probe: the promise resolves (opaque) when the port answers, and
+  // rejects (connection refused) when nothing is listening yet. That lets us
+  // detect readiness cross-origin from a file:// page with no CORS config.
+  function probe(url) {
+    return fetch(url, { mode: "no-cors", cache: "no-store" })
+      .then(function () { return true; })
+      .catch(function () { return false; });
+  }
+
+  function poll() {
+    if (redirecting) return;
+    Promise.all([probe(API_URL), probe(DASH_URL)]).then(function (res) {
+      var apiReady = res[0], dashReady = res[1];
+
+      // Once anything answers we're past the Docker-boot phase — hide the hint.
+      if ((apiReady || dashReady) && !anyResponse) {
+        anyResponse = true;
+        var dh = document.getElementById("docker-hint");
+        if (dh) dh.hidden = true;
+      }
+
+      if (apiReady && !apiUp) {
+        apiUp = true;
+        setStep("step-boot", "done");
+        setStep("step-api", "done");
+        setStep("step-dash", "active");
+      }
+
+      // Only hand off once BOTH the API answers and the dashboard port is
+      // actually serving, so we never land on a momentary "can't connect".
+      if (apiReady && dashReady) {
+        setStep("step-boot", "done");
+        setStep("step-api", "done");
+        setStep("step-dash", "done");
+        redirecting = true;
+        // Small beat so the "done" state is visible before we navigate.
+        setTimeout(function () {
+          window.location.replace(DASH_URL);
+        }, 700);
+        return;
+      }
+      setTimeout(poll, 2000);
+    });
+  }
+
+  // After ~20s of total silence (no port answering), the stack almost certainly
+  // hasn't started yet — most likely the Docker daemon is still booting. Surface
+  // that so the operator knows the wait is expected, not a hang.
+  setTimeout(function () {
+    if (anyResponse || redirecting) return;
+    var dh = document.getElementById("docker-hint");
+    if (dh) dh.hidden = false;
+  }, 20000);
+
+  // After ~2.5 min, soften expectations without giving up.
+  setTimeout(function () {
+    if (redirecting) return;
+    var note = document.getElementById("note");
+    if (note) {
+      note.classList.add("slow");
+      note.textContent =
+        "This is taking longer than usual. Make sure Docker Desktop is running " +
+        "(open it and wait until it says “running”), then relaunch YRVI. " +
+        "This page keeps checking in the meantime.";
+    }
+  }, 150000);
+
+  poll();
+</script>
+</body>
+</html>

@@ -8,7 +8,7 @@ This guide walks You Rock Club members through setting up a Mac Mini as a dedica
 
 | Component | Spec | Notes |
 |-----------|------|-------|
-| Computer | Mac Mini M4 (Apple Silicon) | M4 Pro (48GB) is ideal but base M4 works fine |
+| Computer | Mac Mini M4 (Apple Silicon) | M4 Pro (48GB) is ideal but base M4 works fine. Intel minis (macOS 15+) also work — see Intel notes in Phases 3–4. All images build locally on the device, so amd64 builds natively. |
 | RAM | 16GB minimum | Base config is fine for YRVI |
 | Storage | 256GB SSD | Base config is fine |
 | Network | Ethernet (recommended) | More reliable than WiFi |
@@ -29,7 +29,7 @@ You will need the following physical hardware to complete the initial setup. Aft
 | USB keyboard | Any USB or Bluetooth keyboard |
 | USB mouse | Any USB or Bluetooth mouse |
 
-> 💡 Once Screen Sharing is configured (Phase 2), you can disconnect all of this and control the Mac Mini remotely forever after — from a Mac via Finder, or from a Windows PC using a free VNC client like RealVNC Viewer.
+> 💡 Once Screen Sharing is configured (Phase 2), you can disconnect all of this and control the Mac Mini remotely forever after — from another Mac via Finder/Screen Sharing, or from a Windows PC using a free VNC client like TigerVNC.
 
 ---
 
@@ -64,18 +64,19 @@ When you first power on the Mac Mini, follow these decisions at each setup scree
 
 ## Phase 2 — macOS System Settings
 
-### Remote Access — Use SSH, Not Screen Sharing
+### Remote Access — SSH + Screen Sharing
 
-> ⚠️ **Do NOT enable macOS Screen Sharing.** IB Gateway uses port 5900 for VNC (required for 2FA). macOS Screen Sharing also binds port 5900 and will cause `docker compose up` to fail with an "address already in use" error.
+Enable both:
+- **SSH (Remote Login)** for terminal access: **System Settings → General → Sharing → Remote Login → On**
+- **Screen Sharing** (optional but recommended) to view the Mac's full desktop from another Mac: **System Settings → General → Sharing → Screen Sharing → On**
 
-Use SSH for remote terminal access instead:
 ```bash
 ssh [your-user]@[MAC_MINI_IP]
 ```
 
-Make sure SSH is enabled: **System Settings → General → Sharing → Remote Login → On**
-
 > 💡 Connect over your local network (Ethernet on both machines is most reliable) or via your router's remote access / VPN if accessing from outside your home.
+
+> ⚠️ **VNC port note (important).** The IB Gateway container serves its own VNC on **`127.0.0.1:5900`** for 2FA/dialogs. macOS Screen Sharing also uses port 5900, but on different addresses (your LAN IP and IPv6 `::1`), so the two **coexist fine**. The catch: when you point a VNC client at the gateway, **always use `127.0.0.1:5900` (literal IPv4) — never `localhost:5900`.** On macOS `localhost` resolves to IPv6 `::1` first, which macOS Screen Sharing answers, so `localhost` sends you to the wrong server and you get an "authentication failed". If `docker compose up` ever fails with *"address already in use"* on 5900, either turn Screen Sharing off or set `IB_GATEWAY_VNC_PORT` to a free port in `.env.compose`.
 
 ### Enable Automatic Login
 1. System Settings → Users & Groups (search "automatic" in Settings search bar)
@@ -86,9 +87,26 @@ This ensures the Mac Mini logs itself in automatically after a power outage or r
 
 > ⚠️ Automatic Login is only available when FileVault is disabled. This is why we skip FileVault above.
 
-### Optional: Prevent Display Sleep
-- System Settings → Energy → set display sleep to **Never**
-- The Mac Mini runs headless — no display needed after initial setup
+### Prevent Sleep (important — keeps trading running 24/7)
+
+The Mac Mini runs headless and must never **system-sleep**, or macOS freezes the Docker VM and the scheduler misses trade windows. The key setting is *computer* sleep, not display sleep.
+
+- **System Settings → Energy:**
+  - ✅ **"Prevent automatic sleeping when the display is off"** — this is the one that matters (stops *system* sleep, which is what freezes Docker). Set via the GUI, it **persists across reboots**.
+  - ✅ **"Start up automatically after a power failure"**
+  - Turn **Power Nap OFF** if shown (avoids maintenance wake/sleep cycles).
+- Display sleep itself is harmless on a headless box, but you can set it to **Never** too.
+
+**Or set it all from the terminal (equivalent, also persistent):**
+```bash
+sudo pmset -a sleep 0          # never system-sleep (the one that matters)
+sudo pmset -a autorestart 1    # power back on automatically after an outage
+sudo pmset -a powernap 0       # no maintenance wake/sleep cycles
+```
+Verify: `pmset -g | grep -iE "^ *sleep |autorestart|powernap"` → expect `sleep 0`, `autorestart 1`, `powernap 0`.
+
+> **Mac mini vs. a lid-closed MacBook — do you need `pmset disablesleep 1`?**
+> **No, not on a mini.** A Mac mini has no lid, so the GUI "prevent sleep" setting above is sufficient and persistent. The `pmset disablesleep 1` flag exists for **laptops running lid-closed**, where macOS clamshell/"maintenance sleep" can freeze Docker even on AC. If you ever run the live stack on a **MacBook** with the lid shut, run `sudo pmset -a disablesleep 1` — and **reapply it after every reboot**, because (unlike the GUI setting) it does **not** persist.
 
 ---
 
@@ -107,10 +125,19 @@ A popup will appear — click **Install** (not "Get Xcode"). Takes a few minutes
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-### 3. Add Homebrew to PATH (required on Apple Silicon)
+### 3. Add Homebrew to PATH (Apple Silicon only)
 ```bash
 echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile && eval "$(/opt/homebrew/bin/brew shellenv)"
 ```
+
+> **⚠️ Intel Macs:** Homebrew installs to `/usr/local`, **not** `/opt/homebrew`. The
+> line above will silently fail on an Intel mini. On Intel, `/usr/local/bin` is
+> already on the default PATH, so you usually don't need a shellenv line at all —
+> just run `brew --version` (Step below) and if it works, skip this step. If it
+> reports "command not found," use the Intel path instead:
+> ```bash
+> echo 'eval "$(/usr/local/bin/brew shellenv)"' >> ~/.zprofile && eval "$(/usr/local/bin/brew shellenv)"
+> ```
 
 Verify:
 ```bash
@@ -122,7 +149,15 @@ brew --version
 brew install git gh python node
 ```
 
-### 5. Set Up SSH Key and GitHub Auth
+### 5. (Optional — developers only) Set Up SSH Key and GitHub Auth
+
+> **Skip this step for a normal operator install.** The repo is **public**, so you
+> can clone it anonymously over HTTPS (see Phase 5) — no SSH key or GitHub login
+> required, and the dashboard upgrade button pulls updates anonymously too.
+>
+> Only do this if you'll be **pushing code changes back** to GitHub (i.e., setting
+> up a dev machine).
+
 ```bash
 ssh-keygen -t ed25519 -C "your@email.com"
 ```
@@ -138,7 +173,7 @@ Choose: **GitHub.com → SSH → Yes → Login with a web browser** — this upl
 
 ## Phase 4 — Docker Desktop
 
-1. Download **Docker Desktop for Mac (Apple Silicon)** from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
+1. Download **Docker Desktop for Mac** from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) — choose the **Apple Silicon** build for M-series minis, or the **Intel chip** build for an Intel mini
 2. Drag Docker to Applications and open it
 3. Accept the license agreement
 4. At setup: select **Use recommended settings** → Finish
@@ -161,9 +196,12 @@ Should print "Hello from Docker!"
 
 ### Clone the Repo
 ```bash
-cd ~ && git clone git@github.com:controllinghand/you_rock_fund.git
+cd ~ && git clone https://github.com/controllinghand/you_rock_fund.git
 cd you_rock_fund
 ```
+
+> The repo is public, so this HTTPS clone needs no authentication. If you set up
+> SSH in Step 5 (developers), you can use `git clone git@github.com:controllinghand/you_rock_fund.git` instead.
 
 ### Register the Upgrade URL Scheme (one-time)
 ```bash
@@ -178,7 +216,7 @@ cp .env.compose.example .env.compose
 
 `.env.compose` only contains non-secret settings (ports, trading mode, timezone) — no editing required for a default paper-trading setup. Account credentials are entered later via the secrets container UI at `http://localhost:8001` when `setup_docker.sh` runs.
 
-Leave `TRADING_MODE=paper` and `YRVI_INIT_DRY_RUN=true` — these are the safe defaults for a new setup.
+Leave `TRADING_MODE=paper` — the paper account is the safety net for a new setup, so orders route to your paper account (not real money). Dry Run defaults to **off**; enable it in Settings only if you want to simulate without any account fills.
 
 ### Run Paper Trading Setup
 ```bash
@@ -297,7 +335,34 @@ docker compose --env-file .env.compose restart ib_gateway
 | Containers don't start after reboot | Open Docker Desktop manually and wait for "Engine running", then run `./setup_docker.sh --paper` |
 | Dashboard shows Gateway red | Run `docker compose --env-file .env.compose logs -f ib_gateway` and check for errors |
 | Secret files missing error | Run `./setup_docker.sh --paper` — secrets are re-fetched from the secrets container |
-| IB Gateway needs 2FA | Set the VNC password at `http://localhost:8001`, recreate gateway, connect via Finder → Go → Connect to Server → `vnc://localhost:5900` |
+| IB Gateway needs 2FA | Open the built-in **View Gateway** viewer — dashboard **Help → System Diagnostics → View Gateway** (see below). No VNC client needed. |
+
+### Viewing the IB Gateway Screen (built-in View Gateway)
+
+To reach the login/2FA screen, use the **View Gateway** viewer built into the dashboard —
+there's nothing to install.
+
+1. Open the dashboard (**http://localhost:3000** on the mini) → **Help** (left nav).
+2. Under **System Diagnostics**, click **View Gateway** → **👁 Open viewer (view-only)**,
+   or **⚠️ Enable keyboard / mouse control** to complete an IB Key 2FA (live) or confirm the
+   auto-login (paper).
+
+The password auto-fills from the `vnc_server_password` secret — nothing to type. See
+[docs/view-gateway.md](docs/view-gateway.md).
+
+**From another machine (LAN/VPN):** open an SSH tunnel to the dashboard and browse locally —
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 6080:127.0.0.1:6080 <user>@<mini-ip>
+```
+then open `http://localhost:3000` and use View Gateway as above (it opens the viewer on
+`localhost:6080`, which the tunnel forwards).
+
+> We used to recommend installing RealVNC/TigerVNC and connecting an external client to
+> `127.0.0.1:5900`. That's **no longer needed** — View Gateway is built in. The raw VNC port
+> is still exposed on the container at `127.0.0.1:5900` if you ever want an external client as
+> a fallback; on macOS use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost`
+> resolves to IPv6 `::1`, which macOS Screen Sharing answers → auth fails against the wrong
+> server).
 
 ---
 
