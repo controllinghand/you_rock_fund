@@ -274,8 +274,12 @@ export default function Help() {
     const tab = window.open('', '_blank')
     try {
       const res  = await axios.post('/api/view-gateway/start')
-      const port = res.data.port ?? '6080'
-      const url  = `${window.location.protocol}//${window.location.hostname}:${port}`
+      // Same origin as the dashboard, via nginx's /viewer/ proxy — NOT the
+      // viewer's own :6080. That port is bound to 127.0.0.1 on the box, so a
+      // host:6080 URL only ever resolved from the box itself: from a phone (or
+      // anything off-box) it was unreachable and the tab just failed. Riding this
+      // origin means the viewer works anywhere the dashboard already does.
+      const url  = `${window.location.origin}/viewer/`
       if (tab) tab.location = url
       else window.open(url, '_blank', 'noopener')
       setViewMsg({ ok: true, text: res.data.message })

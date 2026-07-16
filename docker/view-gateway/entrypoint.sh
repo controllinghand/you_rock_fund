@@ -7,10 +7,18 @@
 # For convenience we auto-fill the VNC password: at startup we fetch the same
 # `vnc_server_password` secret the IB Gateway uses (from the secrets container) and
 # write it into a same-origin `vnc-config.js`, which view.html reads to connect
-# without prompting. The password is served only on loopback and lives in an
-# ephemeral container file — it is never put in a URL, browser history, or
-# websockify's request logs. Falls back to the shipped default and, failing that,
-# to a manual prompt in the browser.
+# without prompting. It lives in an ephemeral container file and is never put in a
+# URL, browser history, or websockify's request logs. Falls back to the shipped
+# default and, failing that, to a manual prompt in the browser.
+#
+# Reachability (corrected v5.2.68): this file is served wherever the DASHBOARD is
+# served. The viewer's own :6080 is still loopback-only, but nginx now proxies it
+# at /viewer/ on the dashboard's origin, so `/viewer/vnc-config.js` follows the
+# dashboard onto a private overlay. That is not a new exposure: the dashboard
+# already serves this exact value on that same origin via
+# `GET /api/secrets/vnc_server_password`. The boundary for both is the network —
+# keep every published port bound to 127.0.0.1 and never expose the dashboard
+# publicly. See docs/dashboard-auth.md.
 set -eu
 
 LISTEN_PORT="${VIEW_GATEWAY_INTERNAL_PORT:-6080}"

@@ -28,7 +28,9 @@
   <div id="screen"></div>
 
   <!-- Written at container startup by the entrypoint: window.__VNC_CONFIG__ = { password }.
-       Served same-origin over loopback only — never placed in the URL, history, or logs. -->
+       Same-origin, and never placed in the URL, history, or logs. It is served
+       wherever the dashboard is (see the entrypoint's reachability note) — which
+       is no wider than the dashboard's own /api/secrets/vnc_server_password. -->
   <script src="vnc-config.js"></script>
   <script type="module">
     import RFB from './core/rfb.js';
@@ -49,7 +51,14 @@
     };
 
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${wsProto}://${location.host}/websockify`;
+    // Resolve websockify RELATIVE to wherever this page is served from, not from
+    // the site root. Served straight off the viewer's own port the page is at
+    // /view.html, so this is /websockify as before. Behind the dashboard's
+    // /viewer/ proxy it becomes /viewer/websockify — an absolute /websockify
+    // would hit the dashboard's SPA fallback instead, which answers 200 with
+    // index.html and drops the socket (close 1006, "VNC not reachable").
+    const base = location.pathname.replace(/[^/]*$/, '');
+    const url  = `${wsProto}://${location.host}${base}websockify`;
 
     const rfb = new RFB(document.getElementById('screen'), url, {
       credentials: { password },
