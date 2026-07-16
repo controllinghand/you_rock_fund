@@ -20,9 +20,27 @@
       background: rgba(20,23,30,.85); border: 1px solid #2a2f3a; border-radius: 6px;
       padding: 4px 8px; color: #9aa4b2;
     }
+    /* Hidden unless we're served under the dashboard's /viewer/ proxy — see the
+       script below. Sized for a thumb (44px is Apple's minimum target), because
+       on a phone this is the ONLY way out. */
+    #back {
+      position: fixed; top: 10px; left: 10px; z-index: 11; display: none;
+      align-items: center; gap: 6px; min-height: 44px; padding: 0 14px;
+      background: rgba(20,23,30,.92); border: 1px solid #2a2f3a; border-radius: 8px;
+      color: #e6e6e6; text-decoration: none; font-size: 13px;
+      /* keep clear of the notch / Dynamic Island in landscape */
+      margin-left: env(safe-area-inset-left, 0px);
+      margin-top: env(safe-area-inset-top, 0px);
+    }
+    #back.show { display: inline-flex; }
+    #back:active { background: rgba(40,45,58,.95); }
   </style>
 </head>
 <body>
+  <!-- The way back to the dashboard. On a phone the viewer opens INSIDE the
+       installed web app, which has no browser chrome and therefore no back
+       button — without this you have to force-quit the app to escape. -->
+  <a id="back" href="/">← Dashboard</a>
   <div id="status" class="show">Connecting to IB Gateway…</div>
   <div id="badge"></div>
   <div id="screen"></div>
@@ -43,6 +61,14 @@
     const statusEl = document.getElementById('status');
     const badgeEl  = document.getElementById('badge');
     badgeEl.textContent = control ? '⚠️ CONTROL — keyboard/mouse enabled' : '👁 view-only';
+
+    // Only offer "← Dashboard" when the dashboard is actually on this origin —
+    // i.e. when we're behind its /viewer/ proxy. Served straight off the viewer's
+    // own :6080 the dashboard lives on a different port entirely, so the link
+    // would be a dead end; there you have browser chrome to go back with anyway.
+    if (location.pathname.startsWith('/viewer/')) {
+      document.getElementById('back').classList.add('show');
+    }
 
     const setStatus = (text, isErr = false) => {
       statusEl.textContent = text;

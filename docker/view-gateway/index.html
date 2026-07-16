@@ -26,10 +26,25 @@
     .danger { background: transparent; color: #e0a23c; border: 1px solid #6b5320; font-weight: 500; font-size: 14px; }
     .note { font-size: 12px; color: #77808e; margin-top: 20px; line-height: 1.5; }
     code { background: #232733; padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+    /* Hidden unless served under the dashboard's /viewer/ proxy — see the script
+       at the end of the body. 44px tall: Apple's minimum thumb target, and on a
+       phone this is the only way back. */
+    #back {
+      display: none; align-items: center; justify-content: center; gap: 6px;
+      min-height: 44px; margin: 0 0 18px; padding: 0 14px; border-radius: 10px;
+      background: transparent; border: 1px solid #2a2f3a; color: #9aa4b2;
+      text-decoration: none; font-size: 13px;
+    }
+    #back.show { display: inline-flex; }
   </style>
 </head>
 <body>
   <div class="card">
+    <!-- The way back to the dashboard. On a phone this page opens INSIDE the
+         installed web app, which has no browser chrome and therefore no back
+         button — without this you have to force-quit the app to escape. -->
+    <a id="back" href="/">← Dashboard</a>
+
     <h1>IB Gateway — View Gateway</h1>
     <p class="sub">Inspect the IB Gateway screen (login, 2FA, dialogs, status).</p>
 
@@ -47,8 +62,18 @@
 
     <p class="note">
       Password auto-fills from the <code>vnc_server_password</code> secret.<br>
-      Local-only · bound to <code>127.0.0.1</code>.
+      Reachable only where the dashboard is — no port of its own is published.
     </p>
   </div>
+
+  <script>
+    // Only offer "← Dashboard" when the dashboard is actually on this origin —
+    // i.e. behind its /viewer/ proxy. Served straight off the viewer's own :6080
+    // the dashboard is on a different port, so the link would be a dead end;
+    // there you have browser chrome to go back with anyway.
+    if (location.pathname.startsWith('/viewer/')) {
+      document.getElementById('back').classList.add('show');
+    }
+  </script>
 </body>
 </html>
