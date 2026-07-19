@@ -427,7 +427,13 @@ export default function ThisWeek() {
                   } else if (isCC) {
                     detail = `Write CC @ $${a.cc_strike} · δ${(a.cc_delta ?? 0).toFixed(2)} · ~$${(a.cc_premium ?? 0).toLocaleString()} premium · exp ${a.cc_expiry}`
                   } else if (isDeferred) {
-                    detail = `CC priced Monday at open — market closed, ${a.shares ?? ''} sh kept (no sale)`
+                    // "kept (no sale)" alone reads as a decision. When the stop
+                    // loss couldn't be evaluated (no price — the same gap that
+                    // blocks CC pricing), Monday may well SELL this holding once
+                    // a price exists, so the preview must not imply otherwise.
+                    detail = a.stop_loss_undetermined
+                      ? `⚠️ Stop loss NOT evaluated — no price available. ${a.shares ?? ''} sh kept for now; both the stop-loss check and the CC re-run at Monday's open, and this may become a SALE.`
+                      : `CC priced Monday at open — market closed, ${a.shares ?? ''} sh kept (no sale)`
                   } else if (isAlready) {
                     detail = `Already covered by open CC${a.cc_expiry ? ` (exp ${a.cc_expiry}${a.contracts ? `, ${a.contracts}x` : ''})` : ''} — skip (recovery-safe)`
                   } else if (isSold) {

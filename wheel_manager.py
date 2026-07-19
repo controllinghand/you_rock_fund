@@ -220,7 +220,34 @@ def _get_stock_price(ib: IB, ticker: str) -> float | None:
             data.bid   if data.bid   and data.bid   > 0 else None
     ib.cancelMktData(qualified[0])
     ib.sleep(0.5)
-    return round(float(price), 2) if price else None
+    if price:
+        return round(float(price), 2)
+
+    # Streaming gave nothing — every field came back nan. On a closed market
+    # that is common for symbols without a streaming entitlement on this
+    # account, and it is NOT the same as "no price exists": the daily bar is a
+    # different request path and usually still answers.
+    #
+    # This matters because a missing price means the stop loss cannot be
+    # evaluated at all. On 2026-07-18 the live box priced AAOI but not QBTS or
+    # IREN, so the weekend preview showed one sale when Monday would in fact
+    # have made three — the operator was reading a plan built on absent data.
+    # The last daily close is exactly the right number for a weekend preview:
+    # it IS Friday's close.
+    try:
+        bars = ib.reqHistoricalData(
+            qualified[0], endDateTime="", durationStr="5 D",
+            barSizeSetting="1 day", whatToShow="TRADES",
+            useRTH=True, formatDate=1,
+        )
+        if bars and bars[-1].close and bars[-1].close > 0:
+            close = round(float(bars[-1].close), 2)
+            log.info(f"  📉 {ticker}: streaming price unavailable — using last "
+                     f"daily close ${close:.2f} ({bars[-1].date})")
+            return close
+    except Exception as e:
+        log.warning(f"  ⚠️  {ticker}: historical close fallback failed: {e}")
+    return None
 
 
 def _next_friday_expiry() -> str:
@@ -1311,11 +1338,21 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             # ── Step 1b: Stop-loss check ──────────────────────
             # Measured vs net_cost (premium-netted breakeven), not the assignment
             # strike — this is a decision about our economic position.
+            # Tracks whether the stop loss was actually EVALUATED, so a check we
+            # could not run is never reported as one that passed. Without this a
+            # missing price read as "within threshold" in the log and as
+            # "shares kept" in the Monday plan — i.e. a decision the code never
+            # made. On 2026-07-18 that made a weekend preview show 1 sale when
+            # Monday would have made 3.
+            stop_loss_evaluated = False
             if stop_loss_enabled and net_cost > 0:
                 current_price = _get_stock_price(ib, ticker)
                 if current_price is None:
-                    log.warning(f"  ⚠️  {ticker}: price unavailable — skipping stop-loss check")
+                    log.warning(f"  ⚠️  {ticker}: price UNAVAILABLE — stop loss could NOT be "
+                                f"evaluated (not the same as passing). Shares kept; the check "
+                                f"runs again at Monday's open when a price exists.")
                 else:
+                    stop_loss_evaluated = True
                     stop_threshold = round(net_cost * (1 - stop_loss_pct), 2)
                     loss_pct       = round((1 - current_price / net_cost) * 100, 1)
                     if current_price < stop_threshold:
@@ -1366,7 +1403,13 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             f"  ✅ {ticker}: price ${current_price:.2f} (above assigned strike)"
                         )
 
-            log.info(f"  ✅ {ticker}: stop-loss check passed — checking earnings")
+            if not stop_loss_enabled:
+                log.info(f"  ➖ {ticker}: stop loss disabled in Settings — checking earnings")
+            elif stop_loss_evaluated:
+                log.info(f"  ✅ {ticker}: stop-loss check passed — checking earnings")
+            else:
+                log.warning(f"  ❓ {ticker}: stop-loss UNDETERMINED (no price) — "
+                            f"checking earnings")
 
             # ── Step 2: Earnings check ────────────────────────
             # Skipped entirely when wheel_cc_ignore_earnings_filter is True.
@@ -1443,6 +1486,12 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     "ticker": ticker,
                     "action": "cc_deferred",
                     "shares": shares,
+                    # Surfaced so the Monday plan can't imply the shares were
+                    # KEPT BY DECISION when the stop loss never actually ran.
+                    # Same missing price that blocks CC pricing also blocks the
+                    # stop-loss check, and at Monday's open both will resolve —
+                    # possibly into a sale this preview did not show.
+                    "stop_loss_undetermined": stop_loss_enabled and not stop_loss_evaluated,
                 })
                 h["cc_status"] = "pending"
                 _progress(ticker=ticker, stage="CC deferred (no data)",
