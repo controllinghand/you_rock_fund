@@ -492,7 +492,13 @@ def run_monday(dry_run: bool = False, progress_callback=None,
 
     reconcile = _reconcile_before_run(dry_run=dry_run)
 
+    # Hand the reconciled holdings straight to the wheel check. Essential on a
+    # DRY RUN: the reconcile deliberately doesn't persist, so without this the
+    # preview re-reads the stale state.json and reports Monday doing nothing
+    # while the live run — which does persist — would trade. None on error or
+    # on the 0-positions bail, which correctly falls back to stored state.
     wheel = run_wheel_check(dry_run=dry_run, client_id=IBKR_CLIENT_ID_PREVIEW,
+                            holdings_override=reconcile.get("holdings"),
                             progress_callback=progress_callback)
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
                              progress_callback=progress_callback,

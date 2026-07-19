@@ -894,10 +894,16 @@ def detect_assignments(dry_run: bool = False) -> dict:
         "share_corrections": share_corrections,
         "dropped":           dropped,
         "dry_run":           dry_run,
+        # The reconciled holdings, so a DRY RUN (which deliberately does not
+        # persist) can still hand the corrected picture to the caller. Without
+        # this the preview re-reads the stale file from disk and shows Monday
+        # doing nothing, while the live run — which did persist — trades.
+        "holdings":          updated,
     }
 
 
 def run_wheel_check(dry_run: bool = False, client_id: int = None,
+                    holdings_override: list = None,
                     progress_callback=None) -> dict:
     """
     Monday, 5 min before the configured execution time (PST) — five-step
@@ -940,7 +946,12 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 pass
 
     state    = _load_state()
-    holdings = [_ensure_tranches(h) for h in state.get("wheel_holdings", [])]
+    # holdings_override carries the freshly reconciled picture from
+    # monday_runner._reconcile_before_run(). Required for a DRY RUN, where the
+    # reconcile intentionally does not write state.json — without it the preview
+    # would re-read the stale file and misreport what Monday will do.
+    _src = holdings_override if holdings_override is not None else state.get("wheel_holdings", [])
+    holdings = [_ensure_tranches(h) for h in _src]
 
     # Read wheel settings LIVE at execution time (not the import-time config
     # constants). The API preview/Run-Now paths reload config before calling, but
