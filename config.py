@@ -9,17 +9,56 @@ from secrets_client import get_secret
 load_dotenv()
 
 # ── You Rock Volatility Income Fund ──────────────────────────
-# These three are supplied by docker/entrypoint-secrets.sh, which is the
-# ENTRYPOINT of both the api and scheduler images. IBKR_PORT is DERIVED there
-# from the trading mode (4003=live, 4004=paper) rather than read from
-# .env.compose, so the port can never disagree with the account.
-#
-# Left as hard subscripts on purpose: if the entrypoint were ever bypassed,
-# guessing a default port could connect this process to the WRONG ACCOUNT.
-# Failing loudly at import is the safe behaviour for a trading system.
-IBKR_HOST      = os.environ["IBKR_HOST"]
-IBKR_PORT      = int(os.environ["IBKR_PORT"])   # paper: 4002 (legacy) / 4004 (durable-mode); live: 4001 / 4003
-IBKR_CLIENT_ID = int(os.environ["IBKR_CLIENT_ID"])
+_DURABLE_MODE_FILE = Path("/data/gw_trading_mode")
+
+
+def _resolve_trading_mode() -> str:
+    """live|paper. Durable file first — it is the source of truth every container
+    reads (the entrypoints, the gateway, and now this)."""
+    try:
+        if _DURABLE_MODE_FILE.exists():
+            mode = _DURABLE_MODE_FILE.read_text().strip().lower()
+            if mode in ("live", "paper"):
+                return mode
+    except Exception:
+        pass
+    return (os.environ.get("TRADING_MODE") or "").strip().lower()
+
+
+def _resolve_ibkr_port(mode: str) -> int:
+    """IBKR_PORT is DERIVED from the trading mode, never independently configured
+    — that is what stops the port and the account disagreeing (the v3.9.19 bug).
+
+    The entrypoint exports it for the long-running process, but `docker exec`
+    does NOT inherit an entrypoint's exports: it gets the container's Config.Env.
+    So every documented manual command —
+        docker compose exec scheduler python wheel_manager.py detect
+    — must be able to derive this itself. Re-deriving here rather than reading a
+    port from the environment keeps ONE rule, used by both paths.
+
+    Raises rather than defaulting when the mode is unknown: silently assuming
+    'paper' on a live box would point this process at the wrong account, and a
+    loud failure is the only safe option for a trading system.
+    """
+    env_port = (os.environ.get("IBKR_PORT") or "").strip()
+    if env_port:
+        return int(env_port)
+    if mode == "live":
+        return 4003
+    if mode == "paper":
+        return 4004
+    raise RuntimeError(
+        "Cannot determine IBKR_PORT: no IBKR_PORT in the environment and the "
+        "trading mode is unknown (no /data/gw_trading_mode and no TRADING_MODE). "
+        "Refusing to guess — the wrong port means the wrong IBKR account."
+    )
+
+
+IBKR_HOST      = os.environ.get("IBKR_HOST", "ib_gateway")
+_TRADING_MODE  = _resolve_trading_mode()
+IBKR_PORT      = _resolve_ibkr_port(_TRADING_MODE)   # 4003=live, 4004=paper
+# Client ids 2-5 are hardcoded below; 1 is the default for trader/one-off runs.
+IBKR_CLIENT_ID = int((os.environ.get("IBKR_CLIENT_ID") or "1").strip())
 
 
 # ── IB Gateway connection helpers (single source of truth) ───
@@ -69,7 +108,11 @@ def gateway_unreachable_message(host: str, port: int) -> str:
     twofa = "No 2FA needed for paper." if acct == "paper" else "Check 2FA login."
     return f"IB Gateway unreachable at {host}:{port} ({acct} account) — {where}. {twofa}"
 
-TRADING_MODE   = os.environ.get("TRADING_MODE", "paper").lower()
+# Resolved above from the durable /data/gw_trading_mode first, env second — the
+# same rule the entrypoints use. Reading env alone here would let `docker exec`
+# pick a different mode (and therefore a different ACCOUNT) than the running
+# scheduler, on the same box, in the same minute.
+TRADING_MODE   = _TRADING_MODE or "paper"
 _ACCOUNT_KEY   = "account_live" if TRADING_MODE == "live" else "account_paper"
 ACCOUNT        = get_secret(_ACCOUNT_KEY, "ACCOUNT")
 if not ACCOUNT:
