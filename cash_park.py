@@ -29,7 +29,6 @@ import json
 import logging
 import time
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock, Order
 
@@ -48,8 +47,6 @@ MARKET_POLL_SECS = 5
 MIN_BUY_USD      = 1.0
 # Never park more than this share of net-liquidation, regardless of idle cash.
 NET_LIQ_CAP_PCT  = 0.10
-
-PST = ZoneInfo("America/Los_Angeles")
 
 log = logging.getLogger(__name__)
 if not any(getattr(h, "_cash_park", False) for h in log.handlers):

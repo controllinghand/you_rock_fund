@@ -19,7 +19,6 @@ plan so the dashboard can show exactly what Monday will do.
 import json
 import logging
 from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_CLIENT_ID_PREVIEW, ACCOUNT,
@@ -27,7 +26,9 @@ from config import (
 )
 
 log = logging.getLogger(__name__)
-PST = ZoneInfo("America/Los_Angeles")
+# Operator-local time (Dashboard → Settings → Timezone). Aliased to the
+# historical name so existing datetime.now(PST) call sites read unchanged.
+from app_timezone import LOCAL_TZ as PST  # noqa: E402
 STATE_FILE = "state.json"
 TRADE_LOG_FILE = "trade_log.json"
 

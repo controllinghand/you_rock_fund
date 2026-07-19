@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, get_settings, MODE_LABEL
@@ -25,23 +24,12 @@ STATE_FILE      = "state.json"
 SETTINGS_FILE   = "settings.json"
 HEARTBEAT_FILE  = "scheduler_heartbeat.json"
 
-DEFAULT_TIMEZONE = "America/Los_Angeles"
-
-
-def _resolve_timezone() -> ZoneInfo:
-    try:
-        with open(SETTINGS_FILE) as f:
-            tz_name = (json.load(f) or {}).get("timezone")
-    except (FileNotFoundError, json.JSONDecodeError):
-        tz_name = None
-    tz_name = tz_name or os.environ.get("TIME_ZONE") or DEFAULT_TIMEZONE
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        return ZoneInfo(DEFAULT_TIMEZONE)
-
-
-PST = _resolve_timezone()  # variable name kept for compatibility; reflects configured timezone
+# Operator-local time. This module resolved the setting correctly on its own,
+# but api.py / monday_runner.py / discord_poster.py each hardcoded Pacific — so
+# a non-Pacific operator got jobs that FIRED on their zone while every timestamp
+# and Discord post was computed in Pacific. app_timezone is now the one resolver
+# for all of them; the local name is kept so the call sites read unchanged.
+from app_timezone import LOCAL_TZ as PST  # noqa: E402
 
 
 def _write_heartbeat():
@@ -133,6 +121,16 @@ def _load_settings() -> dict:
 # pipeline (to free capital first). 7:00 puts the wheel check at 6:55 — ~25 min
 # after open — which is safe on live AND on paper's 15-min-delayed feed. Anything
 # earlier would run the wheel check at/pre-open with no greeks (no CCs written).
+#
+# KNOWN LIMITATION: this floor is a fixed hour in the OPERATOR's timezone, but
+# the reason for it (the 06:30 open) is a fact in MARKET time. They coincide only
+# while the operator is on Pacific. An operator on Eastern would get a 07:00 ET
+# floor — 04:00 PT, three hours before the open, so the guarantee this constant
+# exists to provide would not hold. Pre-existing: cron triggers have always been
+# built on the configured timezone (see PST above), so the mismatch predates the
+# app_timezone change. Fixing it means expressing the floor in market time and
+# converting, which shifts real execution timing — deliberately not bundled into
+# a timezone-plumbing change. Every current box is Pacific.
 _MIN_EXEC_HOUR = 7
 _MIN_EXEC_MIN  = 0
 

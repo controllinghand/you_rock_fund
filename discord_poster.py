@@ -6,7 +6,6 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -18,7 +17,9 @@ load_dotenv()
 
 WEBHOOK_URL = get_secret("discord_webhook_url", "DISCORD_WEBHOOK_URL")
 YTD_FILE      = "ytd_tracker.json"
-PST           = ZoneInfo("America/Los_Angeles")
+# Operator-local time (Dashboard → Settings → Timezone). Aliased to the
+# historical name so existing datetime.now(PST) call sites read unchanged.
+from app_timezone import LOCAL_TZ as PST  # noqa: E402
 
 _version_file = Path(__file__).parent / "VERSION"
 _VERSION = f"v{_version_file.read_text().strip()}" if _version_file.exists() else "unknown"

@@ -51,7 +51,13 @@ LIVE_REQUIRED_SECRETS = {
     "tws_password_live": "your_live_ibkr_password",
 }
 
-PST = ZoneInfo("America/Los_Angeles")
+# Operator-local time, from Dashboard → Settings → Timezone (see app_timezone).
+# Aliased to the historical name so the existing datetime.now(PST) call sites
+# read unchanged; it is no longer necessarily Pacific.
+from app_timezone import LOCAL_TZ as PST  # noqa: E402
+
+# Eastern is NOT operator-configurable: IBKR invalidates the weekly IB Key token
+# at 01:00 America/New_York. That is a fact about the broker, not a preference.
 ET  = ZoneInfo("America/New_York")
 CONTAINERIZED = os.environ.get("YRVI_CONTAINERIZED", "0") == "1"
 HEARTBEAT_FILE = BASE_DIR / "scheduler_heartbeat.json"
