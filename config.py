@@ -9,6 +9,14 @@ from secrets_client import get_secret
 load_dotenv()
 
 # ── You Rock Volatility Income Fund ──────────────────────────
+# These three are supplied by docker/entrypoint-secrets.sh, which is the
+# ENTRYPOINT of both the api and scheduler images. IBKR_PORT is DERIVED there
+# from the trading mode (4003=live, 4004=paper) rather than read from
+# .env.compose, so the port can never disagree with the account.
+#
+# Left as hard subscripts on purpose: if the entrypoint were ever bypassed,
+# guessing a default port could connect this process to the WRONG ACCOUNT.
+# Failing loudly at import is the safe behaviour for a trading system.
 IBKR_HOST      = os.environ["IBKR_HOST"]
 IBKR_PORT      = int(os.environ["IBKR_PORT"])   # paper: 4002 (legacy) / 4004 (durable-mode); live: 4001 / 4003
 IBKR_CLIENT_ID = int(os.environ["IBKR_CLIENT_ID"])
@@ -82,8 +90,13 @@ IBKR_CLIENT_ID_CASH_PARK = 5    # cash_park.py — Monday sweep buy + end-of-wee
 EXECUTE_HOUR_PST = 10            # 10AM PST Monday
 EXECUTE_MINUTE   = 0
 
-# Screener API
-RENDER_URL    = os.environ["RENDER_URL"]
+# Screener API. The endpoint is the same for every deployment, so it is baked
+# rather than required from the environment — a hard os.environ[] here meant a
+# missing or mistyped .env.compose key took down every module that imports
+# config. The SECRET stays in the secrets container: never default a credential.
+RENDER_URL    = os.environ.get(
+    "RENDER_URL", "https://yourockclub-ledger-sync.onrender.com/api/targets/csp"
+)
 RENDER_SECRET = get_secret("render_secret", "RENDER_SECRET")
 
 # ── Fund parameters (settings.json is source of truth) ───────

@@ -80,15 +80,52 @@ if [ -f "/data/gw_trading_mode" ]; then
     if [ "$_tm_override" = "live" ] || [ "$_tm_override" = "paper" ]; then
         TRADING_MODE="$_tm_override"
         export TRADING_MODE
-        if [ "$_tm_override" = "live" ]; then
-            IBKR_PORT=4003
-        else
-            IBKR_PORT=4004
-        fi
-        export IBKR_PORT
-        echo "yrvi-entrypoint: trading mode from /data/gw_trading_mode -> ${TRADING_MODE} (IBKR_PORT=${IBKR_PORT})"
+        echo "yrvi-entrypoint: trading mode from /data/gw_trading_mode -> ${TRADING_MODE}"
     fi
 fi
+
+# IBKR_PORT is DERIVED, never configured. It is a pure function of the trading
+# mode (inside the container network the gateway listens on 4003=live,
+# 4004=paper), so letting .env.compose supply it independently only creates a
+# way for the port and the mode to disagree — which is exactly the v3.9.19 bug
+# (api kept a stale port and hit Errno 111/4004 against the wrong gateway).
+# Deriving it unconditionally also closes the case where /data/gw_trading_mode
+# is absent: previously the durable block was skipped entirely and BOTH values
+# fell back to .env.compose.
+if [ "${TRADING_MODE:-paper}" = "live" ]; then
+    IBKR_PORT=4003
+else
+    IBKR_PORT=4004
+fi
+export IBKR_PORT
+echo "yrvi-entrypoint: IBKR_PORT=${IBKR_PORT} (derived from TRADING_MODE=${TRADING_MODE:-paper})"
+
+# ── Values the app owns; .env.compose must not be able to change them ──
+# Post-install, behaviour is owned by the app (settings.json + the durable
+# /data/gw_* files) or is a constant that no operator should tune. A stale
+# .env.compose — every box carries one, and upgrades reset it to committed
+# defaults — must never be able to shadow that. Overriding here rather than
+# rewriting the operator's file keeps unreachable standalone boxes safe.
+#
+# Report anything ignored so this is observable rather than a silent override.
+_obsolete=""
+for _k in IBKR_PORT IBKR_CLIENT_ID RENDER_URL READ_ONLY_API TWS_ACCEPT_INCOMING \
+          ALLOW_BLIND_TRADING EXISTING_SESSION_DETECTED_ACTION \
+          TWOFA_TIMEOUT_ACTION RELOGIN_AFTER_TWOFA_TIMEOUT TWOFA_EXIT_INTERVAL
+do
+    if grep -qE "^[[:space:]]*${_k}=" /host_repo/.env.compose 2>/dev/null; then
+        _obsolete="${_obsolete} ${_k}"
+    fi
+done
+if [ -n "$_obsolete" ]; then
+    echo "yrvi-entrypoint: ignoring obsolete .env.compose keys (app-owned or baked):${_obsolete}"
+    echo "yrvi-entrypoint: .env.compose now affects host ports + image tag ONLY"
+fi
+
+# IBKR client ids are already hardcoded in config.py (wheel=2, risk=3,
+# preview=4, cash_park=5); 1 was the odd one out, configurable for no reason.
+IBKR_CLIENT_ID=1
+export IBKR_CLIENT_ID
 
 load_secret RENDER_SECRET /run/secrets/render_secret
 load_secret ANTHROPIC_API_KEY /run/secrets/anthropic_api_key

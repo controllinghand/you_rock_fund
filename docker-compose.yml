@@ -5,12 +5,24 @@ x-python-env: &python-env
   PYTHONDONTWRITEBYTECODE: "1"
   YRVI_CONTAINERIZED: "1"
   YRVI_DATA_DIR: /data
+  # TRADING_MODE here is only the FIRST-BOOT seed. Once the app has written
+  # /data/gw_trading_mode, the shared entrypoint takes the mode from that file
+  # and this value is ignored — upgrades reset .env.compose to the committed
+  # default, so it must never be authoritative after install.
   TRADING_MODE: ${TRADING_MODE:-paper}
   IBKR_HOST: ib_gateway
-  # gnzsnz/ib-gateway exposes paper on 4004 and live on 4003 inside the Docker network.
-  IBKR_PORT: ${IBKR_PORT:-4004}
-  IBKR_CLIENT_ID: ${IBKR_CLIENT_ID:-1}
-  RENDER_URL: ${RENDER_URL:-https://yourockclub-ledger-sync.onrender.com/api/targets/csp}
+  #
+  # Deliberately NOT passed here, so a stale .env.compose cannot reach the app:
+  #   IBKR_PORT    — DERIVED from the trading mode by the entrypoint
+  #                  (4003=live, 4004=paper inside the Docker network). Passing
+  #                  it separately is what let the port and mode disagree.
+  #   IBKR_CLIENT_ID — set by the entrypoint; the other ids (2-5) are already
+  #                  hardcoded in config.py, 1 was the odd one out.
+  #   RENDER_URL   — baked in config.py; identical on every deployment.
+  # See docker/entrypoint-secrets.sh, which logs anything it ignores.
+  #
+  # AUTO_RESTART_* are first-boot seeds only: settings.json wins at runtime
+  # (_in_auto_restart_window) and /data/gw_auto_restart_time wins in the gateway.
   AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:59 PM}
   AUTO_RESTART_SUPPRESS_SECS: ${AUTO_RESTART_SUPPRESS_SECS:-1800}
 
@@ -50,26 +62,37 @@ services:
     environment:
       # TWS_USERID and VNC_SERVER_PASSWORD are fetched from the secrets container
       # at startup by yrvi-gw-entrypoint.sh — not injected here.
+      # First-boot seed only — /data/gw_trading_mode wins once it exists.
       TRADING_MODE: ${TRADING_MODE:-paper}
-      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-accept}
-      READ_ONLY_API: ${READ_ONLY_API:-no}
       TIME_ZONE: ${TIME_ZONE:-America/Los_Angeles}
       TZ: ${TIME_ZONE:-America/Los_Angeles}
-      # 2FA timeout handling. An unanswered IB Key push must leave the gateway
-      # retrying, never parked: on 2026-07-17 a push arrived at 10:35 PM, went
-      # untapped, and the gateway sat dead for 26 hours across a whole weekend.
       #
-      # 'restart' (not 'exit') because this service is `restart: "no"` — that is
-      # deliberate, so a credential failure can't loop and lock the IBKR account.
-      # But it also means an exiting gateway stays down until a human intervenes,
-      # so exiting on a *timeout* trades a recoverable stall for a hard outage.
-      # 'restart' keeps the retry inside IBC, where the lockout watcher and
-      # LoginFailed=terminate still bound it.
-      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
-      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
-      TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-60}
-      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
-      ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
+      # The values below are LITERALS, not ${...}, so a stale .env.compose cannot
+      # change them. None of them is a setting an operator should ever tune:
+      #
+      #   READ_ONLY_API      this app places orders — "yes" silently breaks every
+      #                      execution path. It was already commented "must be no".
+      #   ALLOW_BLIND_TRADING trading without market data is never what we want.
+      #   TWS_ACCEPT_INCOMING the api/scheduler must be able to connect at all.
+      #   EXISTING_SESSION_DETECTED_ACTION 'primary' keeps THIS session when IBKR
+      #                      reports a competing login, rather than yielding it.
+      #
+      # 2FA timeout handling: an unanswered IB Key push must leave the gateway
+      # retrying, never parked — on 2026-07-17 a push arrived at 10:35 PM, went
+      # untapped, and the gateway sat dead for 26 hours across a whole weekend.
+      # 'restart' (not 'exit') because this service is `restart: "no"`, which is
+      # deliberate so a credential failure can't loop into an IBKR lockout — but
+      # it also means an exiting gateway never comes back on its own.
+      # The entrypoint enforces both of these on the IBC template as well, so
+      # they hold even on a box whose .env.compose predates this change.
+      READ_ONLY_API: "no"
+      ALLOW_BLIND_TRADING: "no"
+      TWS_ACCEPT_INCOMING: "accept"
+      EXISTING_SESSION_DETECTED_ACTION: "primary"
+      TWOFA_TIMEOUT_ACTION: "restart"
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
+      TWOFA_EXIT_INTERVAL: "60"
+      # First-boot seed only — /data/gw_auto_restart_time wins once it exists.
       AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-11:59 PM}
       TWS_SETTINGS_PATH: /home/ibgateway/Jts
     volumes:
