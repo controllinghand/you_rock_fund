@@ -153,6 +153,18 @@ def _ensure_tranches(h: dict) -> dict:
     """Lazy migration: legacy holdings predate `tranches`. Synthesize a single
     tranche from the existing assigned_strike/shares so the holding keeps working.
     `tranches` is the strike-weighted source for assigned_strike (the P&L basis)."""
+    # A CLOSED position cannot have open tranches. The sell paths historically
+    # zeroed `shares` without clearing `tranches`, so a name that was sold and
+    # later re-assigned had the SOLD position's strike blended into the new
+    # assigned_strike: 1700 @ $50.00 left behind + 100 new → $49.11 reported as
+    # the basis for stock actually acquired at ~$33.34. assigned_strike is the
+    # P&L basis and is the one number that cannot be rebuilt from the broker,
+    # so drop stale tranches here and let the next reconcile re-derive them.
+    # Safe for realized P&L: the sell paths compute it from assigned_strike ×
+    # shares captured before zeroing, never from tranches.
+    if h.get("shares", 0) <= 0 and h.get("tranches"):
+        h["tranches"] = []
+        return h
     if not h.get("tranches"):
         shares = h.get("shares", 0)
         if shares > 0:
@@ -689,7 +701,7 @@ def _set_cc_coverage(h: dict, *, strike, expiry, premium, covered: int, needed: 
 
 # ── Public API ─────────────────────────────────────────────────
 
-def detect_assignments():
+def detect_assignments(dry_run: bool = False) -> dict:
     """
     Saturday 8AM PST — scan IBKR for stock positions and reconcile
     against known wheel_holdings. Runs Saturday morning (not Friday
@@ -765,15 +777,29 @@ def detect_assignments():
         log.error(f"❌ IBKR returned 0 stock positions but {len(unexplained)} "
                   f"holding(s) have no expired CC to explain their absence — "
                   f"skipping save to avoid data loss: {unexplained}")
-        return []
+        return {"called_away": [], "new_assignments": [], "share_corrections": [],
+                "dropped": [], "dry_run": dry_run, "bailed": True,
+                "unexplained": unexplained}
 
-    updated         = []
-    new_assignments = []
+    updated           = []
+    new_assignments   = []
+    # Drift = state disagreed with the broker. Reported so a caller can page a
+    # human: silently healing a stale state.json would hide the fact that the
+    # scheduled detection is failing (exactly how a broken self-heal stayed
+    # invisible for a month — see _soft_restart_ibgateway).
+    share_corrections = []
+    dropped           = [t for t in existing_holdings if t not in stock_positions]
     for ticker, shares in stock_positions.items():
         if ticker in existing_holdings:
             h            = _ensure_tranches(existing_holdings[ticker])
             prior_shares = sum(t.get("shares", 0) for t in h["tranches"])
             delta        = shares - prior_shares
+            if h.get("shares", 0) != shares:
+                share_corrections.append({
+                    "ticker": ticker,
+                    "was":    h.get("shares", 0),
+                    "now":    shares,
+                })
             if delta > 0:
                 # New tranche assigned at this week's CSP strike — blend it into
                 # the strike-weighted assigned_strike (the P&L basis).
@@ -850,15 +876,25 @@ def detect_assignments():
         # called-away holdings are intentionally excluded from updated → removed from state
 
     state["wheel_holdings"] = updated
-    _save_state(state)
-    log.info(f"\n💾 Saved {len(updated)} wheel holding(s) to state.json "
-             f"({len(called_away)} called away, {len(new_assignments)} new assignment(s))")
+    if dry_run:
+        log.info(f"\n🟡 [DRY RUN] would save {len(updated)} wheel holding(s) — "
+                 f"state.json NOT written")
+    else:
+        _save_state(state)
+        log.info(f"\n💾 Saved {len(updated)} wheel holding(s) to state.json "
+                 f"({len(called_away)} called away, {len(new_assignments)} new assignment(s))")
     log.info("=" * 65)
     # Discord alert for new assignments. (Previously dead code: it sat after the
     # return below and never fired — fixed alongside the tranche rewrite.)
-    if new_assignments:
+    if new_assignments and not dry_run:
         discord_poster.post_assignment_alert(new_assignments)
-    return called_away
+    return {
+        "called_away":       called_away,
+        "new_assignments":   new_assignments,
+        "share_corrections": share_corrections,
+        "dropped":           dropped,
+        "dry_run":           dry_run,
+    }
 
 
 def run_wheel_check(dry_run: bool = False, client_id: int = None,
@@ -1235,6 +1271,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     shares_sold_pnl += realized
                     skip_tickers.append(ticker)
                     h["shares"]    = 0
+                    # Position closed — clear tranches so a later re-assignment
+                    # starts a fresh basis (see _ensure_tranches).
+                    h["tranches"]  = []
                     h["cc_status"] = "sold_dropped_screener"
                     wheel_activity.append({
                         "ticker":       ticker,
@@ -1284,6 +1323,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             shares_sold_pnl += realized
                             skip_tickers.append(ticker)
                             h["shares"]    = 0
+                            # Position closed — clear tranches so a later re-assignment
+                            # starts a fresh basis (see _ensure_tranches).
+                            h["tranches"]  = []
                             h["cc_status"] = "sold_stop_loss"
                             wheel_activity.append({
                                 "ticker":       ticker,
@@ -1342,6 +1384,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                         shares_sold_pnl += realized
                         skip_tickers.append(ticker)
                         h["shares"]    = 0
+                        # Position closed — clear tranches so a later re-assignment
+                        # starts a fresh basis (see _ensure_tranches).
+                        h["tranches"]  = []
                         h["cc_status"] = "sold_earnings_this_week"
                         wheel_activity.append({
                             "ticker":           ticker,
@@ -1406,6 +1451,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                     shares_sold_pnl += realized
                     skip_tickers.append(ticker)
                     h["shares"]    = 0
+                    # Position closed — clear tranches so a later re-assignment
+                    # starts a fresh basis (see _ensure_tranches).
+                    h["tranches"]  = []
                     h["cc_status"] = "sold_no_viable_cc"
                     wheel_activity.append({
                         "ticker":       ticker,

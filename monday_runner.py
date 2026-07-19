@@ -140,6 +140,96 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
     return total_realized
 
 
+def _discord_alert(message: str) -> None:
+    """Plain-text Discord alert (mirrors cash_park._discord_alert). No-op when
+    Discord is disabled or unconfigured; never raises."""
+    try:
+        if not get_settings().get("discord_webhook_enabled", True):
+            return
+        from secrets_client import get_secret
+        webhook = get_secret("discord_webhook_url", "DISCORD_WEBHOOK_URL")
+        if not webhook:
+            return
+        import requests
+        requests.post(webhook, json={"content": message}, timeout=5)
+    except Exception as e:
+        log.warning(f"  ⚠️  Discord alert failed: {e}")
+
+
+def _reconcile_before_run(dry_run: bool = False) -> dict:
+    """Re-sync wheel_holdings against live IBKR positions before Monday acts.
+
+    state.json is a CACHE; IBKR is the source of truth for what we hold. Keeping
+    them in sync is detect_assignments()'s job on Saturday — but that is a
+    scheduled job, and a scheduled job that fails leaves Monday trading on a
+    stale picture with nothing to notice. On the live box the weekend run fails
+    routinely (gateway 2FA), so this is the normal case, not the edge case.
+
+    What stale state actually costs: a holding whose shares went to 0 in state
+    and was later re-assigned is skipped entirely by the per-holding loop
+    ("N shares — skipping"), so no covered call is written and the stop loss is
+    never evaluated on it. Silent inaction on real stock, with no alert.
+
+    Reconciling here rather than reimplementing it inside run_wheel_check's
+    Step 0 is deliberate: Step 0 only ADOPTS unknown tickers, and writing a
+    second reconciler against tranches/assigned_strike is how the P&L basis —
+    the one number that cannot be rebuilt from the broker — gets corrupted.
+
+    Runs unconditionally rather than on a staleness heuristic: it is idempotent
+    (a clean box logs "existing — unchanged"), costs ~3s, and a heuristic is one
+    more thing to get wrong. Honors dry_run so a preview stays non-mutating.
+
+    Drift is ALERTED, not just fixed. Healing quietly would hide that the
+    weekend job is failing — the same way a broken soft restart stayed invisible
+    for a month because the fallback always recovered things.
+
+    Never fatal: on error it logs and lets the run proceed, which is exactly the
+    behaviour that exists today. A reconcile that could abort Monday would be a
+    worse failure than the drift it prevents.
+    """
+    try:
+        from wheel_manager import detect_assignments
+        log.info("🔄 Reconciling wheel holdings against live IBKR positions…")
+        result = detect_assignments(dry_run=dry_run)
+
+        if result.get("bailed"):
+            msg = (f"⚠️ **YRVI** Monday reconcile INCONCLUSIVE — IBKR returned 0 stock "
+                   f"positions but {len(result.get('unexplained', []))} holding(s) are "
+                   f"unexplained: {', '.join(result.get('unexplained', []))}. State left "
+                   f"untouched; the run continues on the existing picture. Verify positions.")
+            log.error(f"  ❌ {msg}")
+            if not dry_run:
+                _discord_alert(msg)
+            return result
+
+        drift = (result.get("share_corrections") or []) + (result.get("new_assignments") or [])
+        if drift or result.get("dropped"):
+            bits = []
+            for c in result.get("share_corrections", []):
+                bits.append(f"{c['ticker']} {c['was']}→{c['now']} shares")
+            for h in result.get("new_assignments", []):
+                bits.append(f"{h['ticker']} +{h['shares']} (new assignment)")
+            for t in result.get("dropped", []):
+                bits.append(f"{t} no longer held")
+            detail = "; ".join(bits)
+            log.warning(f"  ⚠️  State was STALE — reconciled from IBKR: {detail}")
+            if not dry_run:
+                _discord_alert(
+                    f"⚠️ **YRVI** Monday reconcile corrected a stale state.json before "
+                    f"trading: {detail}.\nThis means the weekend assignment detection did "
+                    f"not run or did not complete — worth checking why, since Monday only "
+                    f"caught it by re-checking."
+                )
+        else:
+            log.info("  ✅ Holdings already match IBKR — no drift")
+        return result
+    except Exception as e:
+        # Deliberately non-fatal: see docstring.
+        log.error(f"  ❌ Reconcile failed (non-fatal, continuing on existing state): {e}",
+                  exc_info=True)
+        return {"error": str(e)}
+
+
 def _fetch_account_summary(fallback: float) -> tuple[float, float]:
     """
     Fetch IBKR BuyingPower and NetLiquidation (read-only). Returns
@@ -400,6 +490,8 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     log.info(f"🗓️  MONDAY RUNNER [{mode}] — {datetime.now(PST).strftime('%Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
 
+    reconcile = _reconcile_before_run(dry_run=dry_run)
+
     wheel = run_wheel_check(dry_run=dry_run, client_id=IBKR_CLIENT_ID_PREVIEW,
                             progress_callback=progress_callback)
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
@@ -416,4 +508,5 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     except Exception as e:
         log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
 
-    return {"dry_run": dry_run, "wheel": wheel, "csp": csp, "cash_park": park}
+    return {"dry_run": dry_run, "wheel": wheel, "csp": csp, "cash_park": park,
+            "reconcile": reconcile}

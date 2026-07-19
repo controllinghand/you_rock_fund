@@ -233,7 +233,7 @@ def run_assignment_detection():
         state_before  = _load_state()
         known_tickers = {h["ticker"] for h in state_before.get("wheel_holdings", [])}
 
-        called_away = detect_assignments()
+        called_away = detect_assignments()["called_away"]
 
         from discord_poster import is_enabled, post_weekly_review
         if is_enabled():
