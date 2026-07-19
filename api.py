@@ -1082,10 +1082,18 @@ def _run_gateway_log_monitor() -> None:
 
             login_attempts = 0
 
+            # The stream opens with tail=100, so the first lines are replayed
+            # history. Alerting on those would re-page for a 2FA push that was
+            # answered hours ago every time this monitor reconnects. Backlog is
+            # delivered as fast as the socket allows, so a short warmup cleanly
+            # separates it from live lines.
+            stream_started = time.monotonic()
+
             for chunk in container.logs(stream=True, follow=True, tail=100):
                 line = chunk.decode("utf-8").strip()
                 ll = line.lower()
                 _add_line(line)
+                is_backlog = (time.monotonic() - stream_started) < 3.0
 
                 # Weekly IB Key 2FA token state (IBC logs one of these on every restart).
                 if "autorestart file not found" in ll:
@@ -1120,6 +1128,44 @@ def _run_gateway_log_monitor() -> None:
                         )
                         terminal = True
                         break
+
+                # ── The IB Key push: the only moment tapping the phone helps ──
+                # Deliberately NOT gated by _in_auto_restart_window(). The daily
+                # restart is 11:59 PM and the 2026-07-17 push landed at 10:35 PM —
+                # close enough that window-softening would have buried the one
+                # alert that was actually actionable. The pre-existing watchdog
+                # alerts fire when a *restart* is attempted, which on 2026-07-17
+                # was 72 minutes before IBKR issued the challenge: by the time the
+                # push existed, the alerting had gone quiet. This is the event that
+                # matters, so it always pages at full volume.
+                if not is_backlog and "second factor authentication initiated" in ll:
+                    _send_discord_alert(
+                        "🚨 **YRVI** IB Gateway is waiting on an **IB Key 2FA "
+                        "approval — tap your phone NOW**. IBKR's window is short "
+                        "(~14 min observed). An unanswered push leaves the gateway "
+                        "parked on the login screen with trading DOWN."
+                    )
+
+                # The push expired. IBC logs this and then goes silent, so it is
+                # the last signal before what is otherwise an invisible outage —
+                # on 2026-07-17 this line was followed by 26 hours of nothing.
+                # Wording splits on IBC's own verdict so it stays accurate both
+                # before and after the v5.2.70 relogin fix is deployed.
+                if not is_backlog and "re-login after second factor authentication timeout" in ll:
+                    if "not required" in ll:
+                        _send_discord_alert(
+                            "🚨 **YRVI** IB Key 2FA push went **UNANSWERED** and the "
+                            "gateway is parked on the login screen — it will NOT retry "
+                            "on its own. Trading is DOWN until it is restarted.\n"
+                            "🔧 **Fix:** dashboard → **Help** → **Restart Gateway**, "
+                            "then approve the IB Key push within a few minutes."
+                        )
+                    else:
+                        _send_discord_alert(
+                            "⚠️ **YRVI** IB Key 2FA push went unanswered — IB Gateway "
+                            "is retrying the login by itself. Watch your phone for a "
+                            "fresh push; a ✅ recovery message follows once it is back."
+                        )
 
                 if "login has completed" in ll or "logged in" in ll:
                     login_attempts = 0
