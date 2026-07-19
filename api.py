@@ -376,10 +376,22 @@ def _get_gateway_tws_version():
 def _soft_restart_ibgateway() -> bool:
     """Ask IBC for an on-demand soft restart via its command server.
 
-    Returns True only if the command server accepted the RESTART (replies
-    'OK Restarting at ...'). Returns False if the command server is unreachable
-    (e.g. an older gateway image without it enabled), so the caller can fall back
-    to paging a human.
+    Returns True if the command server accepted the RESTART. IBC answers with one
+    or more lines, each prefixed "OK" on success — observed verbatim:
+
+        OK RESTART in progress
+        OK RESTART at 09:24 PM
+
+    Match on that prefix rather than any particular wording. This check previously
+    looked for the literal "Restarting", which IBC never sends (it says "RESTART",
+    uppercase), so every accepted soft restart was misread as a failure and the
+    caller escalated to a full restart that wiped the session and forced a fresh
+    login — on live, an IB Key 2FA push. That is exactly what the soft path exists
+    to avoid, and it is what turned a routine wedge into a 26-hour outage on
+    2026-07-17. It had never once succeeded in production (3/3 escalations).
+
+    Returns False if the command server is genuinely unreachable (e.g. an older
+    gateway image without it enabled), so the caller can fall back to escalating.
     """
     try:
         result = subprocess.run(
@@ -389,7 +401,8 @@ def _soft_restart_ibgateway() -> bool:
             capture_output=True, text=True, timeout=20,
         )
         out = ((result.stdout or "") + (result.stderr or "")).strip()
-        accepted = "Restarting" in out
+        accepted = any(l.strip().upper().startswith("OK")
+                       for l in out.splitlines() if l.strip())
         print(f"[api/watchdog] IBC soft restart → {out!r} (accepted={accepted})")
         return accepted
     except Exception as e:
@@ -739,7 +752,8 @@ def _watchdog_check() -> None:
                             _watchdog_state["last_ibkr_alert"] = now
                             _send_discord_alert(
                                 f"🚨 **YRVI** IB Gateway API failing {int(down_sec / 60)} min in — "
-                                f"soft restart unavailable (command server unreachable) and a "
+                                f"soft restart not accepted (no OK reply from IBC's command "
+                                f"server; raw reply is in the api logs) and a "
                                 f"full-restart escalation is suppressed (one fired < "
                                 f"{FULL_RESTART_COOLDOWN // 60} min ago — lockout guard).\n"
                                 f"{_MANUAL_RESTART_HINT}"
@@ -756,9 +770,9 @@ def _watchdog_check() -> None:
                                      if is_live else " (paper — no 2FA)")
                             _send_discord_alert(
                                 f"🔄 **YRVI** IBKR API unreachable for {int(down_sec / 60)} min "
-                                f"(`{err}`); the soft restart was unavailable (command server "
-                                f"unreachable), so escalated straight to a full gateway restart "
-                                f"that re-runs login{twofa}. Confirming recovery or escalating in "
+                                f"(`{err}`); the soft restart was not accepted (no OK reply from "
+                                f"IBC's command server), so escalated straight to a full gateway "
+                                f"restart that re-runs login{twofa}. Confirming recovery or escalating in "
                                 f"~{FULL_RESTART_GRACE // 60} min…"
                             )
                         else:
@@ -766,7 +780,7 @@ def _watchdog_check() -> None:
                             _send_discord_alert(
                                 f"🚨 **YRVI** IB Gateway port is open but IBKR API connection failed "
                                 f"for {int(down_sec / 60)} min. Error: `{err}`. Auto soft-restart "
-                                f"unavailable (command server not reachable) and the full-restart "
+                                f"not accepted (no OK reply from IBC's command server) and the full-restart "
                                 f"escalation could not be sent (docker error).\n"
                                 f"{_MANUAL_RESTART_HINT}"
                             )
