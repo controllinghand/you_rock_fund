@@ -85,6 +85,14 @@ send_discord_alert() {
 #   2. LoginFailed=terminate — IBC exits on a bad login instead of retrying into an
 #      account lockout. (Previously patched on config.ini, which was then silently
 #      regenerated away — this moves it to the template where it actually takes.)
+#   3. ReloginAfterSecondFactorAuthenticationTimeout=yes — an unanswered IB Key push
+#      must leave the gateway retrying, never parked. On 2026-07-17 a push arrived at
+#      10:35 PM, went untapped, and IBC neither retried nor exited: the gateway sat
+#      dead for 26 hours, taking out a Saturday assignment-detection run.
+#      Written as a literal rather than left to ${RELOGIN_AFTER_TWOFA_TIMEOUT},
+#      because every box installed before this fix has RELOGIN_AFTER_TWOFA_TIMEOUT=no
+#      pinned in its own .env.compose — a compose default alone would reach only fresh
+#      installs and silently skip every existing box, including live and the friends'.
 # Logs a warning and continues if no writable template is found.
 patch_ibc_template() {
     tmpl="${IBC_INI_TMPL:-}"
@@ -116,7 +124,8 @@ patch_ibc_template() {
     set_kv ControlFrom 127.0.0.1
     set_kv BindAddress 127.0.0.1
     set_kv LoginFailed terminate
-    echo "yrvi-gw-entrypoint: patched IBC template $tmpl (CommandServerPort=7462 loopback, LoginFailed=terminate)"
+    set_kv ReloginAfterSecondFactorAuthenticationTimeout yes
+    echo "yrvi-gw-entrypoint: patched IBC template $tmpl (CommandServerPort=7462 loopback, LoginFailed=terminate, relogin-after-2FA-timeout=yes)"
     return 0
 }
 
@@ -363,6 +372,17 @@ unset TWS_PASSWORD_FILE
 export TWS_PASSWORD="$password"
 export TWS_USERID="$userid"
 export VNC_SERVER_PASSWORD="$vnc_password"
+
+# run.sh passes --on2fatimeout=$TWOFA_TIMEOUT_ACTION to IBC, and boxes installed
+# before the relogin fix still pin 'exit' in their own .env.compose. Leaving that
+# would contradict the ini setting patched above, and 'exit' is the worse branch
+# regardless: this service is `restart: "no"` (deliberately, so a credential
+# failure can't loop into an IBKR lockout), so an exiting gateway never comes back
+# on its own. Force the retry branch to agree with the template.
+if [ "${TWOFA_TIMEOUT_ACTION:-}" != "restart" ]; then
+    echo "yrvi-gw-entrypoint: TWOFA_TIMEOUT_ACTION='${TWOFA_TIMEOUT_ACTION:-unset}' overridden to 'restart' (an exiting gateway cannot self-recover under restart:\"no\")"
+    export TWOFA_TIMEOUT_ACTION=restart
+fi
 
 echo "yrvi-gw-entrypoint: secrets loaded (mode=${TRADING_MODE}, userid set, password ${#password} chars), starting IB Gateway..."
 

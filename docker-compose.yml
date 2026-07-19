@@ -55,8 +55,18 @@ services:
       READ_ONLY_API: ${READ_ONLY_API:-no}
       TIME_ZONE: ${TIME_ZONE:-America/Los_Angeles}
       TZ: ${TIME_ZONE:-America/Los_Angeles}
-      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-exit}
-      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-no}
+      # 2FA timeout handling. An unanswered IB Key push must leave the gateway
+      # retrying, never parked: on 2026-07-17 a push arrived at 10:35 PM, went
+      # untapped, and the gateway sat dead for 26 hours across a whole weekend.
+      #
+      # 'restart' (not 'exit') because this service is `restart: "no"` — that is
+      # deliberate, so a credential failure can't loop and lock the IBKR account.
+      # But it also means an exiting gateway stays down until a human intervenes,
+      # so exiting on a *timeout* trades a recoverable stall for a hard outage.
+      # 'restart' keeps the retry inside IBC, where the lockout watcher and
+      # LoginFailed=terminate still bound it.
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
       TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-60}
       EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
       ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
