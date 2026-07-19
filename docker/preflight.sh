@@ -43,9 +43,16 @@ is_placeholder() {
 if [ ! -f "$env_file" ]; then
     printf 'Note: %s not present — using compose defaults (host ports + image tag).\n' "$env_file"
 else
+    # Install is deliberately paper-first. The secrets setup page only gates on
+    # the paper credentials (main.py REQUIRED_SECRETS), so a live install would
+    # otherwise pass this check with no live credentials at all and then fail
+    # later inside the gateway with "credentials missing" — a much worse place
+    # to find out. Live is reached by finishing a paper install, adding the live
+    # credentials in the app, then switching mode from the dashboard (which
+    # writes the durable /data/gw_trading_mode).
     mode="$(value_for TRADING_MODE)"
     if [ "$mode" = "live" ]; then
-        fail "This Compose stack is currently wired for paper Gateway login. Keep TRADING_MODE=paper until live Compose wiring is intentionally enabled."
+        fail "Setup is paper-first: keep TRADING_MODE=paper here. To trade live, finish this install, add your live credentials in the dashboard under Secrets, then switch to Live from the dashboard."
     fi
 fi
 

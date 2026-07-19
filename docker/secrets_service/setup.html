@@ -77,6 +77,31 @@
     border-bottom: 1px solid var(--border);
   }
   .section-title:first-child { margin-top: 8px; }
+  details.advanced { margin-top: 28px; }
+  details.advanced > summary {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    list-style: none;
+  }
+  details.advanced > summary::-webkit-details-marker { display: none; }
+  details.advanced > summary::before {
+    content: "▸\00a0";
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+  details.advanced[open] > summary::before { content: "▾\00a0"; }
+  details.advanced > summary:hover { color: var(--fg); }
+  .advanced-note {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 12px 0 4px 0;
+  }
   .field-hint {
     font-size: 12px;
     color: var(--muted);
@@ -188,25 +213,42 @@
   </div>
 
 <script>
+// Grouped by what actually gates the install, mirroring the app's Secrets page.
+// The four below are exactly main.py's REQUIRED_SECRETS — the same set preflight
+// checks — so finishing them is the whole job here. Everything else is optional
+// and is better set in the app, where it can be changed later without a terminal.
+//
+// Install is ALWAYS paper-first: live credentials are added in the app and the
+// mode is switched from the dashboard. preflight.sh refuses a live install for
+// this reason, so live fields must never be presented as required here.
+//
+// discord_webhook_weekly_plan is deliberately absent: it is a FILE-based secret
+// (/run/secrets/…, read by the entrypoint), not one this service stores, so
+// POST /secret/discord_webhook_weekly_plan returned 404 "unknown secret" and the
+// field could never be saved.
 const SECTIONS = [
   {
-    title: "Account Info",
+    title: "Required secrets",
     secrets: [
-      { name: "account_paper",      label: "IBKR Paper Account ID",       required: true,  hint: "e.g. DU123456" },
-      { name: "tws_userid_paper",   label: "IBKR Paper Username",         required: true },
-      { name: "account_live",       label: "IBKR Live Account ID",        required: false, hint: "Optional — needed for live trading" },
-      { name: "tws_userid_live",    label: "IBKR Live Username",          required: false, hint: "Optional — needed for live trading" },
-      { name: "vnc_server_password", label: "VNC Password",               required: false, hint: "Optional — default: ibgateway123!test" },
+      { name: "account_paper",     label: "IBKR Paper Account ID",       required: true, hint: "e.g. DU123456" },
+      { name: "tws_userid_paper",  label: "IBKR Paper Username",         required: true, hint: "Your IBKR login username — not the account ID" },
+      { name: "tws_password_paper", label: "IBKR Paper Trading Password", required: true },
+      { name: "render_secret",     label: "Render Screener API Secret",   required: true },
     ],
   },
   {
-    title: "Passwords & API Keys",
+    title: "Advanced — not needed to get started",
+    advanced: true,
+    note: "You can finish setup without any of these. Add them later in the "
+        + "dashboard under Secrets, where they can also be changed. "
+        + "<strong>Trading live?</strong> Complete this paper setup first, then add "
+        + "your live credentials in the app and switch to Live from the dashboard.",
     secrets: [
-      { name: "tws_password_paper",          label: "IBKR Paper Trading Password",   required: true },
-      { name: "tws_password_live",           label: "IBKR Live Trading Password",    required: false, hint: "Optional — only needed for live trading" },
-      { name: "render_secret",               label: "Render Screener API Secret",    required: true },
-      { name: "discord_webhook_url",         label: "Discord Webhook URL",           required: false },
-      { name: "discord_webhook_weekly_plan", label: "Discord Weekly Plan Webhook",   required: false },
+      { name: "account_live",       label: "IBKR Live Account ID",        required: false, hint: "Only for live trading — add in the app instead" },
+      { name: "tws_userid_live",    label: "IBKR Live Username",          required: false, hint: "Only for live trading — add in the app instead" },
+      { name: "tws_password_live",  label: "IBKR Live Trading Password",  required: false, hint: "Only for live trading — add in the app instead" },
+      { name: "vnc_server_password", label: "VNC Password",               required: false, hint: "Defaults to ibgateway123!test (loopback only)" },
+      { name: "discord_webhook_url", label: "Discord Webhook URL",        required: false, hint: "Alerts and weekly results" },
     ],
   },
 ];
@@ -241,11 +283,30 @@ function buildField(s) {
 }
 
 SECTIONS.forEach(sec => {
-  const title = document.createElement("div");
-  title.className = "section-title";
-  title.textContent = sec.title;
-  fieldsEl.appendChild(title);
-  sec.secrets.forEach(s => fieldsEl.appendChild(buildField(s)));
+  if (!sec.advanced) {
+    const title = document.createElement("div");
+    title.className = "section-title";
+    title.textContent = sec.title;
+    fieldsEl.appendChild(title);
+    sec.secrets.forEach(s => fieldsEl.appendChild(buildField(s)));
+    return;
+  }
+  // Collapsed by default so the page shows only what gates the install, but
+  // still reachable: if the dashboard itself will not start, this page is the
+  // only UI left for fixing a credential.
+  const details = document.createElement("details");
+  details.className = "advanced";
+  const summary = document.createElement("summary");
+  summary.textContent = sec.title;
+  details.appendChild(summary);
+  if (sec.note) {
+    const note = document.createElement("div");
+    note.className = "advanced-note";
+    note.innerHTML = sec.note;
+    details.appendChild(note);
+  }
+  sec.secrets.forEach(s => details.appendChild(buildField(s)));
+  fieldsEl.appendChild(details);
 });
 
 document.querySelectorAll(".toggle").forEach(btn => {
