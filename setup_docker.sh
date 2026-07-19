@@ -78,14 +78,31 @@ echo "$TRADING_MODE" > "$LAST_MODE_FILE"
 
 PROJ=$(cd "$(dirname "$0")" && pwd)
 
-# Keep .env.compose in sync with the chosen trading mode
-IBKR_PORT_VAL=4004
-[ "$TRADING_MODE" = "live" ] && IBKR_PORT_VAL=4003
+# Read a key out of .env.compose, falling back to the compose default. The file
+# is optional (install-time only), so every caller must supply a default.
+env_val() {
+    _v=""
+    if [ -f "$PROJ/.env.compose" ]; then
+        _v=$(awk -F= -v k="$1" '$0 !~ /^[[:space:]]*#/ && $1 == k {
+                 sub(/^[^=]*=/, ""); print; exit }' "$PROJ/.env.compose")
+    fi
+    printf '%s' "${_v:-$2}"
+}
+
+# Host ports for the closing instructions. Reading them rather than hardcoding
+# means an operator who moved a port off a default is told the right URL.
+WEB_PORT=$(env_val YRVI_WEB_PORT 3000)
+API_PORT=$(env_val YRVI_API_PORT 8000)
+
+# Keep .env.compose's TRADING_MODE seed in sync with the chosen mode. Only the
+# seed: IBKR_PORT is no longer carried in this file at all (it is derived from
+# the mode by the entrypoint and by config.py), so the sed that used to rewrite
+# it here matched nothing and the success line claimed an update that never
+# happened.
 if [ -f "$PROJ/.env.compose" ]; then
     sed -i.bak "s/^TRADING_MODE=.*/TRADING_MODE=$TRADING_MODE/" "$PROJ/.env.compose"
-    sed -i.bak "s/^IBKR_PORT=.*/IBKR_PORT=$IBKR_PORT_VAL/" "$PROJ/.env.compose"
     rm -f "$PROJ/.env.compose.bak"
-    printf "  ✅  .env.compose updated: TRADING_MODE=%s  IBKR_PORT=%s\n" "$TRADING_MODE" "$IBKR_PORT_VAL"
+    printf "  ✅  .env.compose updated: TRADING_MODE=%s (IBKR_PORT is derived, not stored)\n" "$TRADING_MODE"
 fi
 
 # ── Platform detection ─────────────────────────────────────────
@@ -295,7 +312,7 @@ if docker compose $ENV_FILE_ARGS up -d --build; then
     elif [ "$DRY_RUN" = "True" ] || [ "$DRY_RUN" = "true" ]; then
         info "dry_run=true — orders are simulated (no fills). Toggle off in Settings when ready to trade"
     else
-        info "dry_run not checked yet (API still starting — verify at http://localhost:8000/api/settings)"
+        info "dry_run not checked yet (API still starting — verify at http://localhost:$API_PORT/api/settings)"
     fi
 
 else
@@ -398,7 +415,7 @@ if [ "$OS" = "Darwin" ]; then
     ok "yrvi:// upgrade URL scheme registered"
 else
     info "Desktop app is macOS only"
-    info "  Access dashboard at http://localhost:3000"
+    info "  Access dashboard at http://localhost:$WEB_PORT"
 fi
 
 # ── Summary ───────────────────────────────────────────────────
@@ -407,8 +424,8 @@ echo "════════════════════════�
 printf "${BOLD}${GREEN}  Setup complete.${NC}\n"
 echo "══════════════════════════════════════════════════════"
 echo ""
-echo "  Dashboard:  http://localhost:3000"
-echo "  API status: http://localhost:8000/api/status"
+echo "  Dashboard:  http://localhost:$WEB_PORT"
+echo "  API status: http://localhost:$API_PORT/api/status"
 echo ""
 echo "  Wait for IB Gateway to log in (watch for 'Login has completed'):"
 echo "    docker compose $ENV_FILE_ARGS logs -f ib_gateway"

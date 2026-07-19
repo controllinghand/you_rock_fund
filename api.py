@@ -2993,17 +2993,18 @@ def set_trading_mode(body: TradingModeRequest, background_tasks: BackgroundTasks
     env_file = host_env_file if host_env_file.exists() else BASE_DIR / ".env.compose"
     try:
         if env_file.exists():
+            # Only the TRADING_MODE seed. IBKR_PORT is no longer carried in this
+            # file — it is derived from the mode by the entrypoint and again by
+            # config.py — so rewriting it here matched nothing on a current file
+            # and, on an older one, kept a value nothing reads while the log line
+            # claimed an update that had no effect.
             lines = env_file.read_text().splitlines()
-            updated = []
-            for line in lines:
-                if line.startswith("TRADING_MODE="):
-                    updated.append(f"TRADING_MODE={body.mode}")
-                elif line.startswith("IBKR_PORT="):
-                    updated.append(f"IBKR_PORT={ibkr_port}")
-                else:
-                    updated.append(line)
+            updated = [f"TRADING_MODE={body.mode}" if line.startswith("TRADING_MODE=")
+                       else line
+                       for line in lines]
             env_file.write_text("\n".join(updated) + "\n")
-            print(f"[api/trading-mode] updated .env.compose: TRADING_MODE={body.mode} IBKR_PORT={ibkr_port}")
+            print(f"[api/trading-mode] updated .env.compose: TRADING_MODE={body.mode} "
+                  f"(IBKR_PORT={ibkr_port} is derived, not stored)")
     except Exception as e:
         print(f"[api/trading-mode] failed to update .env.compose: {e}")
 
