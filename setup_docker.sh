@@ -145,6 +145,18 @@ printf "${BOLD}Step 2 / 6   Configure secrets${NC}\n"
 echo "──────────────────────────────────────────────────────"
 
 cd "$PROJ"
+
+# .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+# every value it can set has a compose default, so an operator may delete it.
+# `docker compose --env-file <missing>` is a hard error, so only pass the flag
+# when the file is actually there. Written as if/fi rather than
+# `[ -f x ] && VAR=...` because under `set -e` that idiom exits the script when
+# the file is absent. Expanded unquoted on purpose: word-splitting is what turns
+# this into two argv entries (the path has no spaces).
+ENV_FILE_ARGS=""
+if [ -f .env.compose ]; then
+    ENV_FILE_ARGS="--env-file .env.compose"
+fi
 mkdir -p docker/secrets
 
 # Empty placeholders for the file-based secrets: block in
@@ -166,13 +178,13 @@ unset _placeholder
 SECRETS_URL="http://localhost:8001"
 
 info "Starting secrets container..."
-docker compose --env-file .env.compose up -d --build secrets >/dev/null 2>&1 \
-    || fail "Failed to start secrets container — check: docker compose --env-file .env.compose logs secrets"
+docker compose $ENV_FILE_ARGS up -d --build secrets >/dev/null 2>&1 \
+    || fail "Failed to start secrets container — check: docker compose $ENV_FILE_ARGS logs secrets"
 
 WAIT=0
 until curl -sf "$SECRETS_URL/health" >/dev/null 2>&1; do
     if [ "$WAIT" -ge 30 ]; then
-        fail "Secrets container did not become healthy within 30s — check: docker compose --env-file .env.compose logs secrets"
+        fail "Secrets container did not become healthy within 30s — check: docker compose $ENV_FILE_ARGS logs secrets"
     fi
     sleep 3
     WAIT=$((WAIT + 3))
@@ -218,8 +230,17 @@ echo ""
 printf "${BOLD}Step 3 / 6   Validate .env.compose and config${NC}\n"
 echo "──────────────────────────────────────────────────────"
 
+# .env.compose holds host ports + the image tag, nothing else — no credentials
+# (those live in the secrets container). It is optional at runtime, so a missing
+# one is not a failure: create it from the example so the operator has a file to
+# edit if they need to move a port off a default.
 if [ ! -f ".env.compose" ]; then
-    fail ".env.compose not found — copy .env.compose.example to .env.compose and fill in credentials"
+    if [ -f ".env.compose.example" ]; then
+        cp .env.compose.example .env.compose
+        info "Created .env.compose from .env.compose.example (host ports + image tag)"
+    else
+        info "No .env.compose — using compose defaults (host ports + image tag)"
+    fi
 fi
 
 # Account credentials are now managed by the secrets container — preflight
@@ -246,19 +267,19 @@ echo "────────────────────────�
 
 info "Building images and starting api, scheduler, ib_gateway, web (secrets already running)..."
 
-if docker compose --env-file .env.compose up -d --build; then
+if docker compose $ENV_FILE_ARGS up -d --build; then
 
     sleep 3
-    RUNNING=$(docker compose --env-file .env.compose ps 2>/dev/null \
+    RUNNING=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null \
         | grep -cE "Up|running|healthy" || true)
     if [ "$RUNNING" -ge 5 ]; then
         ok "All $RUNNING containers running"
     elif [ "$RUNNING" -gt 0 ]; then
         warn "$RUNNING / 5 containers running — IB Gateway may still be initializing (allow 60 s)"
-        info "Monitor: docker compose --env-file .env.compose logs -f ib_gateway"
+        info "Monitor: docker compose $ENV_FILE_ARGS logs -f ib_gateway"
     else
         warn "Containers started but status unclear — check:"
-        info "  docker compose --env-file .env.compose ps"
+        info "  docker compose $ENV_FILE_ARGS ps"
     fi
 
     # ── dry_run check ──────────────────────────────────────────
@@ -280,8 +301,8 @@ if docker compose --env-file .env.compose up -d --build; then
 else
     echo ""
     printf "  ${RED}❌${NC}  docker compose up failed.\n"
-    info "  docker compose --env-file .env.compose ps"
-    info "  docker compose --env-file .env.compose logs"
+    info "  docker compose $ENV_FILE_ARGS ps"
+    info "  docker compose $ENV_FILE_ARGS logs"
     exit 1
 fi
 
@@ -296,7 +317,7 @@ if $IS_WINDOWS; then
     LOGFILE="$(cygpath -w "$HOME")\\yrvi-autostart.log"
     BATCH="$PROJ/yrvi-autostart.bat"
 
-    printf '@echo off\r\ncd /d "%s"\r\ndocker compose --env-file .env.compose up -d >> "%s" 2>&1\r\n' \
+    printf '@echo off\r\ncd /d "%s"\r\ndocker compose $ENV_FILE_ARGS up -d >> "%s" 2>&1\r\n' \
         "$PROJ_WIN" "$LOGFILE" > "$BATCH"
     BATCH_WIN=$(cygpath -w "$BATCH")
 
@@ -315,7 +336,7 @@ elif $IS_WSL; then
     BATCH_WIN=$(wslpath -w "$BATCH" 2>/dev/null || echo "$BATCH")
     LOGFILE="$HOME/yrvi-autostart.log"
 
-    printf '@echo off\r\nwsl.exe -- bash -c "cd %s && docker compose --env-file .env.compose up -d >> %s 2>&1"\r\n' \
+    printf '@echo off\r\nwsl.exe -- bash -c "cd %s && docker compose $ENV_FILE_ARGS up -d >> %s 2>&1"\r\n' \
         "$PROJ" "$LOGFILE" > "$BATCH"
 
     if schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
@@ -390,7 +411,7 @@ echo "  Dashboard:  http://localhost:3000"
 echo "  API status: http://localhost:8000/api/status"
 echo ""
 echo "  Wait for IB Gateway to log in (watch for 'Login has completed'):"
-echo "    docker compose --env-file .env.compose logs -f ib_gateway"
+echo "    docker compose $ENV_FILE_ARGS logs -f ib_gateway"
 echo ""
 echo "  See the IB Gateway screen (if IBKR shows a dialog at first login):"
 echo "    Open the dashboard → Help → System Diagnostics → View Gateway"

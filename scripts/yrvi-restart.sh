@@ -114,6 +114,18 @@ echo ""
 # ── Safety checks ──────────────────────────────────────────────
 
 cd "$PROJ"
+
+# .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+# every value it can set has a compose default, so an operator may delete it.
+# `docker compose --env-file <missing>` is a hard error, so only pass the flag
+# when the file is actually there. Written as if/fi rather than
+# `[ -f x ] && VAR=...` because under `set -e` that idiom exits the script when
+# the file is absent. Expanded unquoted on purpose: word-splitting is what turns
+# this into two argv entries (the path has no spaces).
+ENV_FILE_ARGS=""
+if [ -f .env.compose ]; then
+    ENV_FILE_ARGS="--env-file .env.compose"
+fi
 if [ ! -f ".env.compose" ]; then
     fail "Must be run from repo root — .env.compose not found in $PROJ"
 fi
@@ -135,7 +147,7 @@ fi
 printf "${BOLD}Step 1 / 4   Verify stack is running${NC}\n"
 echo "──────────────────────────────────────────────────────"
 
-RUNNING=$(docker compose --env-file .env.compose ps --status running 2>/dev/null \
+RUNNING=$(docker compose $ENV_FILE_ARGS ps --status running 2>/dev/null \
     | grep -cE "running|Up" || true)
 
 if [ "$RUNNING" -eq 0 ]; then
@@ -144,7 +156,7 @@ if [ "$RUNNING" -eq 0 ]; then
     exit 1
 fi
 
-CONTAINER_ID=$(docker compose --env-file .env.compose ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
+CONTAINER_ID=$(docker compose $ENV_FILE_ARGS ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
 if [ -z "$CONTAINER_ID" ]; then
     fail "'$CONTAINER' is not in the running stack ($RUNNING other container(s) running)"
 fi
@@ -163,7 +175,7 @@ STATUS_BODY=$(curl -sf "$SECRETS_URL/secrets/status" 2>/dev/null || true)
 if [ -z "$STATUS_BODY" ]; then
     printf "  ${RED}❌${NC}  Secrets container is not running.\n" >&2
     info "Start it first:"
-    info "  docker compose --env-file .env.compose up -d secrets"
+    info "  docker compose $ENV_FILE_ARGS up -d secrets"
     exit 1
 fi
 
@@ -240,13 +252,13 @@ else
 
     if [ -z "$FINAL_STATUS" ]; then
         printf "  ${RED}❌${NC}  %s did not become healthy within %ds\n" "$CONTAINER" "$TIMEOUT" >&2
-        info "Check logs: docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
+        info "Check logs: docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
         exit 1
     elif [ "$FINAL_STATUS" = "unhealthy" ] || \
          [ "$FINAL_STATUS" = "exited" ]    || \
          [ "$FINAL_STATUS" = "dead" ]; then
         printf "  ${RED}❌${NC}  %s status is '%s'\n" "$CONTAINER" "$FINAL_STATUS" >&2
-        info "Check logs: docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
+        info "Check logs: docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
         exit 1
     else
         ok "$CONTAINER is $FINAL_STATUS"
@@ -264,7 +276,7 @@ fi
 echo "══════════════════════════════════════════════════════"
 echo ""
 if [ "$DRY_RUN" = false ]; then
-    info "Logs:   docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
-    info "Status: docker compose --env-file .env.compose ps"
+    info "Logs:   docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
+    info "Status: docker compose $ENV_FILE_ARGS ps"
     echo ""
 fi

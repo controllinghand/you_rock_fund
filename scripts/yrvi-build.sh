@@ -121,6 +121,18 @@ echo ""
 # ── Safety checks ──────────────────────────────────────────────
 
 cd "$PROJ"
+
+# .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+# every value it can set has a compose default, so an operator may delete it.
+# `docker compose --env-file <missing>` is a hard error, so only pass the flag
+# when the file is actually there. Written as if/fi rather than
+# `[ -f x ] && VAR=...` because under `set -e` that idiom exits the script when
+# the file is absent. Expanded unquoted on purpose: word-splitting is what turns
+# this into two argv entries (the path has no spaces).
+ENV_FILE_ARGS=""
+if [ -f .env.compose ]; then
+    ENV_FILE_ARGS="--env-file .env.compose"
+fi
 if [ ! -f ".env.compose" ]; then
     fail "Must be run from repo root — .env.compose not found in $PROJ"
 fi
@@ -146,7 +158,7 @@ fi
 printf "${BOLD}Step 1 / 4   Verify stack is running${NC}\n"
 echo "──────────────────────────────────────────────────────"
 
-RUNNING=$(docker compose --env-file .env.compose ps --status running 2>/dev/null \
+RUNNING=$(docker compose $ENV_FILE_ARGS ps --status running 2>/dev/null \
     | grep -cE "running|Up" || true)
 
 if [ "$RUNNING" -eq 0 ]; then
@@ -159,7 +171,7 @@ CONTAINER_ID=""
 if [ "$CONTAINER" = "all" ]; then
     ok "$RUNNING container(s) running — rebuilding full stack"
 else
-    CONTAINER_ID=$(docker compose --env-file .env.compose ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
+    CONTAINER_ID=$(docker compose $ENV_FILE_ARGS ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
     if [ -z "$CONTAINER_ID" ]; then
         fail "'$CONTAINER' is not in the running stack ($RUNNING other container(s) running)"
     fi
@@ -273,16 +285,16 @@ run_with_build_timeout() {
 if [ "$DRY_RUN" = true ]; then
     if [ "$CONTAINER" = "all" ]; then
         info "Would build+restart all 6 services in dependency order:"
-        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build secrets"
-        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets   (then wait until healthy)"
-        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build --pull ib_gateway"
-        info "Would run: docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose $ENV_FILE_ARGS build secrets"
+        info "Would run: docker compose $ENV_FILE_ARGS up -d --no-deps --force-recreate secrets   (then wait until healthy)"
+        info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose $ENV_FILE_ARGS build --pull ib_gateway"
+        info "Would run: docker compose $ENV_FILE_ARGS up -d --no-deps --force-recreate ib_gateway   (restarts gateway → IB Key 2FA on live)"
         for svc in scheduler web view-gateway api; do
-            info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose --env-file .env.compose build $svc"
-            info "Would run: docker compose --env-file .env.compose up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
+            info "Would run: ${TIMEOUT_BIN:-(no timeout binary)} ${BUILD_TIMEOUT_SECS}s docker compose $ENV_FILE_ARGS build $svc"
+            info "Would run: docker compose $ENV_FILE_ARGS up -d --no-deps $svc  (api uses the sidecar restart when run inside the container)"
         done
     else
-        info "Would run: docker compose --env-file .env.compose up -d --build $CONTAINER"
+        info "Would run: docker compose $ENV_FILE_ARGS up -d --build $CONTAINER"
     fi
 else
     info "Building and restarting ${CONTAINER}..."
@@ -294,8 +306,8 @@ else
         # (it serves credentials at their startup), so rebuild it, force a
         # restart, and WAIT for healthy before touching anything that needs it.
         info "Building secrets..."
-        if run_with_build_timeout docker compose --env-file .env.compose build secrets; then
-            docker compose --env-file .env.compose up -d --no-deps --force-recreate secrets
+        if run_with_build_timeout docker compose $ENV_FILE_ARGS build secrets; then
+            docker compose $ENV_FILE_ARGS up -d --no-deps --force-recreate secrets
             info "Waiting for secrets container to become healthy..."
             SECRETS_HEALTHY=""
             for _ in $(seq 1 30); do
@@ -322,8 +334,8 @@ else
         # on first boot (with a 🔄 Discord alert). NOTE: restarting the gateway
         # forces an IB Key 2FA approval on the LIVE box, every upgrade.
         info "Building ib_gateway (--pull — may adopt a newer upstream TWS)..."
-        if run_with_build_timeout docker compose --env-file .env.compose build --pull ib_gateway; then
-            docker compose --env-file .env.compose up -d --no-deps --force-recreate ib_gateway
+        if run_with_build_timeout docker compose $ENV_FILE_ARGS build --pull ib_gateway; then
+            docker compose $ENV_FILE_ARGS up -d --no-deps --force-recreate ib_gateway
             ok "ib_gateway built and restarted (approve IB Key 2FA on the live box)"
         else
             warn "ib_gateway build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
@@ -342,8 +354,8 @@ else
         # special-cased out of this loop is a service that drifts.
         for svc in scheduler web view-gateway; do
             info "Building ${svc}..."
-            if run_with_build_timeout docker compose --env-file .env.compose build "$svc"; then
-                docker compose --env-file .env.compose up -d --no-deps "$svc"
+            if run_with_build_timeout docker compose $ENV_FILE_ARGS build "$svc"; then
+                docker compose $ENV_FILE_ARGS up -d --no-deps "$svc"
                 ok "${svc} built and restarted"
             else
                 warn "${svc} build failed or exceeded ${BUILD_TIMEOUT_SECS}s — leaving previous container running"
@@ -354,7 +366,7 @@ else
         # api last — same self-restart-sidecar reasoning as before (its own
         # build is now independent too, so a scheduler/web failure can't block it).
         info "Building api..."
-        if run_with_build_timeout docker compose --env-file .env.compose build api; then
+        if run_with_build_timeout docker compose $ENV_FILE_ARGS build api; then
             # When this script runs inside the api container (upgrade button), calling
             # "docker compose up api" would stop the old api container — killing this
             # process before the new container is created. Instead, spawn an independent
@@ -397,7 +409,7 @@ else
                     ok "api restart handed off to sidecar — will complete in ~5s"
                 fi
             else
-                docker compose --env-file .env.compose up -d --no-deps api
+                docker compose $ENV_FILE_ARGS up -d --no-deps api
             fi
             ok "api built and started"
         else
@@ -418,7 +430,7 @@ else
 
         if [ ${#BUILD_FAILED[@]} -gt 0 ]; then
             printf "  ${RED}❌${NC}  Build failed for: %s — other services were still upgraded\n" "${BUILD_FAILED[*]}" >&2
-            info "Check logs: docker compose --env-file .env.compose logs --tail=100 <service>"
+            info "Check logs: docker compose $ENV_FILE_ARGS logs --tail=100 <service>"
             info "Retry: bash scripts/yrvi-build.sh <service> --${TRADING_MODE}"
             if [ ${#WRITTEN_SECRET_FILES[@]} -gt 0 ]; then
                 for f in "${WRITTEN_SECRET_FILES[@]}"; do rm -f "$f"; done
@@ -426,9 +438,9 @@ else
             exit 1
         fi
     else
-        docker compose --env-file .env.compose up -d --build "$CONTAINER"
+        docker compose $ENV_FILE_ARGS up -d --build "$CONTAINER"
         # Re-query after rebuild — container ID changes after docker compose replaces the container
-        CONTAINER_ID=$(docker compose --env-file .env.compose ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
+        CONTAINER_ID=$(docker compose $ENV_FILE_ARGS ps -q "$CONTAINER" 2>/dev/null | head -1 || true)
         ok "${CONTAINER} built and started"
     fi
 fi
@@ -453,7 +465,7 @@ else
     if [ "$CONTAINER" = "all" ]; then
         # For full stack: poll until all 4 services report running/healthy
         while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-            UP=$(docker compose --env-file .env.compose ps 2>/dev/null \
+            UP=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null \
                 | grep -cE "Up|running|healthy" || true)
             if [ "$UP" -ge 4 ]; then
                 FINAL_STATUS="all running ($UP / 4)"; break
@@ -466,16 +478,16 @@ else
         echo ""
 
         if [ -z "$FINAL_STATUS" ]; then
-            UP=$(docker compose --env-file .env.compose ps 2>/dev/null \
+            UP=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null \
                 | grep -cE "Up|running|healthy" || true)
             if [ "$UP" -gt 0 ]; then
                 # Partial start — ib_gateway may still be authenticating; warn but don't fail
                 warn "$UP / 4 containers running after ${TIMEOUT}s — ib_gateway may still be initializing"
-                info "Monitor: docker compose --env-file .env.compose logs -f ib_gateway"
+                info "Monitor: docker compose $ENV_FILE_ARGS logs -f ib_gateway"
                 FINAL_STATUS="partial ($UP / 4)"
             else
                 printf "  ${RED}❌${NC}  No containers running after %ds\n" "$TIMEOUT" >&2
-                info "Check logs: docker compose --env-file .env.compose logs"
+                info "Check logs: docker compose $ENV_FILE_ARGS logs"
                 if [ ${#WRITTEN_SECRET_FILES[@]} -gt 0 ]; then
                     for f in "${WRITTEN_SECRET_FILES[@]}"; do rm -f "$f"; done
                 fi
@@ -517,7 +529,7 @@ else
 
         if [ -z "$FINAL_STATUS" ]; then
             printf "  ${RED}❌${NC}  %s did not become healthy within %ds\n" "$CONTAINER" "$TIMEOUT" >&2
-            info "Check logs: docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
+            info "Check logs: docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
             if [ ${#WRITTEN_SECRET_FILES[@]} -gt 0 ]; then
                 for f in "${WRITTEN_SECRET_FILES[@]}"; do rm -f "$f"; done
             fi
@@ -526,7 +538,7 @@ else
              [ "$FINAL_STATUS" = "exited" ]    || \
              [ "$FINAL_STATUS" = "dead" ]; then
             printf "  ${RED}❌${NC}  %s status is '%s'\n" "$CONTAINER" "$FINAL_STATUS" >&2
-            info "Check logs: docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
+            info "Check logs: docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
             if [ ${#WRITTEN_SECRET_FILES[@]} -gt 0 ]; then
                 for f in "${WRITTEN_SECRET_FILES[@]}"; do rm -f "$f"; done
             fi
@@ -555,10 +567,10 @@ echo "════════════════════════�
 echo ""
 if [ "$DRY_RUN" = false ]; then
     if [ "$CONTAINER" = "all" ]; then
-        info "Logs:   docker compose --env-file .env.compose logs -f"
+        info "Logs:   docker compose $ENV_FILE_ARGS logs -f"
     else
-        info "Logs:   docker compose --env-file .env.compose logs --tail=50 $CONTAINER"
+        info "Logs:   docker compose $ENV_FILE_ARGS logs --tail=50 $CONTAINER"
     fi
-    info "Status: docker compose --env-file .env.compose ps"
+    info "Status: docker compose $ENV_FILE_ARGS ps"
     echo ""
 fi

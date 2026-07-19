@@ -37,6 +37,18 @@ echo "  $(date '+%A %Y-%m-%d  %H:%M:%S %Z')"
 
 cd "$PROJ"
 
+# .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+# every value it can set has a compose default, so an operator may delete it.
+# `docker compose --env-file <missing>` is a hard error, so only pass the flag
+# when the file is actually there. Written as if/fi rather than
+# `[ -f x ] && VAR=...` because under `set -e` that idiom exits the script when
+# the file is absent. Expanded unquoted on purpose: word-splitting is what turns
+# this into two argv entries (the path has no spaces).
+ENV_FILE_ARGS=""
+if [ -f .env.compose ]; then
+    ENV_FILE_ARGS="--env-file .env.compose"
+fi
+
 # ═════════════════════════════════════════════════════════════
 section "1 / 4   Docker Engine"
 # ═════════════════════════════════════════════════════════════
@@ -57,7 +69,7 @@ section "2 / 4   Container Health  (docker compose ps)"
 if [ ! -f ".env.compose" ]; then
     fail ".env.compose not found — run setup_docker.sh first"
 else
-    PS_OUT=$(docker compose --env-file .env.compose ps 2>/dev/null || true)
+    PS_OUT=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null || true)
     ALL_UP=true
     # Remember each service's first-pass verdict so the post-setup re-check only
     # reverses the counter it actually incremented. (Blanket ((FAIL--)) per
@@ -100,7 +112,7 @@ else
         # the counter this service actually contributed at first check: a service
         # that was already Up stays a plain pass (no double-count); one that was
         # FAILED or WARNED flips to pass by decrementing that exact counter.
-        PS_OUT=$(docker compose --env-file .env.compose ps 2>/dev/null || true)
+        PS_OUT=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null || true)
         for svc in ib_gateway api scheduler web; do
             SVC_LINE=$(echo "$PS_OUT" | grep -i "$svc" | head -1 || true)
             if echo "$SVC_LINE" | grep -qiE "Up|running|healthy"; then
@@ -138,7 +150,7 @@ API_RESP=$(curl -sf --max-time 8 http://localhost:8000/api/status 2>/dev/null ||
 
 if [ -z "$API_RESP" ]; then
     fail "API not responding on port 8000 — check:"
-    warn "  docker compose --env-file .env.compose logs api"
+    warn "  docker compose $ENV_FILE_ARGS logs api"
 else
     GW_RUNNING=$(echo "$API_RESP" | python3 -c \
         "import sys,json; d=json.load(sys.stdin); print(d.get('gateway_running','?'))" 2>/dev/null || echo "?")
@@ -155,7 +167,7 @@ else
         pass "IB Gateway container: running"
     else
         warn "IB Gateway not yet running — allow 60 s, then:"
-        warn "  docker compose --env-file .env.compose logs -f ib_gateway"
+        warn "  docker compose $ENV_FILE_ARGS logs -f ib_gateway"
     fi
 
     if [ "$IBKR_CONN" = "True" ] || [ "$IBKR_CONN" = "true" ]; then
@@ -194,13 +206,13 @@ else
 fi
 
 # Scheduler container health
-SCHED_LINE=$(docker compose --env-file .env.compose ps 2>/dev/null \
+SCHED_LINE=$(docker compose $ENV_FILE_ARGS ps 2>/dev/null \
     | grep -i "scheduler" | head -1 || true)
 if echo "$SCHED_LINE" | grep -qiE "Up|running|healthy"; then
     pass "Scheduler container healthy"
 else
     warn "Scheduler container status unclear — check:"
-    warn "  docker compose --env-file .env.compose logs scheduler"
+    warn "  docker compose $ENV_FILE_ARGS logs scheduler"
 fi
 
 # ═════════════════════════════════════════════════════════════

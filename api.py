@@ -131,6 +131,44 @@ FULL_RESTART_COOLDOWN = 1800  # min seconds between auto full restarts of the ga
 # fresh login, which on live triggers an IB Key 2FA push the human must approve.
 _LIVE_IBKR_PORTS = (4001, 4003)
 
+
+# ── docker compose invocation ────────────────────────────────────
+# .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+# everything it can set has a compose default, so an operator may delete it once
+# the app is installed. `docker compose --env-file <missing>` is a hard error,
+# so the flag is passed only when the file is actually present.
+#
+# The api sees the host repo mounted at /host_repo; an operator running the
+# fallback command by hand is in the repo root, hence the two different paths.
+_HOST_ENV_FILE = "/host_repo/.env.compose"
+
+
+def _compose_argv(*args: str) -> list:
+    """argv for `docker compose …`, including --env-file only if it exists."""
+    argv = ["docker", "compose"]
+    try:
+        if Path(_HOST_ENV_FILE).exists():
+            argv += ["--env-file", _HOST_ENV_FILE]
+    except Exception:
+        pass
+    return argv + list(args)
+
+
+def _compose_hint(*args: str) -> str:
+    """The same command as a copy-pasteable string for operator-facing hints.
+
+    Kept in sync with _compose_argv so we never tell an operator to run a
+    command that would fail on their box with 'couldn't find env file'.
+    """
+    prefix = "docker compose"
+    try:
+        if Path(_HOST_ENV_FILE).exists():
+            prefix += " --env-file .env.compose"
+    except Exception:
+        pass
+    return f"{prefix} {' '.join(args)}"
+
+
 # Operator-facing recovery hint appended to gateway pages. The dashboard button
 # works for a non-technical operator on any OS (one click → POST /api/gateway/restart,
 # which the api container runs via docker.sock). The docker command stays as a
@@ -138,7 +176,7 @@ _LIVE_IBKR_PORTS = (4001, 4003)
 _MANUAL_RESTART_HINT = (
     "🔧 **Fix:** open the dashboard → **Help** → **Restart Gateway** (one click; "
     "live re-login needs the IB Key 2FA push). VNC also available on host port 5900.\n"
-    "🔴 Advanced/fallback: `docker compose --env-file .env.compose restart ib_gateway`"
+    f"🔴 Advanced/fallback: `{_compose_hint('restart', 'ib_gateway')}`"
 )
 
 # Auto-restart suppression: read the gateway's configured restart time and
@@ -651,13 +689,13 @@ def _watchdog_check() -> None:
                     _send_discord_alert(
                         f"🔒 **YRVI** IB Gateway account locked out — too many failed login attempts. "
                         f"Reset your IBKR password in Client Portal, then restart the gateway.\n"
-                        f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
+                        f"🔴 `{_compose_hint('restart', 'ib_gateway')}`"
                     )
                 elif login_st == "failed":
                     _send_discord_alert(
                         f"❌ **YRVI** IB Gateway login failed — wrong IBKR username or password. "
                         f"Update credentials in the dashboard Settings page, then restart the gateway.\n"
-                        f"🔴 `docker compose --env-file .env.compose restart ib_gateway`"
+                        f"🔴 `{_compose_hint('restart', 'ib_gateway')}`"
                     )
                 else:  # auto-restart window
                     _send_discord_alert(
@@ -666,7 +704,7 @@ def _watchdog_check() -> None:
                         f"a ✅ recovery message will follow once it's back up. "
                         f"If it doesn't recover, VNC is available on host port 5900.\n"
                         f"🔴 Manual restart: "
-                        f"`docker compose --env-file .env.compose restart ib_gateway`"
+                        f"`{_compose_hint('restart', 'ib_gateway')}`"
                     )
         elif (full_at is not None
                 and _watchdog_state["last_gateway_alert"] is None
@@ -730,7 +768,7 @@ def _watchdog_check() -> None:
                         f"a ✅ recovery message will follow once it's back up. "
                         f"If it doesn't recover, VNC is available on host port 5900.\n"
                         f"🔴 Manual restart: "
-                        f"`docker compose --env-file .env.compose restart ib_gateway`"
+                        f"`{_compose_hint('restart', 'ib_gateway')}`"
                     )
                 elif soft_at is None:
                     if _soft_restart_ibgateway():
@@ -867,7 +905,7 @@ def _watchdog_check() -> None:
             _send_discord_alert(
                 f"🚨 **YRVI** Scheduler heartbeat stale for {int(down_sec / 60)} min.\n"
                 f"🔴 Manual restart required: "
-                f"`docker compose --env-file .env.compose restart scheduler`"
+                f"`{_compose_hint('restart', 'scheduler')}`"
             )
     else:
         if _watchdog_state["scheduler_down_since"] is not None:
@@ -1282,8 +1320,7 @@ def reset_gateway_installation():
         # recreates the container with the correct config and mounts, and
         # Docker auto-creates the named volume fresh on first mount.
         result = subprocess.run(
-            ["docker", "compose", "--env-file", "/host_repo/.env.compose",
-             "up", "-d", "ib_gateway"],
+            _compose_argv("up", "-d", "ib_gateway"),
             cwd="/host_repo", capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
@@ -1908,7 +1945,7 @@ def _build_diag() -> dict:
         # Port not reachable — give the most specific reason we have
         if c_state == "not_found":
             check("IB Gateway", "error",
-                  "Container not found — run: docker compose --env-file .env.compose up -d",
+                  f"Container not found — run: {_compose_hint('up', '-d')}",
                   snippet)
         elif c_state == "exited":
             code_str = f" (exit code {c_exit})" if c_exit is not None else ""
@@ -1919,7 +1956,7 @@ def _build_diag() -> dict:
                       snippet, reset_available=True)
             else:
                 check("IB Gateway", "error",
-                      f"Container stopped{code_str} — run: docker compose --env-file .env.compose restart ib_gateway",
+                      f"Container stopped{code_str} — run: {_compose_hint('restart', 'ib_gateway')}",
                       snippet)
         elif c_state == "restarting":
             check("IB Gateway", "warn",

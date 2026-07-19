@@ -325,8 +325,8 @@ if ($bindChoice -eq 'Y' -or $bindChoice -eq 'y') {
 } else {
     Write-Host ""
     warn "Bind-mount skipped. Logs are still accessible via:"
-    Write-Host "    docker compose --env-file .env.compose logs -f scheduler" -ForegroundColor Yellow
-    Write-Host "    docker compose --env-file .env.compose logs -f api" -ForegroundColor Yellow
+    Write-Host "    docker compose logs -f scheduler" -ForegroundColor Yellow
+    Write-Host "    docker compose logs -f api" -ForegroundColor Yellow
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -342,9 +342,16 @@ if ($DryRun) {
     info "Building images and starting ib_gateway, api, scheduler, web..."
     Write-Host ""
 
+
+    # .env.compose is install-time only (host ports + image tag) and is OPTIONAL:
+    # everything it can set has a compose default. `docker compose --env-file
+    # <missing>` is a hard error, so only pass the flag when the file is present.
+    $EnvFileArgs = @()
+    if (Test-Path ".env.compose") { $EnvFileArgs = @("--env-file", ".env.compose") }
+
     # Stream docker compose output directly to the terminal so the user can
     # watch image pulls and build layers as they happen.
-    & docker compose --env-file .env.compose up -d --build
+    & docker compose @EnvFileArgs up -d --build
     if ($LASTEXITCODE -ne 0) {
         fail "'docker compose up' exited with code $LASTEXITCODE — see output above."
     }
@@ -355,11 +362,11 @@ if ($DryRun) {
     Write-Host ""
     info "Current container status:"
     Write-Host ""
-    & docker compose --env-file .env.compose ps
+    & docker compose @EnvFileArgs ps
     Write-Host ""
 
     # Count lines that indicate a container is running
-    $psLines = & docker compose --env-file .env.compose ps 2>&1
+    $psLines = & docker compose @EnvFileArgs ps 2>&1
     $runningCount = ($psLines | Where-Object { $_ -match '\b(Up|running|healthy)\b' } |
                      Measure-Object).Count
 
@@ -434,13 +441,13 @@ Write-Host "  Dashboard:   http://localhost:3000"
 Write-Host "  API status:  http://localhost:8000/api/status"
 Write-Host ""
 Write-Host "  Watch IB Gateway log in (takes 30–90 s):"
-Write-Host "    docker compose --env-file .env.compose logs -f ib_gateway" -ForegroundColor Cyan
+Write-Host "    docker compose logs -f ib_gateway" -ForegroundColor Cyan
 Write-Host "  Look for: 'Login has completed'"
 Write-Host ""
 Write-Host "  Other useful commands:"
-Write-Host "    docker compose --env-file .env.compose logs -f api" -ForegroundColor Cyan
-Write-Host "    docker compose --env-file .env.compose logs -f scheduler" -ForegroundColor Cyan
-Write-Host "    docker compose --env-file .env.compose ps" -ForegroundColor Cyan
+Write-Host "    docker compose logs -f api" -ForegroundColor Cyan
+Write-Host "    docker compose logs -f scheduler" -ForegroundColor Cyan
+Write-Host "    docker compose ps" -ForegroundColor Cyan
 Write-Host ""
 
 # Viewing the Gateway is informational — most first-time logins complete automatically

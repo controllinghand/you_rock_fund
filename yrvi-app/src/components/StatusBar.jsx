@@ -207,7 +207,7 @@ export default function StatusBar({ onMenuClick }) {
       if (elapsed > 300000) {
         stopPoll()
         setUpgradePhase('error')
-        setBuildLog(prev => prev + '\n\n⚠️  Still running after 5 minutes — check Docker logs:\n  docker compose --env-file .env.compose logs --tail=50 api')
+        setBuildLog(prev => prev + '\n\n⚠️  Still running after 5 minutes — check Docker logs:\n  docker compose logs --tail=50 api')
         return
       }
 

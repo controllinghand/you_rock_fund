@@ -35,8 +35,13 @@ is_placeholder() {
     esac
 }
 
+# A missing $env_file is NOT an error. It is install-time only (host ports +
+# image tag) and every value it can set has a compose default, so an operator
+# may delete it once installed; the trading mode then comes from the durable
+# /data/gw_trading_mode file like it does on every other start. Only validate
+# the seed value when the file is actually present.
 if [ ! -f "$env_file" ]; then
-    fail "$env_file is missing. Copy .env.compose.example to .env.compose first."
+    printf 'Note: %s not present — using compose defaults (host ports + image tag).\n' "$env_file"
 else
     mode="$(value_for TRADING_MODE)"
     if [ "$mode" = "live" ]; then
