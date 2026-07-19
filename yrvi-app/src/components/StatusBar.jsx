@@ -188,7 +188,7 @@ export default function StatusBar({ onMenuClick }) {
 
   // Poll /api/version/check until the running version matches expectedVersion.
   // Also polls /api/upgrade/log every tick to stream live build output.
-  function startReconnectPolling(baseOutput, expectedVersion) {
+  function startReconnectPolling(baseOutput, expectedVersion, previousVersion) {
     setUpgradePhase('waiting_up')
     setBuildLog('')
     setElapsedSecs(0)
@@ -216,7 +216,22 @@ export default function StatusBar({ onMenuClick }) {
       // signal, since api can succeed while scheduler/web silently stay stale.
       axios.get('/api/version/check', { timeout: 2000 })
         .then(r => {
-          if (r.data?.current && r.data.current === expectedVersion && failedServicesRef.current.length === 0) {
+          // Success = the running version MOVED, not that it equals the exact
+          // version we were offered. `main` can advance between the version
+          // check and the pull (a release landing while someone upgrades), and
+          // an exact match then never becomes true: the upgrade succeeds while
+          // this modal spins to its 5-minute timeout and reports an error.
+          // Seen 2026-07-18: offered 5.2.77→5.2.78, pull landed 5.2.79, modal
+          // hung on a completely clean upgrade. That is how an operator gets
+          // scared into hitting Cancel or restarting Docker mid-rebuild.
+          //
+          // previousVersion is guarded: without it, `current !== undefined`
+          // would fire on the FIRST poll and report success before the api has
+          // even restarted.
+          const moved = previousVersion && r.data?.current
+                        && r.data.current !== previousVersion
+          const matched = r.data?.current && r.data.current === expectedVersion
+          if ((matched || moved) && failedServicesRef.current.length === 0) {
             stopPoll()
             setUpgradePhase('done')
             setTimeout(() => window.location.reload(), 2000)
@@ -245,6 +260,9 @@ export default function StatusBar({ onMenuClick }) {
   // ── Upgrade: call API endpoint, then poll for reconnect ──────
   async function handleUpgrade() {
     const expectedVersion = versionInfo?.latest
+    // What we're upgrading FROM — the poller treats any move away from
+    // this as success, so a newer-than-offered version still completes.
+    const previousVersion = versionInfo?.current
     setShowConfirm(false)
     setUpgradePhase('waiting_up')
     setUpgradeOutput('Pulling latest code and rebuilding containers…')
@@ -253,14 +271,14 @@ export default function StatusBar({ onMenuClick }) {
       const { success, output } = res.data
       setUpgradeOutput(output || '')
       if (success) {
-        startReconnectPolling(output || '', expectedVersion)
+        startReconnectPolling(output || '', expectedVersion, previousVersion)
       } else {
         setUpgradePhase('error')
       }
     } catch (err) {
       // API going dark mid-request means containers are already rebuilding — poll for restart
       if (!err.response) {
-        startReconnectPolling('', expectedVersion)
+        startReconnectPolling('', expectedVersion, previousVersion)
       } else {
         setUpgradePhase('error')
         setUpgradeOutput(err.response?.data?.detail ?? err.message ?? 'Upgrade request failed')
