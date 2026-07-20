@@ -38,6 +38,22 @@ function isPreset(val) {
   return PRESET_TIMES.some(p => p.value === val)
 }
 
+// The wheel check — stop-loss sells + covered calls — fires 5 min BEFORE the
+// execution time (scheduler.py `_offset_time(exec_h, exec_m, 5)`) so share sales
+// free capital before the CSP sizer computes its budget. Mirrors the server-side
+// 7:00 floor so the note never advertises a time the scheduler won't actually use.
+function wheelCheckTime(val) {
+  if (!/^\d{2}:\d{2}$/.test(val || '')) return ''
+  const eff = val < MIN_EXEC_TIME ? MIN_EXEC_TIME : val
+  const [h, m] = eff.split(':').map(n => parseInt(n, 10))
+  if (isNaN(h) || isNaN(m)) return ''
+  const mins = (h * 60 + m - 5 + 1440) % 1440
+  const wh = Math.floor(mins / 60)
+  const wm = mins % 60
+  const h12 = wh % 12 || 12
+  return `${h12}:${String(wm).padStart(2, '0')} ${wh >= 12 ? 'PM' : 'AM'} PST`
+}
+
 function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange, description }) {
   const fillPct = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0
   return (
@@ -808,6 +824,14 @@ export default function SettingsPage() {
                 onChange={v => set('stop_loss_pct', v)}
                 description={`Sell if price falls more than ${((settings.stop_loss_pct ?? 0.10) * 100).toFixed(0)}% below assigned strike`}
               />
+              {wheelCheckTime(settings.execution_time) && (
+                <div className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
+                  ⏱ Checked once a week at <span className="font-medium text-gray-600 dark:text-gray-400">{wheelCheckTime(settings.execution_time)}</span> — 5 min
+                  before your {fmtExecTime(settings.execution_time)} execution time, so proceeds from any
+                  sale are available to that morning's CSP budget. This is not an intraday
+                  stop: a breach mid-week is only acted on at the next weekly run.
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -889,6 +913,14 @@ export default function SettingsPage() {
           <div className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
             Earlier = less liquidity and wider spreads.
             10:00 AM PST (1:00 PM ET) recommended for best fill prices.
+            {wheelCheckTime(settings.execution_time) && (
+              <span className="block mt-1">
+                ⏱ This time moves the whole workflow. The wheel check — stop-loss sells and
+                covered calls — runs 5 min earlier at{' '}
+                <span className="font-medium text-gray-600 dark:text-gray-400">{wheelCheckTime(settings.execution_time)}</span>,
+                so sale proceeds are in that morning's CSP budget.
+              </span>
+            )}
             {/^\d{2}:\d{2}$/.test(settings.execution_time || '') && settings.execution_time < MIN_EXEC_TIME && (
               <span className="block mt-1 text-amber-600 dark:text-amber-500">
                 ⚠ Earliest allowed is 7:00 AM PST. The wheel check runs 5 min before execution and must price covered calls after the open — anything earlier has no option data. The scheduler will use 7:00 AM if you save an earlier time.
