@@ -5,6 +5,7 @@
 - **Setup can no longer regenerate the app icon from `assets/yrvi_logo.png`.** That block rebuilt `assets/YRVI.icns` whenever the logo was newer — and `yrvi_logo.png` is the corrupted screenshot with the transparency checkerboard baked in that v5.2.63 fixed. It was one `touch` away from silently undoing that fix and committing a bad icon back into the repo. The committed `.icns` is now the only source.
 
 ### Note
+- The manual step is delivered automatically: `UPGRADE_NOTES["5.2.83"]` in `api.py` fires once through `_send_discord_alert` for any box upgrading across this version, so it lands in the dashboard bell **and** Discord. A box that never upgrades still needs telling by hand.
 - **This fixes new installs only.** An upgrade cannot repair an already-installed bundle — it runs inside the api container, which has no `/Applications` and no AppKit. Any box set up with `setup_ibc.sh` since v5.2.29 needs `bash scripts/install-startup-app.sh` run once by hand, then the Dock item dragged out and back (the Dock will not reload a tile in place).
 
 ## [5.2.82] — 2026-07-20

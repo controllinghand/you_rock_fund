@@ -3289,11 +3289,31 @@ _GITHUB_VERSION_URL = (
 # version emits the note once. This exists because a CHANGELOG doesn't reach
 # anyone — the friend boxes are standalone and Discord is the only channel.
 # Keep entries rare: every one of these interrupts someone.
-# Intentionally empty. 5.2.63's launcher-icon note lived here until v5.2.67
-# taught yrvi-launch.sh to install the icon itself on the next launch — an alert
-# telling operators to run a script that already ran is worse than silence. Add
-# an entry only for a step that genuinely cannot be automated.
-UPGRADE_NOTES: dict[str, str] = {}
+# 5.2.63's launcher-icon note lived here until v5.2.67 taught yrvi-launch.sh to
+# install the icon itself on the next launch — an alert telling operators to run
+# a script that already ran is worse than silence. Add an entry only for a step
+# that genuinely cannot be automated.
+UPGRADE_NOTES: dict[str, str] = {
+    # 5.2.83 fixed setup_ibc.sh, which since v5.2.29 built the launcher from a
+    # stale template pointing at the deleted yrvi_startup.command. That fixes
+    # FRESH installs only — the broken bundle is in the host's /Applications (or
+    # Desktop), which this container cannot reach, and v5.2.67's self-heal can't
+    # help either: it lives in yrvi-launch.sh, which the broken bundle never
+    # calls. Unautomatable by construction, hence a note.
+    "5.2.83": (
+        "🔧 **One-time fix — YRVI Startup launcher**\n"
+        "If double-clicking **YRVI Startup** opens a Terminal saying "
+        "`No such file or directory`, that's a bug in the original install "
+        "(fixed in v5.2.83 for new installs, but your copy needs one manual step).\n\n"
+        "In Terminal, run:\n"
+        "```\ncd ~/you_rock_fund && bash scripts/install-startup-app.sh\n```\n"
+        "Then delete any **YRVI Startup** on your Desktop, and drag the new one "
+        "from **/Applications** into your Dock — drag the old Dock icon out first, "
+        "the Dock won't refresh it in place.\n\n"
+        "**Trading is unaffected** — the stack auto-starts on login either way. "
+        "This only fixes the manual launcher."
+    ),
+}
 
 
 def _version_tuple(v: str):
