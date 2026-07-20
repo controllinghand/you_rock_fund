@@ -1,9 +1,0 @@
-#!/bin/bash
-PROJ="__PROJ__"
-osascript <<APPLESCRIPT
-tell application "Terminal"
-    activate
-    set w to do script "bash '$PROJ/yrvi_startup.command'"
-    set bounds of front window to {80, 80, 1020, 720}
-end tell
-APPLESCRIPT
