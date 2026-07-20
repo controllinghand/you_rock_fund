@@ -124,6 +124,17 @@ _gateway_recent_lines: list = []   # rolling buffer of relevant log lines
 
 WATCHDOG_INTERVAL = 300   # seconds between checks
 ALERT_THRESHOLD   = 600   # seconds a failure must persist before we alert
+
+# Around the Monday execution window the normal cadence is far too slow: a wedge
+# that starts minutes before the run can't be cleared in time, because the soonest
+# the watchdog can act is INTERVAL + THRESHOLD (10-15 min). That is what cost the
+# 2026-07-20 run — wedge at 09:50, run dead at 09:55:32, heal at 10:10. Inside the
+# window we poll every minute and act after two, so the self-heal completes while
+# the run is still retrying instead of a quarter-hour after it gave up.
+WATCHDOG_INTERVAL_EXEC = 60
+ALERT_THRESHOLD_EXEC   = 120
+EXEC_WINDOW_BEFORE_MIN = 20   # window opens this far before execution_time …
+EXEC_WINDOW_AFTER_MIN  = 60   # … and closes this far after it
 SOFT_RESTART_GRACE = 240  # seconds to let an auto soft restart recover before paging
 FULL_RESTART_GRACE = 360  # seconds to let an auto full restart recover before paging
                           # (longer than soft: a full restart re-runs login, and on
@@ -587,11 +598,38 @@ def _send_discord_alert(message: str) -> None:
         print(f"[api/watchdog] Discord alert failed: {e}")
 
 
+def _in_execution_window(now: datetime) -> bool:
+    """True on the week's trading day around execution_time, when a wedge is costly.
+
+    Scoped to the day the Monday pipeline actually runs (which shifts to Tuesday on a
+    holiday) so the tighter cadence — and its faster restarts — applies for roughly
+    80 minutes a week, not continuously.
+    """
+    try:
+        if not is_first_trading_day_of_week(now.date()):
+            return False
+        exec_h, exec_m = _parse_exec_time(load_settings())
+        exec_dt = now.replace(hour=exec_h, minute=exec_m, second=0, microsecond=0)
+        return (exec_dt - timedelta(minutes=EXEC_WINDOW_BEFORE_MIN)
+                <= now <=
+                exec_dt + timedelta(minutes=EXEC_WINDOW_AFTER_MIN))
+    except Exception:
+        return False
+
+
+def _watchdog_cadence(now: datetime) -> tuple:
+    """(poll_interval, alert_threshold) in seconds for this moment."""
+    if _in_execution_window(now):
+        return WATCHDOG_INTERVAL_EXEC, ALERT_THRESHOLD_EXEC
+    return WATCHDOG_INTERVAL, ALERT_THRESHOLD
+
+
 def _watchdog_check() -> None:
     """Check gateway and scheduler health; send Discord alerts on persistent failures."""
     now = datetime.now(PST)
     settings = load_settings()
     port = settings.get("ibkr_port", 4004)
+    _, alert_threshold = _watchdog_cadence(now)
 
     # ── IB Gateway port reachability ─────────────────────────────
     gw_up = _gateway_running(port)
@@ -639,7 +677,7 @@ def _watchdog_check() -> None:
         no_restart = (c_exit == 4 or login_st in ("locked", "failed")
                       or _in_auto_restart_window(now))
 
-        if (down_sec >= ALERT_THRESHOLD
+        if (down_sec >= alert_threshold
                 and _watchdog_state["last_gateway_alert"] is None
                 and full_at is None):
             if not no_restart:
@@ -764,7 +802,7 @@ def _watchdog_check() -> None:
             #      accepts it, note the time and wait. If it doesn't (older image
             #      without the command server), page a human immediately.
             #   3. soft restart didn't recover within the grace window → escalate.
-            if down_sec >= ALERT_THRESHOLD and _watchdog_state["last_ibkr_alert"] is None:
+            if down_sec >= alert_threshold and _watchdog_state["last_ibkr_alert"] is None:
                 if _in_auto_restart_window(now):
                     _watchdog_state["last_ibkr_alert"] = now
                     _send_discord_alert(
@@ -905,7 +943,7 @@ def _watchdog_check() -> None:
         if _watchdog_state["scheduler_down_since"] is None:
             _watchdog_state["scheduler_down_since"] = now
         down_sec = (now - _watchdog_state["scheduler_down_since"]).total_seconds()
-        if (down_sec >= ALERT_THRESHOLD
+        if (down_sec >= alert_threshold
                 and _watchdog_state["last_scheduler_alert"] is None):
             _watchdog_state["last_scheduler_alert"] = now
             _send_discord_alert(
@@ -925,14 +963,16 @@ def _watchdog_check() -> None:
 
 
 def _run_watchdog() -> None:
-    """Background daemon thread: poll gateway + scheduler health every 5 minutes."""
+    """Background daemon thread: poll gateway + scheduler health every 5 minutes,
+    every minute inside the Monday execution window."""
     time.sleep(90)  # let containers finish starting before the first check
     while True:
         try:
             _watchdog_check()
         except Exception as e:
             print(f"[api/watchdog] Unhandled error: {e}")
-        time.sleep(WATCHDOG_INTERVAL)
+        interval, _ = _watchdog_cadence(datetime.now(PST))
+        time.sleep(interval)
 
 
 _LOG_RELEVANT_KEYWORDS = (
@@ -1398,6 +1438,55 @@ def restart_gateway():
               if is_live else "Paper logs in automatically (no 2FA). ")
            + "Give it ~1–2 min, then re-run diagnostics to confirm it's back.")
     return {"success": True, "is_live": is_live, "message": msg}
+
+
+@app.post("/api/gateway/unwedge")
+def unwedge_gateway():
+    """Soft-restart the gateway, falling back to a full restart — for the RUN to call.
+
+    Distinct from /api/gateway/restart, which is the operator's one-click button and
+    goes straight to a full restart (an IB Key 2FA push on live). An automated caller
+    must try the soft path FIRST: it reuses the authenticated session, so it clears a
+    wedged API listener with no login and no 2FA. Only if IBC's command server doesn't
+    accept it do we spend a full restart.
+
+    Exists because the scheduler container has no docker.sock — the api does — so the
+    Monday run can't restart the gateway itself. Rather than sit through the watchdog's
+    self-heal latency while the market runs out, the run posts here on the second failed
+    connect and keeps retrying.
+
+    Honors the same cross-episode cooldown as the watchdog so a retrying run and the
+    watchdog can't stack restarts into an IBKR lockout.
+    """
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=400, detail="Only available in containerized mode")
+
+    now = datetime.now(PST)
+    if _soft_restart_ibgateway():
+        _watchdog_state["ibkr_soft_restart_at"] = now
+        print("[api/unwedge] soft restart accepted (session reused — no 2FA)")
+        return {"success": True, "method": "soft",
+                "message": "IBC soft restart accepted — gateway relaunching on the "
+                           "existing session (no login, no 2FA)."}
+
+    if _full_restart_in_cooldown(now):
+        print("[api/unwedge] soft restart refused; full restart suppressed by cooldown")
+        return {"success": False, "method": "none",
+                "message": f"Soft restart not accepted and a full restart fired < "
+                           f"{FULL_RESTART_COOLDOWN // 60} min ago (lockout guard)."}
+
+    if not _full_restart_ibgateway():
+        raise HTTPException(status_code=500,
+                            detail="soft restart not accepted and docker restart ib_gateway failed")
+
+    _watchdog_state["last_full_restart_at"]    = now
+    _watchdog_state["gateway_full_restart_at"] = now
+    is_live = load_settings().get("ibkr_port", 4004) in _LIVE_IBKR_PORTS
+    print(f"[api/unwedge] escalated to full restart (live={is_live})")
+    return {"success": True, "method": "full", "is_live": is_live,
+            "message": "Soft restart not accepted — did a full restart. "
+                       + ("⚠️ LIVE: approve the IB Key 2FA push."
+                          if is_live else "Paper logs in automatically.")}
 
 
 @app.post("/api/restart-scheduler")

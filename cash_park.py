@@ -27,14 +27,13 @@ Design guards (see the buy path):
 """
 import json
 import logging
-import time
 from datetime import datetime
 
 from ib_insync import IB, Stock, Order
 
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_CASH_PARK, ACCOUNT, ACCOUNT_TYPE,
-    MODE_LABEL, get_settings, gateway_unreachable_message, probe_port,
+    MODE_LABEL, get_settings, connect_with_retry,
 )
 from market_calendar import is_last_trading_day_of_week
 from secrets_client import get_secret
@@ -99,20 +98,17 @@ def _discord_alert(message: str) -> None:
 def _connect(client_id: int = None) -> IB:
     client_id = client_id if client_id is not None else IBKR_CLIENT_ID_CASH_PARK
     log.info(f"🔌 Connecting to IB Gateway {IBKR_HOST}:{IBKR_PORT} ({ACCOUNT_TYPE}, clientId={client_id})")
-    for attempt in range(1, 4):
-        try:
-            ib = IB()
-            ib.connect(IBKR_HOST, IBKR_PORT, clientId=client_id)
-            ib.reqMarketDataType(3)   # delayed-frozen ok — ETFs are penny-wide
-            log.info(f"✅ Connected to IBKR (clientId={client_id})")
-            return ib
-        except TimeoutError:
-            port_open = probe_port(IBKR_HOST, IBKR_PORT)
-            log.warning(f"⚠️  IBKR connect attempt {attempt}/3 timed out — "
-                        f"TCP port {'OPEN (handshake hung)' if port_open else 'CLOSED'}")
-            if attempt < 3:
-                time.sleep(10)
-    raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
+
+    def _attempt() -> IB:
+        ib = IB()
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=client_id)
+        ib.reqMarketDataType(3)   # delayed-frozen ok — ETFs are penny-wide
+        log.info(f"✅ Connected to IBKR (clientId={client_id})")
+        return ib
+
+    # Fail fast (legacy 3 attempts): the sweep is opt-in and self-guarded, so a
+    # skipped park is a non-event next to blocking the run that just placed trades.
+    return connect_with_retry(_attempt, IBKR_HOST, IBKR_PORT, log)
 
 
 def _account_summary(ib: IB) -> tuple:

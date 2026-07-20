@@ -94,6 +94,131 @@ def probe_port(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
+# How long the Monday execution path keeps retrying a wedged gateway. Sized to
+# outlast the api watchdog's worst-case self-heal latency (WATCHDOG_INTERVAL 300s
+# + ALERT_THRESHOLD 600s, plus a restart and relogin) with margin.
+_DEFAULT_CONNECT_DEADLINE_SEC = 1800
+
+# Stop retrying at 15:00 ET — an hour before the close. Past that there isn't
+# enough runway to screen, price, and fill a week's orders, so a late recovery
+# would place rushed trades into the closing hour instead of failing cleanly.
+# ET is deliberate: the close is a market fact, not an operator preference.
+_CONNECT_RETRY_CUTOFF_ET = (15, 0)
+
+
+def connect_deadline_sec(base: int = None) -> int:
+    """Retry budget in seconds, clamped so retries never cross the ET cutoff.
+
+    Reads the setting lazily — get_settings() is defined below this point, and
+    the deadline is only ever needed at call time.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    if base is None:
+        base = int(get_settings().get("ibkr_connect_deadline_sec",
+                                      _DEFAULT_CONNECT_DEADLINE_SEC))
+    now     = datetime.now(ZoneInfo("America/New_York"))
+    hh, mm  = _CONNECT_RETRY_CUTOFF_ET
+    cutoff  = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return max(0, min(base, int((cutoff - now).total_seconds())))
+
+
+def request_gateway_unwedge(log=None) -> bool:
+    """Ask the api container to unwedge the gateway (soft restart, full fallback).
+
+    The scheduler has no docker.sock — only the api container does — so an
+    automated unwedge has to go through the api the same way the auto-updater
+    already posts to /api/version/upgrade. Best-effort: a False here just means
+    the run keeps retrying on its own and the watchdog escalates on its cycle.
+    """
+    try:
+        import requests as _req
+        r = _req.post("http://api:8000/api/gateway/unwedge", timeout=120)
+        ok = r.status_code == 200
+        if log:
+            log.info(f"🔧 Requested gateway unwedge → HTTP {r.status_code} {r.text[:200]}")
+        return ok
+    except Exception as e:
+        if log:
+            log.warning(f"⚠️  Could not reach the api to request an unwedge: {e}")
+        return False
+
+
+def connect_with_retry(connect_fn, host: str, port: int, log,
+                       deadline_sec: int = 0, on_wedge=None):
+    """Call connect_fn() until it succeeds, the deadline passes, or the port is closed.
+
+    connect_fn() must return a connected IB or raise TimeoutError. Kept here rather
+    than in each module so all four callers share one retry policy (they had four
+    identical copies of a 3-attempt loop).
+
+    deadline_sec == 0 keeps the legacy behavior: 3 attempts, 10s apart, ~32s total.
+    That is right for the read-only monitors, where failing fast and alerting beats
+    blocking.
+
+    deadline_sec > 0 is for the Monday execution path, and exists because a 32-second
+    give-up could not survive the gateway's own repair. A reconnect wedge leaves the
+    port OPEN but the API handshake dead; the api watchdog clears it, but it needs
+    WATCHDOG_INTERVAL + ALERT_THRESHOLD (10-15 min minimum) to act. On 2026-07-20 the
+    wedge began at 09:50, the 09:55 run gave up at 09:55:32, and the watchdog healed
+    it at 10:10 — the run died 15 minutes before an automatic fix it never waited for,
+    with three hours of market left. So: retry across that window, and prod the api to
+    unwedge rather than waiting the full watchdog latency.
+
+    A CLOSED port is not the same failure — nothing is listening, so it is the
+    container being down or still booting, and the watchdog's own restart path owns
+    that. Fail fast instead of burning the deadline on it.
+    """
+    import time as _time
+
+    started  = _time.monotonic()
+    attempt  = 0
+    unwedged = False
+
+    while True:
+        attempt += 1
+        try:
+            return connect_fn()
+        except TimeoutError:
+            port_open = probe_port(host, port)
+            elapsed   = int(_time.monotonic() - started)
+            remaining = deadline_sec - elapsed
+
+            if not port_open:
+                log.warning(
+                    f"⚠️  IBKR connect attempt {attempt} timed out ({host}:{port}) — "
+                    f"TCP port CLOSED (gateway not listening); not waiting it out"
+                )
+                break
+
+            log.warning(
+                f"⚠️  IBKR connect attempt {attempt} timed out ({host}:{port}) — "
+                f"TCP port OPEN (API handshake hung)"
+                + (f"; retrying up to {remaining // 60} more min" if remaining > 0 else "")
+            )
+
+            if deadline_sec <= 0:
+                if attempt >= 3:
+                    break
+                _time.sleep(10)
+                continue
+
+            # Port open + handshake dead IS the wedge signature. Ask for the
+            # unwedge once, on the second failure — one retry first so a merely
+            # slow gateway isn't restarted out from under itself.
+            if attempt >= 2 and not unwedged:
+                unwedged = True
+                request_gateway_unwedge(log)
+
+            if remaining <= 0:
+                log.error(f"❌ Gave up connecting to IBKR after {elapsed // 60} min")
+                break
+            _time.sleep(10 if attempt < 3 else 30)
+
+    raise TimeoutError(gateway_unreachable_message(host, port))
+
+
 def gateway_unreachable_message(host: str, port: int) -> str:
     """Build a precise 'where + why' message for a failed IBKR connect, so the
     Discord alert points at the actual failure instead of a generic timeout."""

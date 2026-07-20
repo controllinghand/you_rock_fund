@@ -17,11 +17,10 @@ run_wheel_check() — Monday, 5 min before the configured execution time (runs b
 """
 import json
 import logging
-import time
 from datetime import datetime, timedelta
 from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder
 
-from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_WHEEL, ACCOUNT, get_settings, ACCOUNT_TYPE, gateway_unreachable_message, probe_port
+from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_WHEEL, ACCOUNT, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from screener import get_all_candidates
 from market_calendar import is_market_holiday
 import discord_poster
@@ -183,22 +182,18 @@ def _ensure_tranches(h: dict) -> dict:
 def _connect(client_id: int = None) -> IB:
     client_id = client_id if client_id is not None else IBKR_CLIENT_ID_WHEEL
     log.info(f"🔌 Connecting to IB Gateway {IBKR_HOST}:{IBKR_PORT} ({ACCOUNT_TYPE}, clientId={client_id})")
-    for attempt in range(1, 4):
-        try:
-            ib = IB()
-            ib.connect(IBKR_HOST, IBKR_PORT, clientId=client_id)
-            ib.reqMarketDataType(3)
-            log.info(f"✅ Connected to IBKR (clientId={client_id})")
-            return ib
-        except TimeoutError:
-            port_open = probe_port(IBKR_HOST, IBKR_PORT)
-            log.warning(
-                f"⚠️  IBKR connect attempt {attempt}/3 timed out ({ACCOUNT_TYPE}, {IBKR_HOST}:{IBKR_PORT}) — "
-                f"TCP port {'OPEN (API handshake hung)' if port_open else 'CLOSED (gateway not listening)'}"
-            )
-            if attempt < 3:
-                time.sleep(10)
-    raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
+
+    def _attempt() -> IB:
+        ib = IB()
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=client_id)
+        ib.reqMarketDataType(3)
+        log.info(f"✅ Connected to IBKR (clientId={client_id})")
+        return ib
+
+    # Step A of the Monday run — if this can't connect, no CCs are written and no
+    # stop losses are evaluated, so it waits out a wedge rather than aborting the week.
+    return connect_with_retry(_attempt, IBKR_HOST, IBKR_PORT, log,
+                              deadline_sec=connect_deadline_sec())
 
 
 def _is_nan(val) -> bool:

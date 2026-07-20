@@ -22,6 +22,7 @@
   "min_oi_floor": 10,
   "dry_run": false,
   "ibkr_port": 4002,
+  "ibkr_connect_deadline_sec": 1800,
   "discord_webhook_enabled": true,
   "trading_mode": "paper",
   "execution_time": "10:00",
