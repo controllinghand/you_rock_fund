@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder
 
-from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, gateway_unreachable_message, probe_port
+from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 
 logging.basicConfig(
     level=logging.INFO,
@@ -121,23 +121,19 @@ def _merge_week_executions(existing: dict, new_results: list, new_positions: lis
 
 def connect() -> IB:
     log.info(f"🔌 Connecting to IB Gateway {IBKR_HOST}:{IBKR_PORT} ({ACCOUNT_TYPE}, clientId={IBKR_CLIENT_ID})")
-    for attempt in range(1, 4):
-        try:
-            ib = IB()
-            ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID)
-            ib.reqMarketDataType(3)  # 1=live, 2=frozen, 3=delayed, 4=delayed-frozen
-            log.info(f"✅ Connected to IBKR — Account: {ib.managedAccounts()}")
-            _wait_for_usopt(ib)
-            return ib
-        except TimeoutError:
-            port_open = probe_port(IBKR_HOST, IBKR_PORT)
-            log.warning(
-                f"⚠️  IBKR connect attempt {attempt}/3 timed out ({ACCOUNT_TYPE}, {IBKR_HOST}:{IBKR_PORT}) — "
-                f"TCP port {'OPEN (API handshake hung)' if port_open else 'CLOSED (gateway not listening)'}"
-            )
-            if attempt < 3:
-                time.sleep(10)
-    raise TimeoutError(gateway_unreachable_message(IBKR_HOST, IBKR_PORT))
+
+    def _attempt() -> IB:
+        ib = IB()
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID)
+        ib.reqMarketDataType(3)  # 1=live, 2=frozen, 3=delayed, 4=delayed-frozen
+        log.info(f"✅ Connected to IBKR — Account: {ib.managedAccounts()}")
+        _wait_for_usopt(ib)
+        return ib
+
+    # Step B of the Monday run — same reasoning as the wheel check: the week's CSPs
+    # are worth waiting out a wedge for, as long as the market is still open.
+    return connect_with_retry(_attempt, IBKR_HOST, IBKR_PORT, log,
+                              deadline_sec=connect_deadline_sec())
 
 
 def _wait_for_usopt(ib: IB, timeout: int = 30) -> None:

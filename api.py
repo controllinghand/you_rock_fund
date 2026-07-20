@@ -124,6 +124,17 @@ _gateway_recent_lines: list = []   # rolling buffer of relevant log lines
 
 WATCHDOG_INTERVAL = 300   # seconds between checks
 ALERT_THRESHOLD   = 600   # seconds a failure must persist before we alert
+
+# Around the Monday execution window the normal cadence is far too slow: a wedge
+# that starts minutes before the run can't be cleared in time, because the soonest
+# the watchdog can act is INTERVAL + THRESHOLD (10-15 min). That is what cost the
+# 2026-07-20 run — wedge at 09:50, run dead at 09:55:32, heal at 10:10. Inside the
+# window we poll every minute and act after two, so the self-heal completes while
+# the run is still retrying instead of a quarter-hour after it gave up.
+WATCHDOG_INTERVAL_EXEC = 60
+ALERT_THRESHOLD_EXEC   = 120
+EXEC_WINDOW_BEFORE_MIN = 20   # window opens this far before execution_time …
+EXEC_WINDOW_AFTER_MIN  = 60   # … and closes this far after it
 SOFT_RESTART_GRACE = 240  # seconds to let an auto soft restart recover before paging
 FULL_RESTART_GRACE = 360  # seconds to let an auto full restart recover before paging
                           # (longer than soft: a full restart re-runs login, and on
@@ -417,26 +428,89 @@ def _get_gateway_tws_version():
     return None
 
 
-def _soft_restart_ibgateway() -> bool:
-    """Ask IBC for an on-demand soft restart via its command server.
+# A command IBC does not implement. Its command server answers unknown input with
+# "ERROR Command invalid", which is the point: it proves the server is listening AND
+# servicing requests without asking it to do anything.
+_IBC_PROBE_COMMAND = "YRVIPROBE"
 
-    Returns True if the command server accepted the RESTART. IBC answers with one
-    or more lines, each prefixed "OK" on success — observed verbatim:
+
+def _ibc_command_server_state(timeout_sec: int = 2) -> str:
+    """Is IBC's command server answering? → "alive" | "hung" | "absent" | "unknown".
+
+    This distinction decides whether a soft restart is even possible, because IBC's
+    command server runs INSIDE THE GATEWAY'S JVM — the same JVM as the API listener.
+    When that process wedges it keeps its sockets bound but stops servicing them, so
+    the command server goes silent right along with the API. A soft restart then
+    cannot work by construction: the thing asked to perform it is inside the frozen
+    process. Only a container restart clears that.
+
+    Verified on a healthy dev gateway 2026-07-20: the probe returns "ERROR Command
+    invalid" in milliseconds. During that morning's wedge on the paper box the same
+    call returned empty — connected, never answered — while socat's connect to the
+    API port timed out rather than being refused. Both are the signature of a live
+    process that has stopped calling accept().
+
+    Cheap enough (a couple of seconds, worst case) to run before every soft attempt.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "ib_gateway", "sh", "-c",
+             f"printf '{_IBC_PROBE_COMMAND}\\n' | socat -T{timeout_sec} - "
+             f"TCP:127.0.0.1:{IBC_COMMAND_PORT},connect-timeout={timeout_sec}"],
+            capture_output=True, text=True, timeout=timeout_sec + 10,
+        )
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+    except Exception as e:
+        print(f"[api/ibc-probe] probe failed: {e}")
+        return "unknown"
+
+    low = out.lower()
+    if not out:
+        # Connected, then silence until socat's own timeout — the wedge signature.
+        state = "hung"
+    elif "refused" in low or "no route" in low:
+        # Nothing bound: an older image, or the command server was never enabled.
+        state = "absent"
+    elif "timed out" in low or "timeout" in low:
+        # connect() itself never completed — backlog full because nothing accepts.
+        state = "hung"
+    else:
+        state = "alive"
+    print(f"[api/ibc-probe] command server → {state} ({out[:120]!r})")
+    return state
+
+
+def _soft_restart_ibgateway() -> tuple:
+    """Ask IBC for an on-demand soft restart. Returns (accepted, reason).
+
+    `reason` is one of "accepted" | "hung" | "absent" | "unknown" | "rejected", so
+    callers can say WHY they are escalating instead of collapsing every failure into
+    a bare False. That mattered on 2026-07-20: the soft restart returned an empty
+    reply and the log recorded only `accepted=False`, which read as a broken soft
+    path when the real cause was a hung JVM that no soft restart could ever fix.
+
+    Probes first and does not even attempt the RESTART unless the command server is
+    answering — when the JVM is hung, sending it is a guaranteed ~20s of nothing
+    before the caller escalates anyway.
+
+    IBC answers an accepted RESTART with one or more lines each prefixed "OK":
 
         OK RESTART in progress
         OK RESTART at 09:24 PM
 
-    Match on that prefix rather than any particular wording. This check previously
-    looked for the literal "Restarting", which IBC never sends (it says "RESTART",
-    uppercase), so every accepted soft restart was misread as a failure and the
-    caller escalated to a full restart that wiped the session and forced a fresh
-    login — on live, an IB Key 2FA push. That is exactly what the soft path exists
-    to avoid, and it is what turned a routine wedge into a 26-hour outage on
-    2026-07-17. It had never once succeeded in production (3/3 escalations).
-
-    Returns False if the command server is genuinely unreachable (e.g. an older
-    gateway image without it enabled), so the caller can fall back to escalating.
+    Match on that prefix, not the wording. This once looked for the literal
+    "Restarting", which IBC never sends (it says "RESTART", uppercase), so every
+    accepted soft restart was misread as a failure and the caller escalated to a full
+    restart that wiped the session and forced a fresh login — on live, an IB Key 2FA
+    push. That turned a routine wedge into a 26-hour outage on 2026-07-17.
     """
+    state = _ibc_command_server_state()
+    if state != "alive":
+        print(f"[api/watchdog] skipping soft restart — command server {state}"
+              + (" (JVM wedged; only a full restart can clear it)"
+                 if state == "hung" else ""))
+        return False, state
+
     try:
         result = subprocess.run(
             ["docker", "exec", "ib_gateway", "sh", "-c",
@@ -448,10 +522,10 @@ def _soft_restart_ibgateway() -> bool:
         accepted = any(l.strip().upper().startswith("OK")
                        for l in out.splitlines() if l.strip())
         print(f"[api/watchdog] IBC soft restart → {out!r} (accepted={accepted})")
-        return accepted
+        return accepted, ("accepted" if accepted else "rejected")
     except Exception as e:
         print(f"[api/watchdog] IBC soft restart failed: {e}")
-        return False
+        return False, "unknown"
 
 
 def _full_restart_ibgateway() -> bool:
@@ -587,11 +661,38 @@ def _send_discord_alert(message: str) -> None:
         print(f"[api/watchdog] Discord alert failed: {e}")
 
 
+def _in_execution_window(now: datetime) -> bool:
+    """True on the week's trading day around execution_time, when a wedge is costly.
+
+    Scoped to the day the Monday pipeline actually runs (which shifts to Tuesday on a
+    holiday) so the tighter cadence — and its faster restarts — applies for roughly
+    80 minutes a week, not continuously.
+    """
+    try:
+        if not is_first_trading_day_of_week(now.date()):
+            return False
+        exec_h, exec_m = _parse_exec_time(load_settings())
+        exec_dt = now.replace(hour=exec_h, minute=exec_m, second=0, microsecond=0)
+        return (exec_dt - timedelta(minutes=EXEC_WINDOW_BEFORE_MIN)
+                <= now <=
+                exec_dt + timedelta(minutes=EXEC_WINDOW_AFTER_MIN))
+    except Exception:
+        return False
+
+
+def _watchdog_cadence(now: datetime) -> tuple:
+    """(poll_interval, alert_threshold) in seconds for this moment."""
+    if _in_execution_window(now):
+        return WATCHDOG_INTERVAL_EXEC, ALERT_THRESHOLD_EXEC
+    return WATCHDOG_INTERVAL, ALERT_THRESHOLD
+
+
 def _watchdog_check() -> None:
     """Check gateway and scheduler health; send Discord alerts on persistent failures."""
     now = datetime.now(PST)
     settings = load_settings()
     port = settings.get("ibkr_port", 4004)
+    _, alert_threshold = _watchdog_cadence(now)
 
     # ── IB Gateway port reachability ─────────────────────────────
     gw_up = _gateway_running(port)
@@ -639,7 +740,7 @@ def _watchdog_check() -> None:
         no_restart = (c_exit == 4 or login_st in ("locked", "failed")
                       or _in_auto_restart_window(now))
 
-        if (down_sec >= ALERT_THRESHOLD
+        if (down_sec >= alert_threshold
                 and _watchdog_state["last_gateway_alert"] is None
                 and full_at is None):
             if not no_restart:
@@ -764,7 +865,7 @@ def _watchdog_check() -> None:
             #      accepts it, note the time and wait. If it doesn't (older image
             #      without the command server), page a human immediately.
             #   3. soft restart didn't recover within the grace window → escalate.
-            if down_sec >= ALERT_THRESHOLD and _watchdog_state["last_ibkr_alert"] is None:
+            if down_sec >= alert_threshold and _watchdog_state["last_ibkr_alert"] is None:
                 if _in_auto_restart_window(now):
                     _watchdog_state["last_ibkr_alert"] = now
                     _send_discord_alert(
@@ -777,7 +878,8 @@ def _watchdog_check() -> None:
                         f"`{_compose_hint('restart', 'ib_gateway')}`"
                     )
                 elif soft_at is None:
-                    if _soft_restart_ibgateway():
+                    soft_ok, soft_why = _soft_restart_ibgateway()
+                    if soft_ok:
                         _watchdog_state["ibkr_soft_restart_at"] = now
                         _send_discord_alert(
                             f"🔄 **YRVI** IBKR API unreachable for {int(down_sec / 60)} min "
@@ -786,18 +888,27 @@ def _watchdog_check() -> None:
                             f"or escalating in ~{SOFT_RESTART_GRACE // 60} min…"
                         )
                     else:
-                        # The IBC command server is unreachable, so we can't soft-restart.
-                        # Don't page-and-give-up: escalate straight to a full `docker restart`
-                        # (the api container does this via docker.sock), gated by the
-                        # cross-episode cooldown lockout guard. This is exactly the wedge
-                        # the soft path was meant to clear; the full restart re-runs login.
+                        # No soft path available — escalate straight to a full
+                        # `docker restart` (the api container does this via docker.sock),
+                        # gated by the cross-episode cooldown lockout guard.
+                        #
+                        # soft_why == "hung" means IBC's command server stopped answering
+                        # too. It lives in the gateway's JVM, so that is the whole process
+                        # wedged, and NO soft restart could have worked — a full restart is
+                        # the only thing that clears it, 2FA cost included on live.
                         is_live = port in _LIVE_IBKR_PORTS
+                        why_str = {
+                            "hung":   "IBC's command server stopped answering too — the "
+                                      "gateway JVM is wedged, so only a full restart can clear it",
+                            "absent": "IBC's command server is not enabled on this gateway image",
+                            "rejected": "IBC's command server refused the RESTART "
+                                        "(no OK reply; raw reply is in the api logs)",
+                        }.get(soft_why, "the soft restart could not be sent")
                         if _full_restart_in_cooldown(now):
                             _watchdog_state["last_ibkr_alert"] = now
                             _send_discord_alert(
                                 f"🚨 **YRVI** IB Gateway API failing {int(down_sec / 60)} min in — "
-                                f"soft restart not accepted (no OK reply from IBC's command "
-                                f"server; raw reply is in the api logs) and a "
+                                f"{why_str}, and a "
                                 f"full-restart escalation is suppressed (one fired < "
                                 f"{FULL_RESTART_COOLDOWN // 60} min ago — lockout guard).\n"
                                 f"{_MANUAL_RESTART_HINT}"
@@ -905,7 +1016,7 @@ def _watchdog_check() -> None:
         if _watchdog_state["scheduler_down_since"] is None:
             _watchdog_state["scheduler_down_since"] = now
         down_sec = (now - _watchdog_state["scheduler_down_since"]).total_seconds()
-        if (down_sec >= ALERT_THRESHOLD
+        if (down_sec >= alert_threshold
                 and _watchdog_state["last_scheduler_alert"] is None):
             _watchdog_state["last_scheduler_alert"] = now
             _send_discord_alert(
@@ -925,14 +1036,16 @@ def _watchdog_check() -> None:
 
 
 def _run_watchdog() -> None:
-    """Background daemon thread: poll gateway + scheduler health every 5 minutes."""
+    """Background daemon thread: poll gateway + scheduler health every 5 minutes,
+    every minute inside the Monday execution window."""
     time.sleep(90)  # let containers finish starting before the first check
     while True:
         try:
             _watchdog_check()
         except Exception as e:
             print(f"[api/watchdog] Unhandled error: {e}")
-        time.sleep(WATCHDOG_INTERVAL)
+        interval, _ = _watchdog_cadence(datetime.now(PST))
+        time.sleep(interval)
 
 
 _LOG_RELEVANT_KEYWORDS = (
@@ -1398,6 +1511,66 @@ def restart_gateway():
               if is_live else "Paper logs in automatically (no 2FA). ")
            + "Give it ~1–2 min, then re-run diagnostics to confirm it's back.")
     return {"success": True, "is_live": is_live, "message": msg}
+
+
+@app.post("/api/gateway/unwedge")
+def unwedge_gateway():
+    """Soft-restart the gateway, falling back to a full restart — for the RUN to call.
+
+    Distinct from /api/gateway/restart, which is the operator's one-click button and
+    goes straight to a full restart (an IB Key 2FA push on live). An automated caller
+    must try the soft path FIRST: it reuses the authenticated session, so it clears a
+    wedged API listener with no login and no 2FA. Only if IBC's command server doesn't
+    accept it do we spend a full restart.
+
+    Exists because the scheduler container has no docker.sock — the api does — so the
+    Monday run can't restart the gateway itself. Rather than sit through the watchdog's
+    self-heal latency while the market runs out, the run posts here on the second failed
+    connect and keeps retrying.
+
+    Honors the same cross-episode cooldown as the watchdog so a retrying run and the
+    watchdog can't stack restarts into an IBKR lockout.
+    """
+    if not CONTAINERIZED:
+        raise HTTPException(status_code=400, detail="Only available in containerized mode")
+
+    now = datetime.now(PST)
+    soft_ok, soft_why = _soft_restart_ibgateway()
+    if soft_ok:
+        _watchdog_state["ibkr_soft_restart_at"] = now
+        print("[api/unwedge] soft restart accepted (session reused — no 2FA)")
+        return {"success": True, "method": "soft", "soft_result": soft_why,
+                "message": "IBC soft restart accepted — gateway relaunching on the "
+                           "existing session (no login, no 2FA)."}
+
+    # soft_why == "hung" is the informative one: IBC's command server went silent
+    # along with the API listener, so the JVM itself is wedged and no soft restart
+    # was ever going to work. Say so, rather than reporting a mysterious refusal.
+    why_str = {
+        "hung":     "the gateway JVM is wedged (IBC's command server stopped answering too), "
+                    "so a soft restart was impossible",
+        "absent":   "IBC's command server is not enabled on this gateway image",
+        "rejected": "IBC's command server refused the RESTART",
+    }.get(soft_why, "the soft restart could not be sent")
+
+    if _full_restart_in_cooldown(now):
+        print(f"[api/unwedge] no soft path ({soft_why}); full restart suppressed by cooldown")
+        return {"success": False, "method": "none", "soft_result": soft_why,
+                "message": f"No soft path — {why_str} — and a full restart fired < "
+                           f"{FULL_RESTART_COOLDOWN // 60} min ago (lockout guard)."}
+
+    if not _full_restart_ibgateway():
+        raise HTTPException(status_code=500,
+                            detail=f"no soft path ({soft_why}) and docker restart ib_gateway failed")
+
+    _watchdog_state["last_full_restart_at"]    = now
+    _watchdog_state["gateway_full_restart_at"] = now
+    is_live = load_settings().get("ibkr_port", 4004) in _LIVE_IBKR_PORTS
+    print(f"[api/unwedge] escalated to full restart ({soft_why}, live={is_live})")
+    return {"success": True, "method": "full", "soft_result": soft_why, "is_live": is_live,
+            "message": f"Full restart done — {why_str}. "
+                       + ("⚠️ LIVE: approve the IB Key 2FA push."
+                          if is_live else "Paper logs in automatically.")}
 
 
 @app.post("/api/restart-scheduler")
