@@ -15,7 +15,7 @@
 #    5. Configures ~/IBC/StartGateway.sh with correct paths
 #    6. Installs and loads the launchd plist so IB Gateway
 #       starts automatically on every login / reboot
-#    7. Builds YRVI Startup.app with logo icon and places it on the Desktop
+#    7. Installs YRVI Startup.app into /Applications (scripts/install-startup-app.sh)
 # ─────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -452,69 +452,29 @@ else
     warn "Skipping dashboard plist — npm not found or dist/ missing"
 fi
 
-# ── Step 6: Desktop app bundle ────────────────────────────────
+# ── Step 6: YRVI Startup app bundle ───────────────────────────
 echo ""
 echo "${BOLD}Step 6 / 7   Create YRVI Startup app${NC}"
 echo "──────────────────────────────────────────────────────"
 
-DESKTOP_APP="$HOME/Desktop/YRVI Startup.app"
-LOGO="$PROJ/assets/yrvi_logo.png"
-ICNS_SRC="$PROJ/assets/YRVI.icns"
-
-# Remove old .command symlink if present
-rm -f "$HOME/Desktop/YRVI Startup.command"
-
-# Build bundle skeleton
-rm -rf "$DESKTOP_APP"
-mkdir -p "$DESKTOP_APP/Contents/MacOS"
-mkdir -p "$DESKTOP_APP/Contents/Resources"
-
-# Copy bundle files from repo template
-cp "$PROJ/assets/app_template/Contents/Info.plist"        "$DESKTOP_APP/Contents/Info.plist"
-cp "$PROJ/assets/app_template/Contents/PkgInfo"           "$DESKTOP_APP/Contents/PkgInfo"
-sed -e "s|__PROJ__|$PROJ|g" \
-    "$PROJ/assets/app_template/Contents/MacOS/yrvi_startup" \
-    > "$DESKTOP_APP/Contents/MacOS/yrvi_startup"
-chmod +x "$DESKTOP_APP/Contents/MacOS/yrvi_startup"
-
-# Generate .icns from logo source (regenerate if logo is newer than cached icns)
-if [ -f "$LOGO" ] && { [ ! -f "$ICNS_SRC" ] || [ "$LOGO" -nt "$ICNS_SRC" ]; }; then
-    info "Generating app icon from logo..."
-    ICONSET="/tmp/YRVI_build.iconset"
-    rm -rf "$ICONSET" && mkdir "$ICONSET"
-    for size in 16 32 64 128 256 512; do
-        sips -z $size $size "$LOGO" --out "$ICONSET/icon_${size}x${size}.png" \
-            --setProperty format png 2>/dev/null
-        sips -z $((size*2)) $((size*2)) "$LOGO" \
-            --out "$ICONSET/icon_${size}x${size}@2x.png" \
-            --setProperty format png 2>/dev/null
-    done
-    sips -z 1024 1024 "$LOGO" --out "$ICONSET/icon_512x512@2x.png" \
-        --setProperty format png 2>/dev/null
-    iconutil -c icns "$ICONSET" -o "$ICNS_SRC"
-    rm -rf "$ICONSET"
-fi
-
-if [ -f "$ICNS_SRC" ]; then
-    cp "$ICNS_SRC" "$DESKTOP_APP/Contents/Resources/YRVI.icns"
+# Delegate to the ONE launcher installer (also used by setup_docker.sh and, on
+# every login, by scripts/yrvi-launch.sh). This script used to build the bundle
+# itself from assets/app_template/, whose executable opened a Terminal and ran
+# "$PROJ/yrvi_startup.command" — a file DELETED in v5.2.29 when the launcher went
+# headless. The template was never updated, so every fresh install since then
+# produced a launcher that failed on its first click ("No such file or directory")
+# and could never self-heal: the repair lives in yrvi-launch.sh, which the broken
+# bundle never called. Two install paths that disagreed; now there is one.
+if YRVI_PROJ="$PROJ" bash "$PROJ/scripts/install-startup-app.sh" >/dev/null 2>&1; then
+    ok "YRVI Startup.app installed in /Applications — double-click to bring the stack up"
 else
-    warn "Logo not found — app will use default icon (add assets/yrvi_logo.png to fix)"
+    warn "YRVI Startup app install failed (non-fatal) — run: bash scripts/install-startup-app.sh"
 fi
 
-# Clear quarantine so macOS doesn't block an unsigned local app
-xattr -dr com.apple.quarantine "$DESKTOP_APP" 2>/dev/null || true
-
-# Flush Dock icon cache so the logo appears immediately (not a generic app icon)
-sudo find /private/var/folders -name "com.apple.dock.iconcache" \
-    -exec rm -f {} \; 2>/dev/null || true
-sudo find /private/var/folders -name "fsCachedData" \
-    -exec rm -rf {} \; 2>/dev/null || true
-killall Dock 2>/dev/null || true
-sleep 1
-osascript -e "tell application \"Finder\" to update item \
-    (POSIX file \"$DESKTOP_APP\" as alias)" 2>/dev/null || true
-
-ok "YRVI Startup.app created on Desktop — double-click to run pre-flight check"
+# Clean up artifacts from the legacy Desktop install so nobody double-clicks the
+# dead one. The installer's app lives in /Applications; these are the old paths.
+rm -rf "$HOME/Desktop/YRVI Startup.app"
+rm -f  "$HOME/Desktop/YRVI Startup.command"
 
 # ── Summary ───────────────────────────────────────────────────
 echo ""
@@ -536,7 +496,7 @@ echo "    tail -f $PROJ/api_stderr.log"
 echo "    tail -f $PROJ/yrvi-app/preview_stderr.log"
 echo ""
 echo "  Test / restart everything:"
-echo "    Double-click  YRVI Startup  on your Desktop"
+echo "    Double-click  YRVI Startup  in /Applications"
 echo "    — or —  bash startup.sh"
 echo ""
 echo "  Manual service restart:"
