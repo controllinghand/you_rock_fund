@@ -70,7 +70,7 @@ function Shell() {
             lg:translate-x-0 restores the exact static w-52 column as before. */}
         <nav className={`fixed inset-y-0 left-0 z-40 w-52 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0 transition-transform duration-200 lg:static lg:translate-x-0 lg:transition-none ${navOpen ? 'translate-x-0' : '-translate-x-full'}`}>
           <NavLink to="/" onClick={guard('/')} className="px-5 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center">
-            <img src="/yrvi_logo.png" alt="YRVI" className="w-[60px]" />
+            <img src="/icon.png" alt="YRVI" className="w-[60px]" />
           </NavLink>
 
           <div className="flex-1 p-2 space-y-0.5 overflow-y-auto">
