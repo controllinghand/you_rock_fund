@@ -557,7 +557,7 @@ export default function SettingsPage() {
     wheel_retention_market_cap_min: 5000000000,
     wheel_sell_when_cc_below_assigned: false, wheel_cover_all_shares: true,
     wheel_allow_add_to_position: false,
-    wheel_stop_loss_enabled: false, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
+    wheel_stop_loss_enabled: true, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
     min_oi_notional: 1000000, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
@@ -810,7 +810,7 @@ export default function SettingsPage() {
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle
             label="Stop Loss on Wheel Holdings"
-            sub="Sell a holding on Monday if price has fallen below assigned strike by this %"
+            sub="Default ON: sell a holding on Monday if price has fallen below assigned strike by this %. Turn OFF to only exit a wheel on assignment/call-away or a screener drop."
             checked={!!settings.wheel_stop_loss_enabled}
             onChange={v => set('wheel_stop_loss_enabled', v)}
           />
