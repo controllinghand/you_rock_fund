@@ -1439,8 +1439,63 @@ def _run_gateway_log_monitor() -> None:
             time.sleep(15)  # brief pause before reconnecting after a non-terminal exit
 
 
+# One-time migration marker: presence means the v5.2.89 stop-loss-default migration
+# has already run on this box, so it never runs (or re-notifies) again — a user who
+# later turns the stop loss back off stays off.
+STOP_LOSS_MIGRATION_MARKER = (
+    Path("/data/migration_stop_loss_default_applied") if CONTAINERIZED
+    else BASE_DIR / "migration_stop_loss_default_applied"
+)
+
+
+def _apply_stop_loss_default_migration() -> None:
+    """One-time: enable Stop Loss on Wheel Holdings for existing boxes (v5.2.89).
+
+    v5.2.89 made `wheel_stop_loss_enabled` default ON. Fresh installs get that from
+    settings_default.json, but every already-installed box materialized the FULL
+    default file into settings.json at install time (entrypoint `initialize_settings`),
+    so it carries an explicit `false` the new default can't override. This flips that
+    explicit `false` to `true` ONCE and tells the operator, so a box already running
+    adopts the team's new default without a manual toggle.
+
+    Only an explicit `false` is touched — a box that already has it on, or has the key
+    absent (which the new default covers), is left alone and not notified. Runs exactly
+    once (marker file); after that a user turning it back off is never overridden.
+    """
+    if STOP_LOSS_MIGRATION_MARKER.exists():
+        return
+    try:
+        if not SETTINGS_FILE.exists():
+            STOP_LOSS_MIGRATION_MARKER.touch()   # nothing to migrate (default seeds it ON)
+            return
+        raw = json.loads(SETTINGS_FILE.read_text())
+        if raw.get("wheel_stop_loss_enabled") is False:
+            raw["wheel_stop_loss_enabled"] = True
+            save_settings(raw)
+            pct = int(float(raw.get("stop_loss_pct", 0.10)) * 100)
+            _send_discord_alert(
+                f"🛡️ **YRVI** Stop Loss on Wheel Holdings is now **ON by default** — a "
+                f"holding is sold at the weekly Monday check if it falls more than {pct}% "
+                f"below its assigned strike. The You Rock team adopted this as the more "
+                f"conservative default, so it was enabled on your box.\n"
+                f"Prefer the old behavior (exit only on call-away or a screener drop)? "
+                f"Turn it off under **Settings → Stop Loss on Wheel Holdings**."
+            )
+            print("[api/migration] stop-loss default: enabled (was explicitly off)")
+        else:
+            print("[api/migration] stop-loss default: no change needed")
+        STOP_LOSS_MIGRATION_MARKER.touch()
+    except Exception as e:
+        # Don't write the marker — retry on the next start rather than silently skip.
+        print(f"[api/migration] stop-loss default migration failed (retries next start): {e}")
+
+
 @app.on_event("startup")
 async def _startup() -> None:
+    # One-time settings migration (marker-gated); off the event loop so a first-boot
+    # Discord post never delays readiness.
+    threading.Thread(target=_apply_stop_loss_default_migration, daemon=True,
+                     name="yrvi-migration-stoploss").start()
     t = threading.Thread(target=_run_watchdog, daemon=True, name="yrvi-watchdog")
     t.start()
     print("[api] Health watchdog started")

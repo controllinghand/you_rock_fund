@@ -299,7 +299,7 @@ DRY_RUN                          = _s.get("dry_run",                          Fa
 WHEEL_CC_IGNORE_EARNINGS_FILTER  = _s.get("wheel_cc_ignore_earnings_filter",  True)
 WHEEL_RETENTION_MARKET_CAP_MIN   = _s.get("wheel_retention_market_cap_min",    5_000_000_000)
 WHEEL_SELL_WHEN_CC_BELOW_ASSIGNED = _s.get("wheel_sell_when_cc_below_assigned", False)
-WHEEL_STOP_LOSS_ENABLED          = _s.get("wheel_stop_loss_enabled",          False)
+WHEEL_STOP_LOSS_ENABLED          = _s.get("wheel_stop_loss_enabled",          True)
 STOP_LOSS_PCT                    = _s.get("stop_loss_pct",                    0.10)
 COMPOUND_ENABLED                 = _s.get("compound_enabled",                 True)
 # Cash (non-margin) account: IBKR BuyingPower is already real settled cash and

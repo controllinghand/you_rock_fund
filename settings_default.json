@@ -11,7 +11,7 @@
   "wheel_sell_when_cc_below_assigned": false,
   "wheel_cover_all_shares": true,
   "wheel_allow_add_to_position": false,
-  "wheel_stop_loss_enabled": false,
+  "wheel_stop_loss_enabled": true,
   "stop_loss_pct": 0.10,
   "excluded_tickers": [],
   "compound_enabled": true,

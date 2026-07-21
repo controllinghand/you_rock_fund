@@ -987,7 +987,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     sell_when_cc_below        = _s.get("wheel_sell_when_cc_below_assigned", False)
     allow_cc_below_assigned   = not sell_when_cc_below
     retention_market_cap_min  = _s.get("wheel_retention_market_cap_min", 5_000_000_000)
-    stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", False)
+    stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", True)
     stop_loss_pct             = _s.get("stop_loss_pct", 0.10)
     # Default ON: when a holding is only partially covered, write the shortfall so
     # every owned share carries a covered call (topped up at the existing CC's
