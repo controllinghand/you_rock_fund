@@ -24,12 +24,30 @@ STATE_FILE      = "state.json"
 SETTINGS_FILE   = "settings.json"
 HEARTBEAT_FILE  = "scheduler_heartbeat.json"
 
+# Dead-man's switch for the api watchdog. The api container's watchdog is what
+# self-heals a wedged gateway and pages on outages; if it goes silent (thread died,
+# jammed on a hung docker call, or the api container is down) nothing else notices and
+# the box can sit wedged for hours (2026-07-21). This scheduler — a separate container
+# that stays up independently — watches the watchdog's heartbeat and pages Discord if
+# it stops. Discord is the only reliable channel here: the in-app bell is served BY the
+# api, which may be the very thing that's down.
+_DATA_DIR                   = os.environ.get("YRVI_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+API_WATCHDOG_HEARTBEAT_FILE = os.path.join(_DATA_DIR, "watchdog_heartbeat.json")
+TRADING_PAUSED_FILE         = os.path.join(_DATA_DIR, "trading_paused")
+_WATCHDOG_STALE_MIN         = 15   # api watchdog cycles every 5 min; ~3 missed = trouble
+_watchdog_silent_alerted    = False
+
 # Operator-local time. This module resolved the setting correctly on its own,
 # but api.py / monday_runner.py / discord_poster.py each hardcoded Pacific — so
 # a non-Pacific operator got jobs that FIRED on their zone while every timestamp
 # and Discord post was computed in Pacific. app_timezone is now the one resolver
 # for all of them; the local name is kept so the call sites read unchanged.
 from app_timezone import LOCAL_TZ as PST  # noqa: E402
+
+# Grace marker for the dead-man's switch — set after PST resolves. Suppresses false
+# alerts during the api's cold start (and after an upgrade / Restart All, both of which
+# bounce this scheduler and reset this timer).
+_scheduler_started = datetime.now(PST)
 
 
 def _write_heartbeat():
@@ -54,6 +72,50 @@ def _discord_alert(message: str) -> None:
         requests.post(webhook_url, json={"content": f"{message}\n{MODE_LABEL} · {_tag}"}, timeout=5)
     except Exception as e:
         log.warning(f"Discord alert failed: {e}")
+
+
+def check_api_watchdog_heartbeat():
+    """Dead-man's switch for the api watchdog (runs in THIS separate container).
+
+    The api watchdog self-heals a wedged gateway and pages on outages. If it goes
+    silent — thread died, jammed on a hung docker call, or the api container is down —
+    nothing else would notice, and the box can sit wedged for hours (2026-07-21). This
+    job pages Discord when the watchdog's heartbeat stops, then again when it resumes.
+    Discord is deliberate: the in-app bell is served by the api, which may be down.
+    """
+    global _watchdog_silent_alerted
+    now = datetime.now(PST)
+
+    # Cold-start grace: give the api time to come up. Also covers upgrades / Restart
+    # All, which bounce this scheduler and reset _scheduler_started.
+    if (now - _scheduler_started).total_seconds() < _WATCHDOG_STALE_MIN * 60:
+        return
+    # Deliberate pause / full shutdown — the operator took the stack down on purpose.
+    if os.path.exists(TRADING_PAUSED_FILE):
+        return
+
+    try:
+        with open(API_WATCHDOG_HEARTBEAT_FILE) as f:
+            ts = datetime.fromisoformat(json.load(f)["timestamp"])
+        age_min = (now - ts).total_seconds() / 60
+    except Exception:
+        age_min = None   # missing/unreadable → treat as stale (watchdog never checked in)
+
+    stale = age_min is None or age_min >= _WATCHDOG_STALE_MIN
+    if stale and not _watchdog_silent_alerted:
+        _watchdog_silent_alerted = True
+        how = "has never checked in" if age_min is None else f"silent for {int(age_min)} min"
+        _discord_alert(
+            f"🚨 **YRVI** Gateway watchdog {how} — automatic gateway monitoring and "
+            f"self-healing are DOWN. The box may be wedged with nothing to recover it.\n"
+            f"🔧 **Fix:** relaunch YRVI from the dock icon, or reboot the machine."
+        )
+    elif not stale and _watchdog_silent_alerted:
+        _watchdog_silent_alerted = False
+        _discord_alert(
+            "✅ **YRVI** Gateway watchdog is reporting again — monitoring and "
+            "self-healing restored."
+        )
 
 
 def _fetch_account_summary(fallback: float) -> tuple[float, float]:
@@ -580,6 +642,12 @@ def main():
         _write_heartbeat,
         trigger="interval", seconds=60,
         id="heartbeat", name="Scheduler Heartbeat"
+    )
+    # Dead-man's switch: page Discord if the api watchdog stops checking in.
+    scheduler.add_job(
+        check_api_watchdog_heartbeat,
+        trigger="interval", seconds=300,
+        id="watchdog_deadman", name="API Watchdog Dead-Man Check"
     )
 
     _write_heartbeat()

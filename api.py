@@ -83,6 +83,15 @@ ALERTS_FILE = (
     Path("/data/alerts.json") if CONTAINERIZED
     else BASE_DIR / "alerts.json"
 )
+# Watchdog liveness heartbeat. The api watchdog writes this after each completed
+# health-check cycle; the SCHEDULER container (a separate process) reads it and pages
+# Discord if it goes stale — a dead-man's switch for the case where the api-side
+# watchdog itself stops producing alerts (thread died, jammed on a hung docker call,
+# or the api container is down). On /data so the scheduler container can read it.
+WATCHDOG_HEARTBEAT_FILE = (
+    Path("/data/watchdog_heartbeat.json") if CONTAINERIZED
+    else BASE_DIR / "watchdog_heartbeat.json"
+)
 # "Pause Trading" marker (System Control, option A). When present, the operator has
 # intentionally stopped the IB Gateway + scheduler from the dashboard — so the
 # watchdog must NOT try to restart the gateway or page about the gateway/scheduler
@@ -541,7 +550,12 @@ def _full_restart_ibgateway() -> bool:
 
     Scope is the gateway container only — never the whole stack — because the watchdog
     runs inside the api container and must stay alive to confirm recovery or escalate.
-    Returns True if docker accepted the restart.
+
+    If the in-place `docker restart` fails — e.g. the container is wedged mid-stop, so
+    the restart hangs and times out ("Restart failed") — escalate to a compose recreate
+    (`_recreate_ibgateway`), the stronger container replacement that cleared the
+    2026-07-21 wedge by hand. Returns True if EITHER the restart or the recreate brought
+    the container back.
     """
     try:
         result = subprocess.run(
@@ -551,10 +565,62 @@ def _full_restart_ibgateway() -> bool:
         ok = result.returncode == 0
         print(f"[api/watchdog] full gateway restart → rc={result.returncode} "
               f"{(result.stderr or '').strip()!r} (ok={ok})")
+        if ok:
+            return True
+        print("[api/watchdog] docker restart did not succeed — escalating to compose recreate")
+    except Exception as e:
+        print(f"[api/watchdog] full gateway restart failed: {e} — escalating to compose recreate")
+    # A plain restart couldn't clear it → recreate the container from scratch.
+    return _recreate_ibgateway()
+
+
+def _recreate_ibgateway() -> bool:
+    """Recreate the gateway container via `docker compose up -d --force-recreate`.
+
+    The escalation for when an in-place `docker restart` can't clear the container —
+    it's wedged mid-stop, so `docker restart` hangs and times out. A compose recreate
+    tears the stuck container down and stands up a fresh one from the SAME image and
+    the persistent /data + settings volumes (no data loss), which clears a
+    container-level wedge that a restart cannot.
+
+    This is the recovery that worked by hand on 2026-07-21: the Restart button's
+    `docker restart ib_gateway` returned "Restart failed", but relaunching via the
+    Startup dock icon — which runs `docker compose up -d` — brought the gateway back.
+    The watchdog's only tool had been `docker restart`, so it could never self-heal
+    that class of wedge; this closes the gap.
+
+    --no-build reuses the existing image (fast, and can't fail on a rebuild);
+    --force-recreate guarantees the stuck container is replaced, not left in place.
+    """
+    try:
+        result = subprocess.run(
+            _compose_argv("up", "-d", "--force-recreate", "--no-build", "ib_gateway"),
+            cwd="/host_repo", capture_output=True, text=True, timeout=120,
+        )
+        ok = result.returncode == 0
+        print(f"[api/watchdog] gateway compose recreate → rc={result.returncode} "
+              f"{(result.stderr or '').strip()[:200]!r} (ok={ok})")
         return ok
     except Exception as e:
-        print(f"[api/watchdog] full gateway restart failed: {e}")
+        print(f"[api/watchdog] gateway compose recreate failed: {e}")
         return False
+
+
+def _write_watchdog_heartbeat() -> None:
+    """Record that the watchdog completed a full health-check cycle.
+
+    The scheduler container reads this and pages Discord if it goes stale — a
+    dead-man's switch for when the api watchdog itself stops producing alerts (thread
+    died, jammed on a hung docker call, or the api container is down). On 2026-07-21 a
+    box sat wedged for hours with the api-side monitoring silent and nothing paged the
+    operator; this closes that gap.
+    """
+    try:
+        WATCHDOG_HEARTBEAT_FILE.write_text(json.dumps(
+            {"timestamp": datetime.now(PST).isoformat()}
+        ))
+    except Exception as e:
+        print(f"[api/watchdog] could not write heartbeat: {e}")
 
 
 def _full_restart_in_cooldown(now: datetime) -> bool:
@@ -1039,9 +1105,14 @@ def _run_watchdog() -> None:
     """Background daemon thread: poll gateway + scheduler health every 5 minutes,
     every minute inside the Monday execution window."""
     time.sleep(90)  # let containers finish starting before the first check
+    _write_watchdog_heartbeat()  # seed a baseline so the dead-man's switch starts fresh
     while True:
         try:
             _watchdog_check()
+            # Only reached if the check completed without raising or hanging — so a
+            # frozen or crash-looping watchdog stops updating this and the scheduler's
+            # dead-man's switch fires.
+            _write_watchdog_heartbeat()
         except Exception as e:
             print(f"[api/watchdog] Unhandled error: {e}")
         interval, _ = _watchdog_cadence(datetime.now(PST))
@@ -1497,7 +1568,9 @@ def restart_gateway():
     if not _full_restart_ibgateway():
         raise HTTPException(
             status_code=500,
-            detail="docker restart ib_gateway failed — check the api container logs",
+            detail="Gateway restart AND compose recreate both failed — Docker itself may "
+                   "be wedged. Relaunch YRVI from the dock icon, or reboot the machine. "
+                   "(Details in the api container logs.)",
         )
     # Record the restart and clear in-flight outage flags so the watchdog evaluates
     # the freshly-restarted gateway cleanly on its next cycle instead of double-firing.
@@ -1561,7 +1634,8 @@ def unwedge_gateway():
 
     if not _full_restart_ibgateway():
         raise HTTPException(status_code=500,
-                            detail=f"no soft path ({soft_why}) and docker restart ib_gateway failed")
+                            detail=f"no soft path ({soft_why}); docker restart and compose "
+                                   f"recreate both failed — Docker itself may be wedged")
 
     _watchdog_state["last_full_restart_at"]    = now
     _watchdog_state["gateway_full_restart_at"] = now
