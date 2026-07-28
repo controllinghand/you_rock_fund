@@ -125,6 +125,8 @@ _watchdog_state: dict = {
     "ibkr_soft_restart_at": None,   # when we fired an auto soft restart this outage
     "gateway_full_restart_at": None,  # one-shot full restart this gateway-port-down episode
     "ibkr_full_restart_at":    None,  # one-shot full restart this handshake-dead episode
+    "gateway_cold_restart_at": None,  # one-shot COLD restart (clears saved token) this episode
+    "ibkr_cold_restart_at":    None,  # one-shot COLD restart this handshake-dead episode
     "last_full_restart_at":    None,  # cross-episode cooldown (lockout guard)
 }
 _gateway_login_status: str = "unknown"
@@ -148,6 +150,9 @@ SOFT_RESTART_GRACE = 240  # seconds to let an auto soft restart recover before p
 FULL_RESTART_GRACE = 360  # seconds to let an auto full restart recover before paging
                           # (longer than soft: a full restart re-runs login, and on
                           #  LIVE it waits on the human approving the IB Key 2FA push)
+COLD_RESTART_GRACE = 420  # seconds to let a COLD restart (cleared token → fresh login)
+                          # recover before paging. Longer than full: a cold login is
+                          # slower than a token restore, and on LIVE waits on the 2FA push.
 FULL_RESTART_COOLDOWN = 1800  # min seconds between auto full restarts of the gateway.
                               # Lockout guard: combined with the one-shot-per-episode
                               # cap, the watchdog can never loop fresh logins into an
@@ -606,6 +611,61 @@ def _recreate_ibgateway() -> bool:
         return False
 
 
+# Path inside the ib_gateway container to IBKR's launch settings — the auto-restart
+# "restore the saved session token on next launch" flag (`[Logon] Restart=OK`) lives here.
+_GATEWAY_JTS_INI = "/home/ibgateway/Jts/jts.ini"
+
+
+def _clear_gateway_autorestart_state() -> bool:
+    """Delete IB Gateway's saved auto-restart session token so the NEXT start does a
+    fresh credentialed login instead of trying to restore the saved token.
+
+    After IBKR's weekly token reset (Sun 01:00 ET) the saved session token is dead.
+    On a plain `docker restart`, IB Gateway sees `[Logon] Restart=OK` in jts.ini plus
+    the encrypted token blob (`<userdir>/ibg.tmp`) and enters "auto-restart mode:
+    restoring session token" — restoring the EXPIRED token, which the server rejects
+    ("security tokens … have expired … please manually enter your username and
+    password"), parking the gateway on the login dialog indefinitely (the JVM stays up
+    logging `instance of control is not created yet`). Every subsequent plain restart
+    restores the same dead token and re-parks. Removing the restore flag + token blob
+    forces a cold login (username/password from IBC config → a fresh valid token).
+    Root-caused and proven on yrvip 2026-07-28.
+
+    Best-effort: returns True if the docker exec ran (the container is up when parked
+    on the dialog). The gateway rewrites these on its next real auto-restart, so this
+    only affects the immediately-following start.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "ib_gateway", "sh", "-c",
+             f"sed -i '/^Restart=OK/d' {_GATEWAY_JTS_INI} 2>/dev/null; "
+             f"find /home/ibgateway/Jts -maxdepth 2 -name ibg.tmp -delete 2>/dev/null; "
+             f"echo cleared"],
+            capture_output=True, text=True, timeout=20,
+        )
+        ok = result.returncode == 0
+        print(f"[api/watchdog] clear gateway auto-restart state → rc={result.returncode} "
+              f"{(result.stdout or '').strip()!r} (ok={ok})")
+        return ok
+    except Exception as e:
+        print(f"[api/watchdog] could not clear gateway auto-restart state: {e}")
+        return False
+
+
+def _cold_restart_ibgateway() -> bool:
+    """Force a fresh cold login: clear the saved auto-restart token, then full-restart.
+
+    The escalation for a gateway wedged on the routine weekly token-expiry dialog,
+    where a plain full restart just restores the same dead token and re-parks. Fire it
+    only AFTER a normal full restart has failed to recover — so a routine wedge (whose
+    token is still valid) is never needlessly forced into a fresh login (an IB Key 2FA
+    push on LIVE). Returns True if the restart was accepted; recovery is confirmed later
+    by the grace-wait branch.
+    """
+    _clear_gateway_autorestart_state()  # best-effort; safe even if it no-ops
+    return _full_restart_ibgateway()
+
+
 def _write_watchdog_heartbeat() -> None:
     """Record that the watchdog completed a full health-check cycle.
 
@@ -773,8 +833,9 @@ def _watchdog_check() -> None:
     if _trading_paused():
         if not gw_up:
             for k in ("gateway_down_since", "last_gateway_alert", "gateway_full_restart_at",
-                      "ibkr_down_since", "last_ibkr_alert", "ibkr_soft_restart_at",
-                      "ibkr_full_restart_at", "scheduler_down_since", "last_scheduler_alert"):
+                      "gateway_cold_restart_at", "ibkr_down_since", "last_ibkr_alert",
+                      "ibkr_soft_restart_at", "ibkr_full_restart_at", "ibkr_cold_restart_at",
+                      "scheduler_down_since", "last_scheduler_alert"):
                 _watchdog_state[k] = None
             return
         try:
@@ -880,33 +941,65 @@ def _watchdog_check() -> None:
                         f"`{_compose_hint('restart', 'ib_gateway')}`"
                     )
         elif (full_at is not None
+                and _watchdog_state["gateway_cold_restart_at"] is None
                 and _watchdog_state["last_gateway_alert"] is None
                 and (now - full_at).total_seconds() >= FULL_RESTART_GRACE):
-            # Full restart fired but the gateway is still down past the grace window.
+            # Full restart didn't recover it → escalate to a COLD restart (clear the
+            # saved auto-restart token, force a fresh login) before paging. This clears
+            # the routine weekly token-expiry park, where a plain restart just restores
+            # the same dead token. One-shot per episode.
+            if _cold_restart_ibgateway():
+                _watchdog_state["gateway_cold_restart_at"] = now
+                _watchdog_state["last_full_restart_at"]    = now
+                twofa = ("; ⚠️ **LIVE re-login needs IB Key 2FA — check your phone**"
+                         if is_live else " (paper — no 2FA)")
+                _send_discord_alert(
+                    f"🔁 **YRVI** IB Gateway still unreachable {mins} min in — the full "
+                    f"restart didn't clear it (looks like the routine weekly token-expiry "
+                    f"park). Cleared the saved auto-restart token and forced a fresh "
+                    f"login{twofa}. Confirming recovery or paging in ~{COLD_RESTART_GRACE // 60} min…"
+                )
+            else:
+                _watchdog_state["last_gateway_alert"] = now
+                _send_discord_alert(
+                    f"🚨 **YRVI** IB Gateway still unreachable {mins} min in — the full "
+                    f"restart didn't recover it and the cold-restart escalation could not "
+                    f"be sent (docker error).\n{_MANUAL_RESTART_HINT}"
+                )
+        elif (_watchdog_state["gateway_cold_restart_at"] is not None
+                and _watchdog_state["last_gateway_alert"] is None
+                and (now - _watchdog_state["gateway_cold_restart_at"]).total_seconds()
+                    >= COLD_RESTART_GRACE):
+            # Cold restart fired but still down past its grace window.
             _watchdog_state["last_gateway_alert"] = now
             twofa = (" — did you approve the IB Key 2FA push on your phone?"
                      if is_live else "")
             _send_discord_alert(
-                f"🚨 **YRVI** IB Gateway still unreachable {mins} min in — the auto "
-                f"full-restart did not recover it{twofa}. Manual intervention needed.\n"
+                f"🚨 **YRVI** IB Gateway still unreachable {mins} min in — the auto full "
+                f"AND cold restarts did not recover it{twofa}. Manual intervention needed.\n"
                 f"{_MANUAL_RESTART_HINT}"
             )
     else:
         if (_watchdog_state["gateway_down_since"] is not None
                 and (_watchdog_state["last_gateway_alert"] is not None
-                     or _watchdog_state["gateway_full_restart_at"] is not None)):
+                     or _watchdog_state["gateway_full_restart_at"] is not None
+                     or _watchdog_state["gateway_cold_restart_at"] is not None)):
             down_sec = (now - _watchdog_state["gateway_down_since"]).total_seconds()
-            # Healed by the auto full-restart = we fired one and never had to page.
-            healed = (_watchdog_state["gateway_full_restart_at"] is not None
+            # Healed by an auto restart = we fired one (full or cold) and never had to page.
+            healed = ((_watchdog_state["gateway_full_restart_at"] is not None
+                       or _watchdog_state["gateway_cold_restart_at"] is not None)
                       and _watchdog_state["last_gateway_alert"] is None)
+            which = ("cold" if _watchdog_state["gateway_cold_restart_at"] is not None
+                     else "full")
             _send_discord_alert(
                 f"✅ **YRVI** IB Gateway port is reachable again "
                 f"(was down {int(down_sec / 60)} min"
-                f"{' — auto full-restart recovered it' if healed else ''})."
+                f"{f' — auto {which}-restart recovered it' if healed else ''})."
             )
         _watchdog_state["gateway_down_since"]      = None
         _watchdog_state["last_gateway_alert"]      = None
         _watchdog_state["gateway_full_restart_at"] = None
+        _watchdog_state["gateway_cold_restart_at"] = None
 
     # ── IBKR API connection (only when gateway port is up) ────────
     # Port open but ib_insync failing → gateway logged in but API broken (Scenario 3)
@@ -1038,27 +1131,60 @@ def _watchdog_check() -> None:
                             f"escalation could not be sent (docker error).\n{_MANUAL_RESTART_HINT}"
                         )
                 elif (_watchdog_state["ibkr_full_restart_at"] is not None
+                        and _watchdog_state["ibkr_cold_restart_at"] is None
                         and (now - _watchdog_state["ibkr_full_restart_at"]).total_seconds()
                             >= FULL_RESTART_GRACE):
+                    # Full restart didn't clear it. The signature fix for the routine
+                    # weekly token-expiry park is a COLD restart: the plain full restart
+                    # just re-restored the expired session token and re-parked on the
+                    # login dialog, so clear the saved token and force a fresh login.
+                    # One-shot per episode (not cooldown-gated): it's a single login
+                    # attempt, and it only fires after the full restart already failed.
+                    is_live = port in _LIVE_IBKR_PORTS
+                    if _cold_restart_ibgateway():
+                        _watchdog_state["ibkr_cold_restart_at"] = now
+                        _watchdog_state["last_full_restart_at"] = now
+                        twofa = ("; ⚠️ **LIVE re-login needs IB Key 2FA — check your phone**"
+                                 if is_live else " (paper — no 2FA)")
+                        _send_discord_alert(
+                            f"🔁 **YRVI** IBKR API still failing {int(down_sec / 60)} min in — the "
+                            f"full restart didn't clear it (looks like the routine weekly "
+                            f"token-expiry park). Cleared the saved auto-restart token and forced "
+                            f"a fresh login{twofa}. Confirming recovery or paging in "
+                            f"~{COLD_RESTART_GRACE // 60} min…"
+                        )
+                    else:
+                        _watchdog_state["last_ibkr_alert"] = now
+                        _send_discord_alert(
+                            f"🚨 **YRVI** IB Gateway API still failing {int(down_sec / 60)} min in — "
+                            f"the soft and full auto-restarts didn't recover it and the cold-restart "
+                            f"escalation could not be sent (docker error).\n{_MANUAL_RESTART_HINT}"
+                        )
+                elif (_watchdog_state["ibkr_cold_restart_at"] is not None
+                        and (now - _watchdog_state["ibkr_cold_restart_at"]).total_seconds()
+                            >= COLD_RESTART_GRACE):
                     _watchdog_state["last_ibkr_alert"] = now
                     twofa = (" — did you approve the IB Key 2FA push on your phone?"
                              if port in _LIVE_IBKR_PORTS else "")
                     _send_discord_alert(
                         f"🚨 **YRVI** IB Gateway API still failing {int(down_sec / 60)} min in — "
-                        f"neither the soft nor the full auto-restart recovered it (`{err}`){twofa}. "
+                        f"soft, full, AND cold auto-restarts all failed to recover it (`{err}`){twofa}. "
                         f"Manual intervention needed.\n{_MANUAL_RESTART_HINT}"
                     )
         else:
             if (_watchdog_state["ibkr_down_since"] is not None
                     and (_watchdog_state["last_ibkr_alert"] is not None
                          or _watchdog_state["ibkr_soft_restart_at"] is not None
-                         or _watchdog_state["ibkr_full_restart_at"] is not None)):
+                         or _watchdog_state["ibkr_full_restart_at"] is not None
+                         or _watchdog_state["ibkr_cold_restart_at"] is not None)):
                 down_sec = (now - _watchdog_state["ibkr_down_since"]).total_seconds()
-                # Healed by an auto-restart = we fired one (soft or full) and never paged.
+                # Healed by an auto-restart = we fired one (soft/full/cold) and never paged.
                 healed = ((_watchdog_state["ibkr_soft_restart_at"] is not None
-                           or _watchdog_state["ibkr_full_restart_at"] is not None)
+                           or _watchdog_state["ibkr_full_restart_at"] is not None
+                           or _watchdog_state["ibkr_cold_restart_at"] is not None)
                           and _watchdog_state["last_ibkr_alert"] is None)
-                which = ("full" if _watchdog_state["ibkr_full_restart_at"] is not None
+                which = ("cold" if _watchdog_state["ibkr_cold_restart_at"] is not None
+                         else "full" if _watchdog_state["ibkr_full_restart_at"] is not None
                          else "soft")
                 _send_discord_alert(
                     f"✅ **YRVI** IBKR API connection restored "
@@ -1069,12 +1195,14 @@ def _watchdog_check() -> None:
             _watchdog_state["last_ibkr_alert"] = None
             _watchdog_state["ibkr_soft_restart_at"] = None
             _watchdog_state["ibkr_full_restart_at"] = None
+            _watchdog_state["ibkr_cold_restart_at"] = None
     else:
         # Gateway port is down — clear IBKR state; its episode timer resets when port returns
         _watchdog_state["ibkr_down_since"] = None
         _watchdog_state["last_ibkr_alert"] = None
         _watchdog_state["ibkr_soft_restart_at"] = None
         _watchdog_state["ibkr_full_restart_at"] = None
+        _watchdog_state["ibkr_cold_restart_at"] = None
 
     # ── Scheduler heartbeat ───────────────────────────────────────
     sched_ok = _scheduler_pid() is not None
