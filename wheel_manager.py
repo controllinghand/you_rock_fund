@@ -745,6 +745,17 @@ def detect_assignments(dry_run: bool = False) -> dict:
     strike_lookup     = {p["ticker"]: p["strike"] for p in state.get("positions", [])}
     # Tickers the user excluded from the wheel — never adopt as a new holding.
     excluded          = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
+    # Never adopt the cash-sweep parking instrument (QQQ/SGOV) as a wheel assignment —
+    # it's a parking vehicle tracked in cash_park, not a wheeled stock.
+    _cpset            = get_settings()
+    park_instruments  = set()
+    if _cpset.get("cash_park_enabled"):
+        _pi = (_cpset.get("cash_park_instrument") or "").strip().upper()
+        if _pi:
+            park_instruments.add(_pi)
+    _cp = state.get("cash_park")
+    if _cp and _cp.get("status") == "open" and _cp.get("instrument"):
+        park_instruments.add(_cp["instrument"].strip().upper())
 
     ib = _connect()
     try:
@@ -861,8 +872,9 @@ def detect_assignments(dry_run: bool = False) -> dict:
                          f"vs assigned ${h.get('assigned_strike', 0.0):.2f}")
             h["last_checked"] = datetime.now().isoformat()
         else:
-            if ticker.upper() in excluded:
-                log.info(f"  🚫 {ticker}: excluded from the wheel — not adopting "
+            if ticker.upper() in excluded or ticker.upper() in park_instruments:
+                _why = "excluded from the wheel" if ticker.upper() in excluded else "cash-sweep parking instrument"
+                log.info(f"  🚫 {ticker}: {_why} — not adopting "
                          f"as a new assignment (left as a plain hold)")
                 continue
             # assigned_strike (P&L basis) = the CSP strike we were assigned at.
@@ -996,6 +1008,34 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     # Tickers the user excluded from the wheel — never adopt, never CC, never sell.
     excluded                  = {t.strip().upper() for t in _s.get("excluded_tickers", []) if t and t.strip()}
 
+    # The cash-sweep parking instrument (QQQ/SGOV) is a PARKING vehicle, not a wheel
+    # holding — the wheel must never adopt, reserve, CC, or sell it. Exclude the
+    # configured instrument AND the instrument of any open cash_park position (in case
+    # the setting changed while a position is still open).
+    park_instruments = set()
+    if _s.get("cash_park_enabled"):
+        _pi = (_s.get("cash_park_instrument") or "").strip().upper()
+        if _pi:
+            park_instruments.add(_pi)
+    _cp = state.get("cash_park")
+    if _cp and _cp.get("status") == "open" and _cp.get("instrument"):
+        park_instruments.add(_cp["instrument"].strip().upper())
+    # Self-heal: if a prior scan mis-adopted the park position as a wheel holding
+    # (e.g. an end-of-week sell failed and the Saturday scan grabbed the leftover
+    # shares), drop it from the wheel now — it's tracked in cash_park, and the sweep's
+    # own end-of-week sell will close it. Persist the cleanup on a real (non-preview) run.
+    if park_instruments:
+        _mis = [h for h in holdings if h.get("ticker", "").strip().upper() in park_instruments]
+        if _mis:
+            log.warning(f"  🧹 Cash-park instrument(s) mis-adopted as wheel holdings — "
+                        f"dropping from the wheel: {[h.get('ticker') for h in _mis]}")
+            holdings = [h for h in holdings if h.get("ticker", "").strip().upper() not in park_instruments]
+            if not dry_run:
+                _st = _load_state()
+                _st["wheel_holdings"] = [h for h in _st.get("wheel_holdings", [])
+                                         if h.get("ticker", "").strip().upper() not in park_instruments]
+                _save_state(_st)
+
     # Order-placement gate. Simulate CC/stock-sale orders when EITHER this is a
     # preview run (pipeline dry_run) OR the Settings "Dry Run" toggle is ON — read
     # LIVE here, so the long-running scheduler honors a UI toggle without a restart
@@ -1087,9 +1127,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         for p in live_pos:
             if p.contract.secType == "STK" and int(p.position) > 0:
                 sym = p.contract.symbol
-                if sym.upper() in excluded:
-                    log.info(f"  🚫 {sym}: excluded from the wheel — not adopting "
-                             f"into wheel_holdings (left as a plain hold)")
+                if sym.upper() in excluded or sym.upper() in park_instruments:
+                    _why = "excluded from the wheel" if sym.upper() in excluded else "cash-sweep parking instrument"
+                    log.info(f"  🚫 {sym}: {_why} — not adopting into wheel_holdings "
+                             f"(left as a plain hold)")
                     continue
                 if sym not in known_tickers:
                     # No state for this holding — assigned_strike (P&L basis) falls

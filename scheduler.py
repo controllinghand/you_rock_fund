@@ -554,16 +554,43 @@ def run_risk_monitor():
 # holiday such as Good Friday). sell_park() itself no-ops when there's nothing
 # parked, so a Thursday firing in a normal week is a cheap check.
 
+def _cash_park_stranded(now) -> bool:
+    """True if an open cash_park position was bought BEFORE this week's Monday — i.e.
+    its end-of-week sell must have failed (e.g. a gateway wedge), leaving cash parked
+    into a new week. Such a position should be sold on the next trading day, not left
+    stranded until the following Friday."""
+    try:
+        from datetime import timedelta
+        cp = _load_state().get("cash_park")
+        if not cp or cp.get("status") != "open" or not cp.get("shares"):
+            return False
+        bd = cp.get("buy_date")
+        if not bd:
+            return False
+        buy_d = datetime.fromisoformat(str(bd)).date()
+        week_monday = now.date() - timedelta(days=now.date().weekday())
+        return buy_d < week_monday
+    except Exception:
+        return False
+
+
 def run_cash_park_sell():
     loop = _new_loop()
     now  = datetime.now(PST)
-    if not is_last_trading_day_of_week(now.date()):
-        log.info(f"⏭️  CASH SWEEP SELL skipped — {now.strftime('%A %Y-%m-%d')} is not "
-                 f"the last trading day of the week")
+    # Normally sell only on the week's last trading day. But also sell a STRANDED
+    # position — one bought in a prior week whose end-of-week sell failed — so a
+    # one-off gateway wedge doesn't leave cash parked for a whole extra week. The job
+    # fires Mon–Fri; on non-last days it's a cheap no-op unless a position is stranded.
+    is_last  = is_last_trading_day_of_week(now.date())
+    stranded = _cash_park_stranded(now)
+    if not (is_last or stranded):
+        log.info(f"⏭️  CASH SWEEP SELL skipped — {now.strftime('%A %Y-%m-%d')} is not the "
+                 f"last trading day and no stranded position")
         loop.close()
         return
     log.info("\n" + "=" * 65)
-    log.info(f"💵 CASH SWEEP SELL — {now.strftime('%A %Y-%m-%d %H:%M %Z')}")
+    log.info(f"💵 CASH SWEEP SELL — {now.strftime('%A %Y-%m-%d %H:%M %Z')}"
+             + ("  (recovering stranded position)" if stranded and not is_last else ""))
     log.info("=" * 65)
     try:
         from cash_park import sell_park
@@ -625,13 +652,15 @@ def main():
         trigger="cron", day_of_week="tue,wed,thu", hour=9, minute=0,
         id="daily_risk_monitor", name="Daily Risk Monitor"
     )
-    # Cash-sweep sell — fires Thu+Fri; run_cash_park_sell only acts on the week's
-    # last trading day (Friday, or Thursday when Friday is a holiday). 12:30 PM PST
-    # leaves ample liquidity and clears the position well before the close.
+    # Cash-sweep sell — fires Mon–Fri at 12:30 PM PST. run_cash_park_sell acts on the
+    # week's last trading day (Friday, or Thursday when Friday is a holiday) AND on any
+    # earlier day if a position is stranded from a prior week (its end-of-week sell
+    # failed, e.g. a gateway wedge) — so a one-off failure is recovered the next
+    # trading day instead of leaving cash parked a whole extra week. No-op otherwise.
     scheduler.add_job(
         run_cash_park_sell,
-        trigger="cron", day_of_week="thu,fri", hour=12, minute=30,
-        id="cash_park_sell", name="Cash Sweep End-of-Week Sell"
+        trigger="cron", day_of_week="mon,tue,wed,thu,fri", hour=12, minute=30,
+        id="cash_park_sell", name="Cash Sweep End-of-Week / Stranded Sell"
     )
     scheduler.add_job(
         run_auto_update,
