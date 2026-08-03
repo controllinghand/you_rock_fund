@@ -18,6 +18,7 @@ plan so the dashboard can show exactly what Monday will do.
 """
 import json
 import logging
+import math
 from datetime import datetime, date, timedelta
 
 from config import (
@@ -426,8 +427,48 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     positions    = size_all(filtered_targets, budget=csp_sizing_budget,
                             num_positions=target_fills)
 
-    total_premium = sum(p.get("premium_total", 0) for p in positions)
     total_capital = sum(p.get("capital_used", 0) for p in positions)
+
+    # ── Budget audit (durable, one line) ─────────────────────────
+    # Prints every component so a bad budget is diagnosable even if container logs
+    # rotate. reserved_capital < 0 would inflate the budget ABOVE net_liq — flag it.
+    if net_liq and net_liq > 0 and compound_enabled and not cash_account:
+        log.info(f"  🧾 Budget audit: net_liq=${net_liq:,.0f}  reserved=${reserved_capital:,.0f}  "
+                 f"open_csp=${open_csp_capital:,.0f}  effective=${effective_budget:,.0f}  "
+                 f"sizing=${csp_sizing_budget:,.0f}  → deployed=${total_capital:,.0f}")
+    if reserved_capital < 0:
+        log.warning(f"  ⚠️  reserved_capital is NEGATIVE (${reserved_capital:,.0f}) — this inflates "
+                    f"the CSP budget ABOVE net_liq; check the wheel-check reserved computation")
+
+    # ── Hard safety cap at NET-LIQ (independent of the budget calc) ──
+    # New CSP collateral + already-open CSP collateral + wheel capital must never
+    # exceed the account value. If a miscomputed budget let the sizer deploy past
+    # net_liq, trim contracts (largest CSPs first) so the account is never
+    # over-secured on margin. deployable = net_liq − reserved − already-open CSPs.
+    if net_liq and net_liq > 0:
+        deployable = max(0.0, net_liq - reserved_capital - open_csp_capital)
+        if total_capital > deployable + 1.0:
+            overflow = total_capital - deployable
+            for p in sorted((x for x in positions if x.get("action_type", "CSP") == "CSP"),
+                            key=lambda x: x["capital_used"], reverse=True):
+                if overflow <= 1.0:
+                    break
+                cost_per = p["strike"] * 100.0
+                drop     = min(p["contracts"], math.ceil(overflow / cost_per))
+                if drop <= 0:
+                    continue
+                p["contracts"]    -= drop
+                p["capital_used"]  = p["contracts"] * cost_per
+                p["premium_total"] = round(p["contracts"] * p["premium"] * 100, 2)
+                overflow          -= drop * cost_per
+            positions = [p for p in positions if p.get("action_type", "CSP") != "CSP" or p["contracts"] >= 1]
+            new_total = sum(p.get("capital_used", 0) for p in positions)
+            log.warning(f"  🧢 CSP collateral capped at net-liq deployable ${deployable:,.0f} "
+                        f"(net_liq ${net_liq:,.0f} − reserved ${reserved_capital:,.0f} − open_csp "
+                        f"${open_csp_capital:,.0f}); trimmed ${total_capital:,.0f} → ${new_total:,.0f}")
+            total_capital = new_total
+
+    total_premium = sum(p.get("premium_total", 0) for p in positions)
 
     base = {
         "positions":               positions,
