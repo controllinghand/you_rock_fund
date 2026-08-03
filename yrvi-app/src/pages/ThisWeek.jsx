@@ -226,6 +226,7 @@ export default function ThisWeek() {
                   detail = `filled @ $${r.fill_price?.toFixed(2)}`
                     + (r.order_type ? ` via ${r.order_type.replace(/_/g, ' ')}` : '')
                     + (r.premium_collected != null ? ` — $${r.premium_collected.toFixed(0)}` : '')
+                    + (r.cash_trimmed_from ? ` (cash-capped from ${r.cash_trimmed_from})` : '')
                 } else if (s === 'cc_opened') {
                   emoji = '✅'
                   detail = `CC $${r.cc_strike}${r.cc_delta != null ? ` (δ${r.cc_delta})` : ''}`

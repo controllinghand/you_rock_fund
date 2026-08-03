@@ -829,21 +829,36 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
 
             # ── Cash-secured funds gate ──────────────────────────────────
-            # Don't even attempt a put we can't fully secure. Checked here (after
-            # the delta adjustment settles the FINAL strike/contracts, before the
-            # market-data round trip) so an unaffordable candidate is skipped
-            # immediately and the loop moves to the next-ranked name.
+            # Never attempt a put we can't fully secure. Checked here (after the
+            # delta adjustment settles the FINAL strike, before the market-data
+            # round trip). Rather than drop the whole name, TRIM the contract count
+            # to what the remaining cash covers (⌊cash / (strike×100)⌋) and place
+            # the smaller position — a 4-lot that needs $29.6k becomes a 2-lot at
+            # $14.8k instead of a skip. Only skip when not even one contract fits.
             if available_cash is not None:
-                required_cash = round(strike * 100 * contracts, 2)
-                if required_cash > available_cash:
-                    log.info(f"  ⛔ {ticker} skipped — needs ${required_cash:,.0f} to secure, "
+                per_contract  = strike * 100
+                max_affordable = int(available_cash // per_contract)
+                if max_affordable < 1:
+                    log.info(f"  ⛔ {ticker} skipped — one contract needs ${per_contract:,.0f}, "
                              f"only ${available_cash:,.0f} cash available")
                     skip_res = {"ticker": ticker, "status": "skipped_insufficient_cash",
-                                "required_cash": required_cash,
+                                "required_cash": round(per_contract, 2),
                                 "available_cash": round(available_cash, 2)}
                     results.append(skip_res)
                     _status(ticker=ticker, stage=None, result=skip_res)
                     continue
+                if max_affordable < contracts:
+                    orig_contracts = contracts
+                    contracts      = max_affordable
+                    new_capital    = round(contracts * per_contract, 2)
+                    log.info(f"  ✂️  {ticker} trimmed {orig_contracts}→{contracts} contracts to fit "
+                             f"${available_cash:,.0f} cash (needs ${orig_contracts * per_contract:,.0f} at full size)")
+                    pos = {**pos, "contracts": contracts, "capital_used": new_capital,
+                           "cash_trimmed_from": orig_contracts}
+                    for _i, _sp in enumerate(all_sized):
+                        if _sp.get("ticker") == ticker:
+                            all_sized[_i] = pos
+                            break
 
             _status(ticker=ticker, stage="fetching market data")
             mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
@@ -878,6 +893,10 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
         result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
         result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
+        # Breadcrumb when the funds gate trimmed the lot size to fit cash, so the
+        # dashboard/Discord can show "filled 2 of 4 (cash-capped)".
+        if pos.get("cash_trimmed_from"):
+            result["cash_trimmed_from"] = pos["cash_trimmed_from"]
         results.append(result)
 
         # Report result back to status callback
@@ -887,6 +906,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             "fill_price": result.get("fill_price"),
             "premium_collected": result.get("premium_collected"),
             "order_type": result.get("order_type"),
+            "cash_trimmed_from": pos.get("cash_trimmed_from"),
         })
 
         if result["status"] in ("filled", "dry_run", "partial_fill"):
