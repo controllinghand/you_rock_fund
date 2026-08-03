@@ -230,6 +230,25 @@ def _get_stock_price(ib: IB, ticker: str) -> float | None:
     return None
 
 
+def _fetch_available_cash(ib: IB) -> float | None:
+    """Live settled cash available to secure new cash-secured puts, straight from
+    IBKR (the source of truth). Returns None on any failure so the caller leaves
+    the funds gate OFF and falls back to IBKR's own order rejection — a bad read
+    must never block trading. BuyingPower on a cash/Roth account is real settled
+    cash already net of what existing positions reserve, which is exactly the
+    ceiling for new puts; AvailableFunds / TotalCashValue are fallbacks."""
+    try:
+        summary = ib.accountSummary(ACCOUNT)
+        by_tag  = {v.tag: v.value for v in summary}
+        for tag in ("BuyingPower", "AvailableFunds", "TotalCashValue"):
+            val = by_tag.get(tag)
+            if val not in (None, ""):
+                return float(val)
+    except Exception as e:
+        log.warning(f"  ⚠️  Funds gate: could not read available cash ({e}) — gate disabled this run")
+    return None
+
+
 def verify_and_adjust_strike(
         ib: IB, ticker: str, screener_strike: float,
         expiry_str: str, screener_delta: float,
@@ -708,6 +727,20 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             except Exception:
                 pass
 
+    # Cash-secured funds gate: on a cash/Roth account, never even ATTEMPT a put we
+    # can't fully secure. Seed from live IBKR cash and decrement locally as each
+    # put fills, so later slots are skipped cleanly instead of firing orders IBKR
+    # rejects with Error 201 (the "failed funds" cascade that also burns the whole
+    # fallback pool). Cash accounts only — on margin IBKR reserves far less than
+    # full notional, so a full-notional gate would wrongly skip affordable puts.
+    # Read the toggle LIVE from settings (not an import snapshot) like dry_run.
+    # None ⇒ gate off (fetch failed, or not a cash account): we fall back to
+    # today's behaviour and let IBKR reject — a bad read must not block trading.
+    cash_gate_on   = get_settings().get("cash_account", False)
+    available_cash = _fetch_available_cash(ib) if cash_gate_on else None
+    if available_cash is not None:
+        log.info(f"  💵 Funds gate ON — ${available_cash:,.0f} cash available to secure new CSPs")
+
     results          = []
     filled_count     = 0
     capital_deployed = 0
@@ -795,6 +828,38 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                         break
                 log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
 
+            # ── Cash-secured funds gate ──────────────────────────────────
+            # Never attempt a put we can't fully secure. Checked here (after the
+            # delta adjustment settles the FINAL strike, before the market-data
+            # round trip). Rather than drop the whole name, TRIM the contract count
+            # to what the remaining cash covers (⌊cash / (strike×100)⌋) and place
+            # the smaller position — a 4-lot that needs $29.6k becomes a 2-lot at
+            # $14.8k instead of a skip. Only skip when not even one contract fits.
+            if available_cash is not None:
+                per_contract  = strike * 100
+                max_affordable = int(available_cash // per_contract)
+                if max_affordable < 1:
+                    log.info(f"  ⛔ {ticker} skipped — one contract needs ${per_contract:,.0f}, "
+                             f"only ${available_cash:,.0f} cash available")
+                    skip_res = {"ticker": ticker, "status": "skipped_insufficient_cash",
+                                "required_cash": round(per_contract, 2),
+                                "available_cash": round(available_cash, 2)}
+                    results.append(skip_res)
+                    _status(ticker=ticker, stage=None, result=skip_res)
+                    continue
+                if max_affordable < contracts:
+                    orig_contracts = contracts
+                    contracts      = max_affordable
+                    new_capital    = round(contracts * per_contract, 2)
+                    log.info(f"  ✂️  {ticker} trimmed {orig_contracts}→{contracts} contracts to fit "
+                             f"${available_cash:,.0f} cash (needs ${orig_contracts * per_contract:,.0f} at full size)")
+                    pos = {**pos, "contracts": contracts, "capital_used": new_capital,
+                           "cash_trimmed_from": orig_contracts}
+                    for _i, _sp in enumerate(all_sized):
+                        if _sp.get("ticker") == ticker:
+                            all_sized[_i] = pos
+                            break
+
             _status(ticker=ticker, stage="fetching market data")
             mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
             if not mkt:
@@ -828,6 +893,10 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
         result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
         result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
+        # Breadcrumb when the funds gate trimmed the lot size to fit cash, so the
+        # dashboard/Discord can show "filled 2 of 4 (cash-capped)".
+        if pos.get("cash_trimmed_from"):
+            result["cash_trimmed_from"] = pos["cash_trimmed_from"]
         results.append(result)
 
         # Report result back to status callback
@@ -837,6 +906,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             "fill_price": result.get("fill_price"),
             "premium_collected": result.get("premium_collected"),
             "order_type": result.get("order_type"),
+            "cash_trimmed_from": pos.get("cash_trimmed_from"),
         })
 
         if result["status"] in ("filled", "dry_run", "partial_fill"):
@@ -851,6 +921,11 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 filled_qty = round(result.get("premium_collected", 0) / fill_price / 100)
             else:
                 filled_qty = contracts
+            # Funds gate: drop the cash this fill just secured so the next slot's
+            # check sees the true remainder (exact for cash-secured puts = strike×100×qty).
+            if available_cash is not None:
+                available_cash = max(0.0, available_cash - strike * 100 * filled_qty)
+                log.info(f"  💵 Funds gate — ${available_cash:,.0f} cash remaining after {ticker}")
             try:
                 _append_trade_log({
                     "symbol":               ticker,

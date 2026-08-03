@@ -110,7 +110,9 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "failed_qualify":        "❌",
         "failed_market_data":    "❌",
         "failed_permissions":    "🚫",
+        "failed_funds":          "❌",
         "skipped_liquidity":     "⚠️",
+        "skipped_insufficient_cash": "⏭️",
         "skipped_contract_size": "⚠️",
         "unfilled":              "❌",
     }
@@ -119,7 +121,9 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "failed_qualify":        "skipped — could not qualify contract",
         "failed_market_data":    "skipped — no market data",
         "failed_permissions":    "failed — IBKR options trading not enabled (check permissions in Client Portal)",
+        "failed_funds":          "failed — insufficient cash/margin to secure",
         "skipped_liquidity":     "skipped — spread too wide",
+        "skipped_insufficient_cash": "skipped — not enough cash to secure",
         "skipped_contract_size": "skipped — contract too large",
         "unfilled":              "unfilled",
     }

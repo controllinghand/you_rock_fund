@@ -36,6 +36,8 @@ const RESULT_LABELS = {
   sold_no_viable_cc:     'sold (no CC)',
   sell_failed:           'sell FAILED',
   failed_market_data:    'no market data',
+  failed_funds:          'insufficient cash',
+  skipped_insufficient_cash: 'skipped — low cash',
   skipped_excluded:      'excluded',
 }
 function resultLabel(status) {

@@ -226,6 +226,7 @@ export default function ThisWeek() {
                   detail = `filled @ $${r.fill_price?.toFixed(2)}`
                     + (r.order_type ? ` via ${r.order_type.replace(/_/g, ' ')}` : '')
                     + (r.premium_collected != null ? ` — $${r.premium_collected.toFixed(0)}` : '')
+                    + (r.cash_trimmed_from ? ` (cash-capped from ${r.cash_trimmed_from})` : '')
                 } else if (s === 'cc_opened') {
                   emoji = '✅'
                   detail = `CC $${r.cc_strike}${r.cc_delta != null ? ` (δ${r.cc_delta})` : ''}`
@@ -239,6 +240,12 @@ export default function ThisWeek() {
                 } else if (s.startsWith('sold_')) {
                   emoji = '💰'
                   detail = s.replace(/_/g, ' ') + (r.proceeds != null ? ` — $${r.proceeds.toFixed(0)}` : '')
+                } else if (s === 'skipped_insufficient_cash') {
+                  emoji = '⏭️'
+                  detail = 'skipped — not enough cash to secure'
+                    + (r.required_cash != null ? ` (needs $${r.required_cash.toLocaleString()})` : '')
+                } else if (s === 'failed_funds') {
+                  emoji = '❌'; detail = 'insufficient cash to secure'
                 } else if (s.startsWith('skipped')) {
                   emoji = '⚠️'
                 }
