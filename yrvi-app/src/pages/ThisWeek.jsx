@@ -239,6 +239,12 @@ export default function ThisWeek() {
                 } else if (s.startsWith('sold_')) {
                   emoji = '💰'
                   detail = s.replace(/_/g, ' ') + (r.proceeds != null ? ` — $${r.proceeds.toFixed(0)}` : '')
+                } else if (s === 'skipped_insufficient_cash') {
+                  emoji = '⏭️'
+                  detail = 'skipped — not enough cash to secure'
+                    + (r.required_cash != null ? ` (needs $${r.required_cash.toLocaleString()})` : '')
+                } else if (s === 'failed_funds') {
+                  emoji = '❌'; detail = 'insufficient cash to secure'
                 } else if (s.startsWith('skipped')) {
                   emoji = '⚠️'
                 }
