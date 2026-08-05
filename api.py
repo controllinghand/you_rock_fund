@@ -617,29 +617,34 @@ _GATEWAY_JTS_INI = "/home/ibgateway/Jts/jts.ini"
 
 
 def _clear_gateway_autorestart_state() -> bool:
-    """Delete IB Gateway's saved auto-restart session token so the NEXT start does a
-    fresh credentialed login instead of trying to restore the saved token.
+    """Clear IB Gateway's "restore saved session" flag so the NEXT start does a fresh
+    credentialed login instead of trying to restore the saved token.
 
     After IBKR's weekly token reset (Sun 01:00 ET) the saved session token is dead.
-    On a plain `docker restart`, IB Gateway sees `[Logon] Restart=OK` in jts.ini plus
-    the encrypted token blob (`<userdir>/ibg.tmp`) and enters "auto-restart mode:
-    restoring session token" — restoring the EXPIRED token, which the server rejects
-    ("security tokens … have expired … please manually enter your username and
-    password"), parking the gateway on the login dialog indefinitely (the JVM stays up
-    logging `instance of control is not created yet`). Every subsequent plain restart
-    restores the same dead token and re-parks. Removing the restore flag + token blob
-    forces a cold login (username/password from IBC config → a fresh valid token).
-    Root-caused and proven on yrvip 2026-07-28.
+    On a plain `docker restart`, IB Gateway sees `[Logon] Restart=OK` in jts.ini and
+    enters "auto-restart mode: restoring session token" — restoring the EXPIRED token,
+    which the server rejects ("security tokens … have expired … please manually enter
+    your username and password"), parking the gateway on the login dialog indefinitely
+    (the JVM stays up logging `instance of control is not created yet`). Every subsequent
+    plain restart restores the same dead token and re-parks. Removing `Restart=OK` takes
+    the gateway out of restore-mode, so it does a normal cold login (username/password
+    from IBC config → a fresh valid token). Root-caused and proven on yrvip 2026-07-28.
+
+    Note: this deliberately does NOT delete the encrypted token blob `<userdir>/ibg.tmp`.
+    `Restart=OK` is the restore trigger; with it gone the gateway never consults the
+    token, so the blob is harmless. An earlier version also `find … -name ibg.tmp
+    -delete`d it, which was unnecessary — and deleting IB Gateway's own encrypted state
+    files is exactly the kind of thing that risks a "trouble loading settings" corruption
+    later, so we don't touch it.
 
     Best-effort: returns True if the docker exec ran (the container is up when parked
-    on the dialog). The gateway rewrites these on its next real auto-restart, so this
-    only affects the immediately-following start.
+    on the dialog). The gateway rewrites `Restart=OK` on its next real auto-restart, so
+    this only affects the immediately-following start.
     """
     try:
         result = subprocess.run(
             ["docker", "exec", "ib_gateway", "sh", "-c",
              f"sed -i '/^Restart=OK/d' {_GATEWAY_JTS_INI} 2>/dev/null; "
-             f"find /home/ibgateway/Jts -maxdepth 2 -name ibg.tmp -delete 2>/dev/null; "
              f"echo cleared"],
             capture_output=True, text=True, timeout=20,
         )
@@ -1241,10 +1246,53 @@ def _run_watchdog() -> None:
             # frozen or crash-looping watchdog stops updating this and the scheduler's
             # dead-man's switch fires.
             _write_watchdog_heartbeat()
+            interval, _ = _watchdog_cadence(datetime.now(PST))
         except Exception as e:
             print(f"[api/watchdog] Unhandled error: {e}")
-        interval, _ = _watchdog_cadence(datetime.now(PST))
+            interval = WATCHDOG_INTERVAL
         time.sleep(interval)
+
+
+_WATCHDOG_SELF_HEAL_STALE_MIN = 20  # a bit past the scheduler's 15-min dead-man's-switch
+                                     # threshold, so its page fires first and this is the
+                                     # backstop.
+
+
+def _run_watchdog_selfheal_monitor() -> None:
+    """Second daemon thread: if the watchdog heartbeat goes stale, restart this process.
+
+    2026-08-04: the watchdog thread went silent for 15+ hours — no exception was ever
+    logged, so it either died on something not caught by `except Exception` (e.g. a
+    BaseException like asyncio.CancelledError) or hung forever inside a blocking call.
+    Either way, nothing inside the same dead thread can recover it. The scheduler's
+    dead-man's switch (check_api_watchdog_heartbeat) already detects this and pages
+    Discord, but only ever advises a manual reboot — it never acts. This closes that
+    gap: `restart: unless-stopped` on the api service gives us a fresh process with
+    fresh threads, so exiting here is the actual fix, not just the alert.
+    """
+    time.sleep(600)  # let the watchdog get through several real cycles first
+    while True:
+        try:
+            age_min = None
+            if WATCHDOG_HEARTBEAT_FILE.exists():
+                ts = datetime.fromisoformat(
+                    json.loads(WATCHDOG_HEARTBEAT_FILE.read_text())["timestamp"])
+                age_min = (datetime.now(PST) - ts).total_seconds() / 60
+            if age_min is None or age_min >= _WATCHDOG_SELF_HEAL_STALE_MIN:
+                print(f"[api/watchdog-selfheal] heartbeat "
+                      f"{'missing' if age_min is None else f'stale {int(age_min)} min'} — "
+                      f"restarting the api process to recover the watchdog thread")
+                try:
+                    _send_discord_alert(
+                        "🔁 **YRVI** Gateway watchdog stopped checking in — "
+                        "restarting the api process to recover it (self-heal, no action needed)."
+                    )
+                except Exception:
+                    pass
+                os._exit(1)  # let `restart: unless-stopped` do the recovery
+        except Exception as e:
+            print(f"[api/watchdog-selfheal] check failed: {e}")
+        time.sleep(120)
 
 
 _LOG_RELEVANT_KEYWORDS = (
@@ -1627,6 +1675,9 @@ async def _startup() -> None:
     t = threading.Thread(target=_run_watchdog, daemon=True, name="yrvi-watchdog")
     t.start()
     print("[api] Health watchdog started")
+    threading.Thread(target=_run_watchdog_selfheal_monitor, daemon=True,
+                     name="yrvi-watchdog-selfheal").start()
+    print("[api] Watchdog self-heal monitor started")
     if CONTAINERIZED:
         t2 = threading.Thread(target=_run_gateway_log_monitor, daemon=True, name="yrvi-gateway-log-monitor")
         t2.start()

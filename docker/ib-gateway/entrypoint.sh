@@ -244,6 +244,65 @@ self_heal_jre_pointer() {
     return 0
 }
 
+# Self-heal settings a NEW TWS minor version cannot load.
+#
+# IB Gateway's settings (ibg.xml, an encrypted IBGZENC blob, plus its ibg.<Day>.xml
+# daily backups) are written in a version-specific format. When an upgrade adopts a new
+# TWS *minor* version (the image is FROM ...ib-gateway:latest and the build runs --pull),
+# the new binary CANNOT load the settings the previous minor wrote. Instead of failing
+# quietly it parks the gateway on a modal IBC has no handler for —
+#   "We are having trouble loading your settings … recover them from the backup below?"
+# — which nags on every start (if the rest is fine) or hangs the gateway entirely (if the
+# on-disk settings are also stale/corrupt). Root-caused on yrvip 2026-08-05: a 10.48 → 10.49
+# bump made the dialog appear on EVERY start; moving the old-format settings aside let
+# 10.49 start fresh and connect with no dialog. IB Gateway starting with NO settings just
+# generates defaults silently — the dialog only fires on a *present but unloadable* file.
+#
+# Fix: record the last-run TWS major.minor in the data volume. On a change — or on the
+# first run under this self-heal, since we can't tell whether the settings on disk match
+# the running binary — archive ibg.xml + its .xml backups (preserved, never deleted)
+# BEFORE the gateway launches, so the new version regenerates clean settings. The API
+# config it needs (ApiOnly, ports, TrustedIPs, ApiOrderPrecautionsIgnored, ReadOnlyApi) is
+# reapplied from jts.ini by this entrypoint every start, so only UI preferences reset.
+# Compared at major.minor (10.49) so routine patch updates (10.49.1c → 10.49.1d) never
+# reset settings — the granularity the settings format actually changes on.
+self_heal_settings_on_version_change() {
+    data_dir="${YRVI_DATA_DIR:-/data}"
+    marker="$data_dir/gw_tws_settings_version"
+    vrsn="${TWS_MAJOR_VRSN:-}"
+    [ -z "$vrsn" ] && return 0
+    cur=$(printf '%s' "$vrsn" | cut -d. -f1,2)   # 10.49.1c -> 10.49
+
+    last=""
+    [ -f "$marker" ] && last=$(cut -d. -f1,2 < "$marker" 2>/dev/null)
+
+    # Same major.minor already recorded → settings are format-compatible, nothing to do.
+    if [ -n "$last" ] && [ "$last" = "$cur" ]; then
+        return 0
+    fi
+
+    ts=$(date +%s)
+    moved=0
+    for udir in /home/ibgateway/Jts/*/; do
+        [ -d "$udir" ] || continue
+        found=0
+        for f in "$udir"ibg.xml "$udir"ibg.*.xml; do [ -f "$f" ] && found=1; done
+        [ "$found" = "1" ] || continue   # not a settings dir (or fresh install → nothing to move)
+        bak="${udir}yrvi_settings_pre_${cur}_${ts}"
+        mkdir -p "$bak"
+        for f in "$udir"ibg.xml "$udir"ibg.*.xml; do
+            [ -f "$f" ] && mv "$f" "$bak"/ 2>/dev/null && moved=1
+        done
+        echo "yrvi-gw-entrypoint: TWS settings ${last:-<none>} -> $cur — archived old settings from $udir to $bak"
+    done
+    printf '%s' "$cur" > "$marker" 2>/dev/null || true
+
+    if [ "$moved" = "1" ]; then
+        send_discord_alert "🔄 YRVI: IB Gateway is now on TWS $cur${last:+ (was $last)}. The previous version's settings can't be read by the new one — it would otherwise park on a 'recover settings?' dialog — so they were archived and the gateway is starting fresh. API config is reapplied automatically; only UI preferences reset."
+    fi
+    return 0
+}
+
 # Keep x11vnc alive so the built-in View Gateway viewer can reach the display.
 #
 # The image starts x11vnc exactly once (run.sh start_vnc), immediately after
@@ -336,6 +395,10 @@ self_heal_tws_version
 # Repoint the JRE if this version shipped without a valid pref_jre.cfg (otherwise IBC
 # exits with "Can't find suitable Java installation" — what broke the 10.48.1c upgrade).
 self_heal_jre_pointer
+
+# Archive settings a new TWS minor can't load, so the gateway regenerates them fresh
+# instead of parking on the unrecoverable "recover settings?" dialog (yrvip 2026-08-05).
+self_heal_settings_on_version_change
 
 # Allow the YRVI API to override AUTO_RESTART_TIME via a file on the shared volume
 # without requiring a .env.compose edit + full stack restart.
