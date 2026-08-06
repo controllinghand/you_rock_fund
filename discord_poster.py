@@ -554,6 +554,13 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
                     f"📤 **{ticker}** sold (no 0.20-delta CC available)  "
                     f"{sign}${pnl_val:,.0f} P&L"
                 )
+            elif action == "sold_csp_only":
+                pnl_val = a.get("realized_pnl", 0)
+                sign    = "+" if pnl_val >= 0 else ""
+                activity_lines.append(
+                    f"🎯 **{ticker}** sold (CSP-only mode)  "
+                    f"{sign}${pnl_val:,.0f} P&L"
+                )
             elif action == "cc_failed":
                 activity_lines.append(f"⚠️ **{ticker}** CC order failed — no CC this week")
         if activity_lines:
@@ -659,6 +666,7 @@ def post_emergency_share_sale(result: dict):
         "dropped_screener":   "Dropped from screener",
         "earnings_this_week": "Earnings this week",
         "no_viable_cc":       "No viable CC (delta < 0.20)",
+        "csp_only_mode":      "CSP-only mode (no covered calls)",
     }
     reason_str = reason_labels.get(reason, reason)
 
@@ -668,12 +676,20 @@ def post_emergency_share_sale(result: dict):
     else:
         pnl_str = "N/A"
 
+    # A CSP-only liquidation is the mode working as designed — it happens to every
+    # assignment, every week. Firing the triple-siren EMERGENCY banner for routine
+    # behavior is alarm fatigue, so this one reason gets a calm variant. Everything
+    # else here is genuinely exceptional and keeps the loud treatment.
+    routine = reason == "csp_only_mode"
+
     _post({
-        "content": f"🚨🚨🚨 **EMERGENCY SHARE SALE — {ticker}** 🚨🚨🚨",
+        "content": (f"🎯 **Shares sold (CSP-only mode) — {ticker}**" if routine
+                    else f"🚨🚨🚨 **EMERGENCY SHARE SALE — {ticker}** 🚨🚨🚨"),
         "embeds": [{
-            "title":       f"🚨🚨🚨 EMERGENCY SHARE SALE: {ticker} — {reason_str}",
+            "title":       (f"🎯 Shares Sold: {ticker} — {reason_str}" if routine
+                            else f"🚨🚨🚨 EMERGENCY SHARE SALE: {ticker} — {reason_str}"),
             "description": f"**{shares:,} shares of {ticker}** sold at market",
-            "color":       COLOR_FIRE,
+            "color":       COLOR_BLUE if routine else COLOR_FIRE,
             "fields": [
                 {"name": "Shares",       "value": f"{shares:,}",         "inline": True},
                 {"name": "Fill Price",   "value": f"${fill_price:.2f}",  "inline": True},
