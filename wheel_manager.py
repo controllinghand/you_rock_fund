@@ -998,6 +998,17 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     # holding. Opt in to force-selling (the old behavior) via this setting.
     sell_when_cc_below        = _s.get("wheel_sell_when_cc_below_assigned", False)
     allow_cc_below_assigned   = not sell_when_cc_below
+    # CSP-ONLY MODE: never enter the covered-call half of the wheel. Any assigned
+    # shares are liquidated at market on Monday and the proceeds roll straight into
+    # the same morning's CSP budget via freed_capital. Unconditional — unlike the
+    # stop-loss / below-cost toggles it does not care about P&L or the screener.
+    # Shares already covered by a live short call are left alone (selling them would
+    # leave a naked call, and we never buy back CCs), so the mode drains as those
+    # CCs expire or get called away rather than forcing an exception to that rule.
+    csp_only_mode             = _s.get("csp_only_mode", False)
+    if csp_only_mode:
+        log.info("  🎯 CSP-ONLY MODE is ON — assigned shares are sold at market, "
+                 "no covered calls will be written")
     retention_market_cap_min  = _s.get("wheel_retention_market_cap_min", 5_000_000_000)
     stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", True)
     stop_loss_pct             = _s.get("stop_loss_pct", 0.10)
@@ -1329,6 +1340,58 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
 
             if shares <= 0:
                 log.info(f"  ⏭️  {ticker}: 0 shares — skipping")
+                continue
+
+            # ── Step 0b: CSP-only mode — liquidate, never wheel ──
+            # Runs BEFORE the screener / stop-loss / earnings steps because it is
+            # unconditional: in CSP-only mode we exit every uncovered holding
+            # regardless of why it is held or whether it is up or down. Placed AFTER
+            # the recovery guard above, so a holding already carrying a live short
+            # call is never sold out from under its CC.
+            #
+            # The ticker is deliberately NOT added to skip_tickers: the name is
+            # usually still a valid screener candidate, and the point of the mode is
+            # for the proceeds to be redeployed as a fresh CSP in the same run.
+            if csp_only_mode:
+                log.info(f"  🎯 {ticker}: CSP-only mode — selling {shares} shares at market")
+                _progress(ticker=ticker, stage="CSP-only mode — selling")
+                # known_price: the stop-loss price fetch has not run at this point, so
+                # a preview has no live price in scope. Pass the holding's last-known
+                # price so the dry-run branch of _sell_stock_market doesn't fall back
+                # to a second reqMktData that returns None on closed-market data —
+                # that silently drops the holding from the Monday plan.
+                result = _sell_stock_market(ib, ticker, shares, "csp_only_mode",
+                                            assigned_strike=assigned_strike,
+                                            dry_run=orders_dry_run,
+                                            known_price=h.get("current_price"))
+                if result["status"] == "filled":
+                    proceeds = result["proceeds"]
+                    realized = round(proceeds - (assigned_strike * shares), 2)
+                    freed_capital   += proceeds
+                    shares_sold_pnl += realized
+                    h["shares"]    = 0
+                    # Position closed — clear tranches so a later re-assignment
+                    # starts a fresh basis (see _ensure_tranches).
+                    h["tranches"]  = []
+                    h["cc_status"] = "sold_csp_only"
+                    wheel_activity.append({
+                        "ticker":       ticker,
+                        "action":       "sold_csp_only",
+                        "shares":       shares,
+                        "fill_price":   result["fill_price"],
+                        "proceeds":     proceeds,
+                        "realized_pnl": realized,
+                    })
+                    log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
+                    _progress(ticker=ticker, stage="sold (CSP-only mode)",
+                              result={"ticker": ticker, "status": "sold_csp_only",
+                                      "shares": shares, "proceeds": proceeds})
+                else:
+                    log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
+                                           "reason": "csp_only_mode", "shares": shares})
+                    _progress(ticker=ticker, stage="sale FAILED",
+                              result={"ticker": ticker, "status": "sell_failed"})
                 continue
 
             # ── Step 1: Screener check ────────────────────────
@@ -1726,6 +1789,9 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
              f"{[a['ticker'] for a in earnings_exits] or 'none'}")
     log.info(f"   No-delta exits:   "
              f"{[a['ticker'] for a in exits if a['action'] == 'sold_no_viable_cc'] or 'none'}")
+    if csp_only_mode:
+        log.info(f"   CSP-only exits:   "
+                 f"{[a['ticker'] for a in exits if a['action'] == 'sold_csp_only'] or 'none'}")
     log.info(f"   CCs opened:       {len(ccs)}  {cc_summ or 'none'}")
     log.info(f"   Freed capital:    ${freed_capital:,.0f}")
     log.info(f"   Shares sold P&L:  ${shares_sold_pnl:,.0f}")

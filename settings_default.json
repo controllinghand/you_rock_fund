@@ -9,6 +9,7 @@
   "wheel_cc_ignore_earnings_filter": true,
   "wheel_retention_market_cap_min": 5000000000,
   "wheel_sell_when_cc_below_assigned": false,
+  "csp_only_mode": false,
   "wheel_cover_all_shares": true,
   "wheel_allow_add_to_position": false,
   "wheel_stop_loss_enabled": true,

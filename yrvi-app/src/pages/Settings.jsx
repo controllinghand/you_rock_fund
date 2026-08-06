@@ -555,7 +555,8 @@ export default function SettingsPage() {
     max_position_size: 70000, max_delta: 0.21, min_buffer_pct: 0.05,
     earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
     wheel_retention_market_cap_min: 5000000000,
-    wheel_sell_when_cc_below_assigned: false, wheel_cover_all_shares: true,
+    wheel_sell_when_cc_below_assigned: false, csp_only_mode: false,
+    wheel_cover_all_shares: true,
     wheel_allow_add_to_position: false,
     wheel_stop_loss_enabled: true, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
@@ -782,6 +783,26 @@ export default function SettingsPage() {
             onChange={v => set('wheel_retention_market_cap_min', v)}
             description="Keep wheeling a held name down to this market cap, even if below the 10B entry floor — sell only if it falls further"
           />
+        </div>
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+          <Toggle
+            label="CSP Only (No Covered Calls)"
+            sub="Default OFF: after an assignment the fund wheels — it writes covered calls on the shares. Turn ON to run cash-secured puts only: assigned shares are sold at market on Monday and the proceeds go straight back into that morning's CSP budget."
+            checked={!!settings.csp_only_mode}
+            onChange={v => set('csp_only_mode', v)}
+          />
+          {settings.csp_only_mode && (
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
+              ⏱ Shares are sold at the weekly wheel check
+              {wheelCheckTime(settings.execution_time)
+                ? <span className="font-medium text-gray-600 dark:text-gray-400"> ({wheelCheckTime(settings.execution_time)})</span>
+                : null}, not the moment they're assigned — an assignment lands after
+              Friday's close, so the shares are held over the weekend and sold at
+              Monday's open. Holdings that already have a covered call open are left
+              alone until it expires or is called away; the app never buys back a
+              covered call. The covered-call settings below are unused while this is on.
+            </div>
+          )}
         </div>
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <Toggle

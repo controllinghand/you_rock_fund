@@ -37,6 +37,7 @@ const WHEEL_ACTION = {
   sold_stop_loss:          { label: 'Sold (stop loss)',  cls: 'text-red-400' },
   sold_earnings_this_week: { label: 'Sold (earnings)',   cls: 'text-red-400' },
   sold_no_viable_cc:       { label: 'Sold (no CC)',      cls: 'text-red-400' },
+  sold_csp_only:           { label: 'Sold (CSP only)',   cls: 'text-gray-500 dark:text-gray-400' },
   skipped_excluded:        { label: 'Skipped (excluded)', cls: 'text-gray-500 dark:text-gray-400' },
 }
 

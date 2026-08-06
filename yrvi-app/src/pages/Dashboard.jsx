@@ -34,6 +34,7 @@ const RESULT_LABELS = {
   sold_dropped_screener: 'sold (off screener)',
   sold_stop_loss:        'sold (stop loss)',
   sold_no_viable_cc:     'sold (no CC)',
+  sold_csp_only:         'sold (CSP only)',
   sell_failed:           'sell FAILED',
   failed_market_data:    'no market data',
   failed_funds:          'insufficient cash',

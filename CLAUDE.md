@@ -93,7 +93,7 @@ Each module connects with a distinct client ID to allow concurrent connections:
       "cc_contracts":       8,             // contracts actually covered (shares open under a short call)
       "cc_contracts_needed": 8,            // shares // 100; when cc_contracts < needed, cc_status = "partial"
       "weeks_held":         1,
-      "cc_status":          "open",  // pending|open|partial|failed|sold_dropped_screener|sold_stop_loss|sold_earnings_this_week|sold_no_viable_cc
+      "cc_status":          "open",  // pending|open|partial|failed|sold_dropped_screener|sold_stop_loss|sold_earnings_this_week|sold_no_viable_cc|sold_csp_only
       "current_price":      62.50,
       "last_checked":       "ISO timestamp"
     }
@@ -147,6 +147,10 @@ hand-off, so the pipeline can never start before the wheel check finishes).
 ```
 Step A — wheel_check (run_wheel_check):
   → call get_all_candidates() to get screener ticker set
+  → Step 0b: if csp_only_mode → sell every UNCOVERED holding at market, skip all remaining
+             steps (freed_capital += proceeds). Holdings with a live CC are left alone
+             (never buy back a CC) — the mode drains as those expire / get called away.
+             Ticker is NOT added to skip_tickers, so it can be re-entered as a CSP same run.
   → Step 1: if ticker not in screener (down to wheel-retention mkt-cap floor) → sell at market (freed_capital += proceeds)
   → Step 2: earnings — KEPT through earnings by default (wheel_cc_ignore_earnings_filter=true);
             only sells pre-earnings if that toggle is off
@@ -186,8 +190,15 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Never buy back covered calls
 - Excluded tickers (per-holding Exclude checkbox + Settings "Excluded Tickers") are NEVER traded, adopted, or sold:
   no CSP, no CC, no wheel adoption — enforced in the screener, both adoption paths, the per-holding loop, and risk monitor
-- Sell shares Monday 9:55AM if: ticker dropped from screener (below the wheel-retention mkt-cap floor),
+- Sell shares Monday 9:55AM if: csp_only_mode=true (unconditional, uncovered holdings only),
+  OR ticker dropped from screener (below the wheel-retention mkt-cap floor),
   OR stop-loss tripped (if enabled), OR (underwater with no CC ≥ cost AND wheel_sell_when_cc_below_assigned=true)
+- CSP-ONLY MODE (csp_only_mode, default OFF) turns off the wheel's second half entirely: assigned shares
+  are liquidated at the Monday wheel check and the proceeds redeploy as CSPs in the SAME run via
+  freed_capital. It is not an instant sale — assignment lands after Friday's close, so shares are held
+  over the weekend. Enforced only in run_wheel_check's per-holding loop (detect_assignments still adopts
+  the holding so it stays visible/reconcilable); it runs AFTER the open-CC recovery guard so covered
+  shares are never sold out from under a live call
 - DEFAULT for underwater holdings: write a ~0.20-delta CC BELOW cost (keep shares + premium) — do NOT force-sell
 - DEFAULT through earnings: keep the holding and write the CC (wheel_cc_ignore_earnings_filter=true);
   earnings filter still applies to NEW CSP entries via the Earnings Window setting
