@@ -114,6 +114,8 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_liquidity":     "⚠️",
         "skipped_insufficient_cash": "⏭️",
         "skipped_contract_size": "⚠️",
+        "skipped_delta":         "⏭️",
+        "failed_no_connection":  "🔌",
         "unfilled":              "❌",
     }
     SKIP_LABEL = {
@@ -125,6 +127,10 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_liquidity":     "skipped — spread too wide",
         "skipped_insufficient_cash": "skipped — not enough cash to secure",
         "skipped_contract_size": "skipped — contract too large",
+        "skipped_delta":         "skipped — no strike within delta range",
+        # Infrastructure, not strategy. Spelled out so this can never be read as
+        # "the delta was wrong" the way a bare skipped_delta was on 2026-08-17.
+        "failed_no_connection":  "FAILED — gateway connection lost mid-run (not a strategy skip)",
         "unfilled":              "unfilled",
     }
 
@@ -239,6 +245,16 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
             )
     if "skipped_contract_size" in statuses:
         footnotes.append(f"* Contract too large = single contract exceeds ${MAX_PER_POSITION:,.0f} max position size")
+    if "skipped_delta" in statuses:
+        footnotes.append(
+            "* No strike within delta range = every strike scanned sat outside the "
+            "delta band at execution time (a strategy decision, not a connection fault)"
+        )
+    if "failed_no_connection" in statuses:
+        footnotes.append(
+            "* ⚠️ Gateway connection lost = the IBKR link died mid-run. These names were "
+            "NOT evaluated — orders may still be working at IBKR. Verify positions."
+        )
     footnote_block = "\n" + "\n".join(footnotes) if footnotes else ""
 
     # Discord field value cap is 1024 chars

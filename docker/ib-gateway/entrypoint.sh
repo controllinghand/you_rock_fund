@@ -266,24 +266,69 @@ self_heal_jre_pointer() {
 # reapplied from jts.ini by this entrypoint every start, so only UI preferences reset.
 # Compared at major.minor (10.49) so routine patch updates (10.49.1c → 10.49.1d) never
 # reset settings — the granularity the settings format actually changes on.
+# Persist the TWS major.minor marker. Deliberately NOT silenced: the previous
+# `> "$marker" 2>/dev/null || true` turned a permission failure into a no-op that
+# re-ran the archive on every restart for six days without a single visible
+# symptom. If this can't be written, say so in a way someone will actually see —
+# a self-heal that can't record that it ran is not a self-heal.
+record_tws_settings_version() {
+    _marker="$1"; _cur="$2"
+    if printf '%s' "$_cur" > "$_marker"; then
+        echo "yrvi-gw-entrypoint: recorded TWS settings version $_cur -> $_marker"
+        return 0
+    fi
+    echo "yrvi-gw-entrypoint: ERROR could not write $_marker — the TWS settings" \
+         "self-heal cannot record that it ran and WILL re-archive settings on" \
+         "every restart. Check ownership of the settings volume (this container" \
+         "runs as uid $(id -u))."
+    return 1
+}
+
 self_heal_settings_on_version_change() {
     data_dir="${YRVI_DATA_DIR:-/data}"
-    marker="$data_dir/gw_tws_settings_version"
+    # The marker lives beside the settings it describes, in the gateway's OWN
+    # volume (ib_gateway_settings), NOT in /data.
+    #
+    # It used to live at $data_dir/gw_tws_settings_version — but /data is the
+    # shared yrvi_data volume, created root-owned by the api/scheduler, while
+    # THIS container runs as uid 1000 (ibgateway). Every write failed with
+    # "Permission denied", `2>/dev/null || true` swallowed it, and the version
+    # therefore never got recorded: the archive branch re-ran on EVERY restart.
+    # yrvip accumulated 18 yrvi_settings_pre_10.49_* dirs in six days (2/day) and
+    # the v5.2.93 self-heal never once actually healed. This is also the first
+    # thing the gateway ever needed to WRITE to /data — gw_trading_mode and
+    # gw_auto_restart_time are written by the api (root) and only read here,
+    # which is why the permission gap went unnoticed.
+    #
+    # Co-locating with the settings is also more correct than /data: wipe the
+    # settings volume and the marker goes with it, which is exactly when the
+    # version needs re-detecting.
+    jts_dir="${YRVI_JTS_DIR:-/home/ibgateway/Jts}"   # overridable so this is testable
+    marker="$jts_dir/.yrvi_tws_settings_version"
+    legacy_marker="$data_dir/gw_tws_settings_version"
     vrsn="${TWS_MAJOR_VRSN:-}"
     [ -z "$vrsn" ] && return 0
     cur=$(printf '%s' "$vrsn" | cut -d. -f1,2)   # 10.49.1c -> 10.49
 
     last=""
-    [ -f "$marker" ] && last=$(cut -d. -f1,2 < "$marker" 2>/dev/null)
+    if [ -f "$marker" ]; then
+        last=$(cut -d. -f1,2 < "$marker" 2>/dev/null)
+    elif [ -f "$legacy_marker" ]; then
+        # Boxes whose /data happened to be writable wrote the old marker; honour
+        # it so upgrading doesn't trigger one spurious archive pass.
+        last=$(cut -d. -f1,2 < "$legacy_marker" 2>/dev/null)
+    fi
 
-    # Same major.minor already recorded → settings are format-compatible, nothing to do.
+    # Same major.minor already recorded → settings are format-compatible, nothing
+    # to do beyond completing the migration to the new marker location.
     if [ -n "$last" ] && [ "$last" = "$cur" ]; then
+        [ -f "$marker" ] || record_tws_settings_version "$marker" "$cur"
         return 0
     fi
 
     ts=$(date +%s)
     moved=0
-    for udir in /home/ibgateway/Jts/*/; do
+    for udir in "$jts_dir"/*/; do
         [ -d "$udir" ] || continue
         found=0
         for f in "$udir"ibg.xml "$udir"ibg.*.xml; do [ -f "$f" ] && found=1; done
@@ -295,7 +340,7 @@ self_heal_settings_on_version_change() {
         done
         echo "yrvi-gw-entrypoint: TWS settings ${last:-<none>} -> $cur — archived old settings from $udir to $bak"
     done
-    printf '%s' "$cur" > "$marker" 2>/dev/null || true
+    record_tws_settings_version "$marker" "$cur"
 
     if [ "$moved" = "1" ]; then
         send_discord_alert "🔄 YRVI: IB Gateway is now on TWS $cur${last:+ (was $last)}. The previous version's settings can't be read by the new one — it would otherwise park on a 'recover settings?' dialog — so they were archived and the gateway is starting fresh. API config is reapplied automatically; only UI preferences reset."
