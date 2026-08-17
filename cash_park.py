@@ -324,6 +324,24 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                 reason = (f"remainder ${remainder:,.0f} capped by settled cash ${cash_cap:,.0f}"
                           + ("" if all_filled else f" / 10% net-liq ${netliq_cap:,.0f} (partial run)"))
             log.info(f"  💤 Nothing to park (${buy_amount:,.2f}) — {reason}")
+            # Say so in Discord, not just on the dashboard. A silent skip is
+            # indistinguishable from the sweep never having run, and the
+            # unfilled-slot case in particular is worth explaining: after
+            # v5.2.98 a slot can go unfilled DELIBERATELY (an adjusted strike
+            # that no longer fits the budget), which is a healthy outcome rather
+            # than a broken run — but either way we would rather leave the cash
+            # unparked than park it and risk margin.
+            slot_note = ""
+            if not all_filled:
+                unfilled = max(0, target - fills)
+                slot_note = (
+                    f"\n\n{unfilled} of {target} slot(s) unfilled, so the sweep was held to the "
+                    f"10% net-liq cap (${netliq_cap:,.0f}) instead of the full remainder. "
+                    f"An unfilled slot is either a deliberate budget skip or a run that went "
+                    f"wrong — parking idle cash would mask both, so nothing was parked."
+                )
+            _discord_alert(
+                f"🅿️ **YRVI** Cash sweep — **nothing parked** this week: {reason}.{slot_note}")
             return _finish({"status": "skipped_no_cash", **caps,
                             "message": f"No cash swept — {reason}"})
 
@@ -412,8 +430,16 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         }
         _save_state(state)
         log.info(f"  ✅ Parked ${cost:,.2f}: {shares} {instrument} @ ${fill:.2f}")
+        # When a partial run held the buy down to the 10% net-liq cap, say so —
+        # otherwise a deliberately small park looks like the whole remainder.
+        cap_note = ""
+        if not all_filled and netliq_cap < min(base, cash_cap):
+            cap_note = (f"\nHeld to the 10% net-liq cap (${netliq_cap:,.0f}) because "
+                        f"{max(0, target - fills)} of {target} slot(s) went unfilled — "
+                        f"the remainder was ${base:,.0f}.")
         _discord_alert(f"🅿️ **YRVI** Cash sweep — parked **${cost:,.0f}** in "
-                       f"**{instrument}** ({shares} sh @ ${fill:.2f}). Sells end of week.")
+                       f"**{instrument}** ({shares} sh @ ${fill:.2f}). Sells end of week."
+                       f"{cap_note}")
         return _finish({"status": "bought", **caps, "shares": shares,
                         "buy_price": fill, "cost_basis": cost,
                         "message": f"Parked ${cost:,.0f} in {instrument} ({shares} sh @ ${fill:.2f})"})
