@@ -127,14 +127,19 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
             capital  = settings.get("fund_budget", TOTAL_FUND_BUDGET)
             goal_pct = settings.get("goal_pct", 0.24)
             nl       = net_liq
-            if nl is None:
-                try:
-                    _, nl = _fetch_account_summary(capital)
-                except Exception:
-                    nl = None
+            deployed = None
+            # Always take the deployed snapshot, even when net_liq was passed in:
+            # it must reflect the broker AFTER this run's fills, which is exactly
+            # the number that would have caught the 2026-08-17 margin breach.
+            try:
+                _, fetched_nl, deployed = _fetch_account_and_deployed(capital)
+                if nl is None:
+                    nl = fetched_nl
+            except Exception:
+                pass
             post_weekly_results(_load_state(), fund_budget=fund_budget,
                                 capital=capital, goal_pct=goal_pct, net_liq=nl,
-                                manual=manual)
+                                manual=manual, deployed=deployed)
     except Exception as e:
         log.warning(f"  ⚠️  Discord weekly results post failed: {e}")
 
@@ -231,31 +236,59 @@ def _reconcile_before_run(dry_run: bool = False) -> dict:
         return {"error": str(e)}
 
 
-def _fetch_account_summary(fallback: float) -> tuple[float, float]:
+def _fetch_account_and_deployed(fallback: float) -> tuple[float, float, dict | None]:
+    """Account summary + committed-capital snapshot in ONE read-only connection.
+
+    Returns (effective_budget, net_liq, deployed). `deployed` is the capital.py
+    dict built from LIVE IBKR positions — never state.json, which on 2026-08-17
+    was missing a filled CSP and would have reported the account comfortably
+    inside its cash while it was ~$25k onto margin. None if positions couldn't
+    be read; the budget half still works, since it is the older contract.
     """
-    Fetch IBKR BuyingPower and NetLiquidation (read-only). Returns
-    (effective_budget, net_liq); falls back to (fallback, fallback) on any error.
-    Mirrors scheduler._fetch_account_summary so live budgeting is identical.
-    """
+    deployed = None
     try:
         from ib_insync import IB
         ib = IB()
         ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, readonly=True)
         summary = ib.accountSummary(ACCOUNT)
-        ib.disconnect()
         by_tag  = {v.tag: float(v.value) for v in summary
-                   if v.tag in ("BuyingPower", "NetLiquidation")}
+                   if v.tag in ("BuyingPower", "NetLiquidation", "TotalCashValue")}
+        try:
+            from capital import compute_deployed, from_ib_positions
+            ib.reqPositions()
+            ib.sleep(2)
+            deployed = compute_deployed(
+                from_ib_positions(ib.positions(ACCOUNT)),
+                cash=by_tag.get("TotalCashValue"),
+                net_liq=by_tag.get("NetLiquidation"),
+            )
+            log.info(f"  📊 Deployed ${deployed['total_deployed']:,.0f} "
+                     f"(CSP ${deployed['csp_collateral']:,.0f} + stock "
+                     f"${deployed['stock_value']:,.0f})"
+                     + (f"  ⚠️ ON MARGIN by ${deployed['cash_shortfall']:,.0f}"
+                        if deployed.get("on_margin") else ""))
+        except Exception as de:
+            log.warning(f"  ⚠️  Could not compute deployed capital: {de}")
+        ib.disconnect()
         bp      = by_tag.get("BuyingPower")
         net_liq = by_tag.get("NetLiquidation")
         if bp and bp > 0 and net_liq and net_liq > 0:
             effective = min(bp, net_liq)
             log.info(f"  💹 Compound mode: net_liq=${net_liq:,.0f}  "
                      f"buying_power=${bp:,.0f}  using=${effective:,.0f}")
-            return effective, net_liq
+            return effective, net_liq, deployed
         log.warning("  ⚠️  Account summary incomplete — using fund budget fallback")
     except Exception as e:
         log.warning(f"  ⚠️  Could not fetch account summary ({e}) — using fund budget fallback")
-    return fallback, fallback
+    return fallback, fallback, deployed
+
+
+def _fetch_account_summary(fallback: float) -> tuple[float, float]:
+    """(effective_budget, net_liq), read-only. Kept at its original two-value
+    signature — several callers here and the mirror in scheduler.py depend on it.
+    Delegates to _fetch_account_and_deployed."""
+    effective, net_liq, _ = _fetch_account_and_deployed(fallback)
+    return effective, net_liq
 
 
 def _compute_effective_budget(compound_enabled: bool, cash_account: bool,
