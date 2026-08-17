@@ -115,6 +115,7 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_insufficient_cash": "⏭️",
         "skipped_contract_size": "⚠️",
         "skipped_delta":         "⏭️",
+        "skipped_budget":        "⏭️",
         "failed_no_connection":  "🔌",
         "cancel_unconfirmed":    "❗",
         "unfilled":              "❌",
@@ -129,6 +130,7 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_insufficient_cash": "skipped — not enough cash to secure",
         "skipped_contract_size": "skipped — contract too large",
         "skipped_delta":         "skipped — no strike within delta range",
+        "skipped_budget":        "skipped — adjusted strike costs more than the remaining budget",
         # Infrastructure, not strategy. Spelled out so this can never be read as
         # "the delta was wrong" the way a bare skipped_delta was on 2026-08-17.
         "failed_no_connection":  "FAILED — gateway connection lost mid-run (not a strategy skip)",
@@ -256,6 +258,12 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         footnotes.append(
             "* ⚠️ Gateway connection lost = the IBKR link died mid-run. These names were "
             "NOT evaluated — orders may still be working at IBKR. Verify positions."
+        )
+    if "skipped_budget" in statuses:
+        footnotes.append(
+            "* Adjusted strike over budget = the stock rose since Saturday, so the strike "
+            "moved up and one contract would cost more collateral than the account has left. "
+            "Skipped rather than deployed onto margin."
         )
     if "cancel_unconfirmed" in statuses:
         footnotes.append(

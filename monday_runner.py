@@ -524,8 +524,12 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 
     # ── Live execution ────────────────────────────────────────
     from trader import execute_positions
+    # Pass the budget the sizer actually planned against, so execution-time strike
+    # adjustments are re-checked against the same ceiling instead of the static
+    # TOTAL_FUND_BUDGET (which on a compounding account is unrelated to net liq).
     results = execute_positions(positions, extra_targets=filtered_targets,
-                                target_fills=target_fills, status_callback=progress_callback)
+                                target_fills=target_fills, status_callback=progress_callback,
+                                budget=effective_budget)
 
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)

@@ -152,7 +152,11 @@ def size_all(targets: list, budget: float = None, num_positions: int = None,
 
     print("\n💼 Position Sizing Summary")
     if COMPOUND_ENABLED and num_csp_slots > 0:
-        print(f"   Fund Budget: ${effective_budget:,.0f}  |  Equal Target: ${equal_target:,.0f}/pos ({num_csp_slots} slots)  |  Max #1: ${MAX_PER_POSITION:,.0f}")
+        # NOT "Max #1: $X" — in compound mode slot #1 is passed no_max=True and
+        # takes the whole remainder by design (best-scoring name, deliberate
+        # concentration). Printing MAX_PER_POSITION here claimed a ceiling on the
+        # one slot that has none, which is exactly backwards.
+        print(f"   Fund Budget: ${effective_budget:,.0f}  |  Equal Target: ${equal_target:,.0f}/pos (#2–{num_csp_slots})  |  #1: uncapped (takes remainder)")
     else:
         print(f"   Fund Budget: ${effective_budget:,.0f}  |  Target: ${TARGET_PER_POSITION:,.0f}/pos (#2–{num})  |  Max #1: ${MAX_PER_POSITION:,.0f}")
     print("=" * 65)
