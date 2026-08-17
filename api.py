@@ -3,7 +3,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
 import socket
 import subprocess
@@ -110,7 +109,8 @@ SECRETS_SERVICE_URL = "http://secrets:8001"
 # Feedback webhook — defaults to the shared You Rock Club feedback channel so every
 # box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
 _FEEDBACK_WEBHOOK_DEFAULT = "https://discord.com/api/webhooks/1506828497757147167/364xR_1wKCz1LPREGwqpE9mmvQkwkC-EiSirRqWua69eCs-rma5Hc4j7RGIwqBas0jyE"
-# clientId 100-999 used at runtime (random per call) — never conflicts with trader(1) wheel(2) risk(3)
+# IBKR client ids: this module owns 6 (shared status poll) and 7 (diag probe) —
+# see IBKR_CLIENT_ID_API_STATUS below and the registry in config.py.
 
 # ── Watchdog ───────────────────────────────────────────────────
 # Tracks how long each subsystem has been in a failed state so we
@@ -355,6 +355,91 @@ def _backfill_trade_log() -> None:
 
 _ibkr_cache: dict = {"data": None, "ts": 0.0}
 IBKR_CACHE_TTL = 30.0
+
+# ── IBKR client ids (registry lives in config.py; defined here because api.py
+# deliberately does not import config) ────────────────────────────────────────
+IBKR_CLIENT_ID_API_STATUS = 6   # dashboard status/positions poll
+IBKR_CLIENT_ID_API_DIAG   = 7   # diagnostics probe (SPY quote)
+
+# One reusable connection, guarded by one lock.
+#
+# This used to open a BRAND-NEW connection with `random.randint(100, 999)` on
+# every cache miss. Root-caused 2026-08-17: IB Gateway keeps per-clientId state
+# for the life of the JVM (the "Client NNN" tabs, each with a log buffer), so a
+# fresh random id every 30s accumulated ~1000 retained registrations over ~10
+# hours, filled the 768MB heap, and put G1 into a death spiral. The JVM stayed
+# alive but stopped accepting sockets — which killed the API port AND the IBC
+# command server, so even the watchdog's soft restart couldn't clear it. YRVIP
+# wedged on that ~10h cycle, twice a day, for weeks.
+#
+# Three things fix it and all three matter:
+#   1. a STABLE client id, so the gateway sees one client instead of hundreds
+#   2. a PERSISTENT connection, so a poll is a request rather than a new session
+#   3. a LOCK with a double-checked cache read, so concurrent endpoints
+#      (/api/status, /api/positions, …) can't stampede past a cache miss and
+#      open several connections at once
+_ibkr_lock = threading.RLock()
+_ibkr_conn: dict = {"ib": None, "loop": None}
+
+
+def _cancel_pnl_singles(ib, acct: str, pnl_reqs: list) -> None:
+    """Best-effort cancel of per-position PnLSingle streams. Harmless if already
+    cancelled; on a persistent connection an uncancelled stream would otherwise
+    stack up on every 30s poll — trading the old client-id leak for a new one."""
+    if ib is None or not acct:
+        return
+    for con_id, _stream in pnl_reqs or []:
+        try:
+            ib.cancelPnLSingle(acct, "", con_id)
+        except Exception:
+            pass
+
+
+def _drop_ibkr_connection() -> None:
+    """Tear down the shared connection so the next call rebuilds it. Call this on
+    ANY error — a half-dead IB object is worse than no object. Caller holds the lock."""
+    ib = _ibkr_conn.get("ib")
+    if ib is not None:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+    _ibkr_conn["ib"] = None
+    _ibkr_conn["loop"] = None
+
+
+def _ibkr_connection(host: str, port: int):
+    """Return a live shared IB connection, building one if needed.
+
+    Caller MUST hold _ibkr_lock: ib_insync is not thread-safe, and the connection
+    is bound to the event loop it was created on. Serializing on the lock and
+    re-installing that loop on the calling thread each time keeps every use
+    single-threaded even though uvicorn dispatches endpoints across a threadpool.
+
+    The gateway gets restarted out from under us (watchdog, nightly auto-restart),
+    so isConnected() is checked every time rather than trusting the cached object.
+    """
+    ib = _ibkr_conn.get("ib")
+    loop = _ibkr_conn.get("loop")
+    if ib is not None and loop is not None:
+        try:
+            if ib.isConnected():
+                asyncio.set_event_loop(loop)
+                return ib
+        except Exception:
+            pass
+        print("[api] shared IBKR connection went stale — reconnecting")
+    _drop_ibkr_connection()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    from ib_insync import IB
+    ib = IB()
+    print(f"[api] IBKR connect → {host}:{port} clientId={IBKR_CLIENT_ID_API_STATUS} (shared)")
+    ib.connect(host, port, clientId=IBKR_CLIENT_ID_API_STATUS, timeout=10, readonly=False)
+    _ibkr_conn["ib"] = ib
+    _ibkr_conn["loop"] = loop
+    return ib
 
 _ACCT_TAGS = (
     "NetLiquidation,SettledCash,UnrealizedPnL,"
@@ -2092,28 +2177,34 @@ _IBKR_EMPTY: dict = {
 }
 
 def _get_ibkr_data(settings: dict) -> dict:
+    # Fast path: a warm cache needs no lock and no IBKR round trip.
     now = time.time()
     if _ibkr_cache["data"] and (now - _ibkr_cache["ts"]) < IBKR_CACHE_TTL:
         return _ibkr_cache["data"]
 
+    with _ibkr_lock:
+        # Double-checked: several endpoints can miss the cache at the same
+        # instant. Without this re-read they all proceed to fetch, which is how
+        # a 30s TTL still produced ~99 connects/hour. Whoever loses the race
+        # here just takes the winner's fresh result.
+        now = time.time()
+        if _ibkr_cache["data"] and (now - _ibkr_cache["ts"]) < IBKR_CACHE_TTL:
+            return _ibkr_cache["data"]
+        return _fetch_ibkr_data(settings, now)
+
+
+def _fetch_ibkr_data(settings: dict, now: float) -> dict:
+    """Populate the IBKR snapshot. Caller MUST hold _ibkr_lock."""
     result      = dict(_IBKR_EMPTY)
     prev        = _ibkr_cache.get("data")  # last snapshot; reused if this fetch blanks
     port        = settings.get("ibkr_port", 4004)
     host        = os.environ.get("IBKR_HOST", "127.0.0.1")
     account_env = settings.get("account") or os.environ.get("ACCOUNT", "")
+    acct        = ""
 
-    # ib_insync's sync API requires an event loop on the calling thread.
+    ib = None
     try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
-    client_id = random.randint(100, 999)
-    print(f"[api] IBKR connect → {host}:{port} clientId={client_id}")
-    from ib_insync import IB
-    ib = IB()
-    try:
-        ib.connect(host, port, clientId=client_id, timeout=10, readonly=False)
+        ib = _ibkr_connection(host, port)
         accts = ib.managedAccounts()
         acct  = account_env or (accts[0] if accts else "")
         print(f"[api] IBKR connected — accounts: {accts}")
@@ -2176,6 +2267,7 @@ def _get_ibkr_data(settings: dict) -> dict:
             result["connected"] = True
 
             # ── Positions via reqPositions (no subscription, no hang)
+            pnl_reqs: list = []   # bound before the try so `finally` can always cancel
             try:
                 ib.reqPositions()
                 ib.sleep(2)
@@ -2192,7 +2284,6 @@ def _get_ibkr_data(settings: dict) -> dict:
                     if not (account_env and pos.account != account_env)
                 ]
                 pnl_lookup: dict = {}
-                pnl_reqs: list = []
                 for pos in acct_positions:
                     try:
                         pnl_reqs.append((pos.contract.conId,
@@ -2215,10 +2306,8 @@ def _get_ibkr_data(settings: dict) -> dict:
                         break
                 for con_id, single in pnl_reqs:
                     pnl_lookup[con_id] = single
-                    try:
-                        ib.cancelPnLSingle(acct, "", con_id)
-                    except Exception:
-                        pass
+                _cancel_pnl_singles(ib, acct, pnl_reqs)
+                pnl_reqs = []
 
                 portfolio = []
                 for pos in acct_positions:
@@ -2283,20 +2372,27 @@ def _get_ibkr_data(settings: dict) -> dict:
                         result["account_summary"]["unrealized_pnl"] = result["unrealized_pnl"]
             except Exception as pe:
                 print(f"[api] Positions fetch failed (account_summary preserved): {pe}")
+            finally:
+                # This except swallows the error and the run continues, so the
+                # connection survives — meaning any PnLSingle stream still open
+                # here would accumulate on every poll. Cancel unconditionally.
+                _cancel_pnl_singles(ib, acct, pnl_reqs)
 
         print(f"[api] net_liq={result['account_value']}  "
               f"unrealized={result['unrealized_pnl']}  "
               f"positions={len(result['portfolio'])}")
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
-        print(f"[api] IBKR connection failed — {msg}")
+        print(f"[api] IBKR fetch failed — {msg}")
         traceback.print_exc()
         result["error"] = msg
-    finally:
-        try:
-            ib.disconnect()
-        except Exception:
-            pass
+        # Never hold on to a connection we just failed on — a half-dead IB object
+        # would fail every subsequent poll the same way. Dropping it also clears
+        # any subscription that leaked before the error. The next poll rebuilds.
+        _drop_ibkr_connection()
+    # NOTE: no disconnect on success — the connection is deliberately persistent
+    # (see _ibkr_connection). Disconnecting here is what created a new client
+    # registration on every poll.
 
     _ibkr_cache["data"] = result
     _ibkr_cache["ts"]   = now
@@ -2582,7 +2678,10 @@ def _build_diag() -> dict:
         stk_q     = None
         connected = False
         try:
-            ib.connect(host, port, clientId=random.randint(810, 839), timeout=10)
+            # Fixed id, not random: every distinct client id is retained by the
+            # gateway for the life of the JVM (see IBKR_CLIENT_ID_API_STATUS).
+            # This probe is short-lived and disconnects, so one id is enough.
+            ib.connect(host, port, clientId=IBKR_CLIENT_ID_API_DIAG, timeout=10)
             ib.reqMarketDataType(3)
             connected = True
         except Exception as e:
