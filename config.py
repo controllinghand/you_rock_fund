@@ -253,6 +253,15 @@ IBKR_CLIENT_ID_PREVIEW = 4      # API-driven Monday runner (Run Screener / Run N
                                 # distinct from the scheduler's wheel id so a manual
                                 # run from the dashboard never collides with the 9:55 job
 IBKR_CLIENT_ID_CASH_PARK = 5    # cash_park.py — Monday sweep buy + end-of-week sell
+# 6 and 7 are owned by api.py, which deliberately does NOT import config (that
+# import chain has taken the api down before), so it defines them locally —
+# they are registered here to keep this the one place ids are allocated:
+#   6  api.py dashboard status/positions poll (_get_ibkr_data)
+#   7  api.py diagnostics probe (SPY quote in the gateway health check)
+# Both were `random.randint(100, 999)` / `randint(810, 839)` until 2026-08-17.
+# A fresh random id every 30s made IB Gateway retain ~1000 per-client
+# registrations over ~10h, exhausting its 768MB heap and wedging the JVM twice a
+# day on YRVIP. Never allocate a client id randomly.
 
 # Execution
 EXECUTE_HOUR_PST = 10            # 10AM PST Monday
