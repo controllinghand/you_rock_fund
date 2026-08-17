@@ -33,6 +33,16 @@ MARKET_WAIT_SECS    = 60    # total polling window for market orders
 MARKET_POLL_SECS    = 5     # check every N seconds
 RECONNECT_WAIT_SECS = 30
 MAX_RECONNECTS      = 3
+CANCEL_CONFIRM_SECS = 15    # how long to wait for a cancel to reach a terminal state
+CANCEL_POLL_SECS    = 0.5
+
+# An order in one of these states can no longer fill, so its filled quantity is
+# final and it is safe to place the next escalation leg.
+_TERMINAL_ORDER_STATES = ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+
+# Statuses that must stop the escalation ladder rather than fall through to the
+# next leg.
+_ABORT_ESCALATION_STATUSES = ("failed_permissions", "failed_funds", "cancel_unconfirmed")
 
 
 class GatewayUnavailable(Exception):
@@ -785,6 +795,58 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
                 return True  # genuine permissions rejection
         return False
 
+    def _is_terminal(trade) -> bool:
+        """True when the order can no longer fill, so its quantity is final."""
+        if trade.orderStatus.status in _TERMINAL_ORDER_STATES:
+            return True
+        # A fully-filled order sometimes reports remaining==0 before the status
+        # flips to Filled.
+        return (trade.orderStatus.remaining or 0) == 0 and (trade.orderStatus.filled or 0) > 0
+
+    def _await_terminal(trade, timeout: float) -> bool:
+        """Poll until the order can no longer fill. True if it settled in time.
+
+        Returning False means the order may STILL BE WORKING at IBKR, so its
+        filled quantity is not final and placing another leg for the 'remaining'
+        contracts could sell the same position twice.
+        """
+        waited = 0.0
+        while True:
+            if _is_terminal(trade):
+                return True
+            if waited >= timeout:
+                return False
+            if not ib.isConnected():
+                # No point polling a dead socket — this is exactly the BE case:
+                # the cancel was sent, the gateway died, the order stayed live.
+                return False
+            ib.sleep(CANCEL_POLL_SECS)
+            waited += CANCEL_POLL_SECS
+
+    def _abort_unconfirmed(trade, label: str) -> None:
+        """Record what filled and stop the ladder — the cancel never confirmed."""
+        _record_leg(trade, label)
+        st = trade.orderStatus.status
+        log.error(
+            f"  ❗ {ticker} — {label} CANCEL NOT CONFIRMED after {CANCEL_CONFIRM_SECS}s "
+            f"(status {st}, filled {int(trade.orderStatus.filled or 0)}/{contracts}). "
+            f"The order may still be working at IBKR — NOT escalating, because "
+            f"selling the remainder now could double the position."
+        )
+        _finalize("cancel_unconfirmed")
+        result["cancel_unconfirmed"] = {
+            "leg": label,
+            "order_status": st,
+            "order_id": getattr(trade.order, "orderId", None),
+            "perm_id": getattr(trade.order, "permId", None),
+        }
+        _discord_alert(
+            f"❗ **YRVI** {ticker} — the {label} cancel was not confirmed (status `{st}`). "
+            f"Escalation was stopped so the position can't be sold twice. "
+            f"The order may still be working at IBKR — **check open orders**. "
+            f"Filled so far: {filled_total}/{contracts}."
+        )
+
     def try_limit(price: float, label: str, wait: int) -> bool:
         qty = _remaining()
         if qty < 1:
@@ -801,9 +863,31 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         ib.sleep(wait - 3)
         if trade.orderStatus.status != "Filled":
             # Not fully filled — cancel the remainder, then record whatever DID fill.
+            #
+            # The cancel must be CONFIRMED before the next leg goes out. This used
+            # to be `cancelOrder(...)` followed by a flat `ib.sleep(1)`, which is a
+            # race: on 2026-08-17 the BE cancel was sent at 10:04:20, the gateway
+            # died before IBKR acknowledged it, the order stayed live and filled at
+            # 10:10:17 — six minutes after the run had written it off as unfilled.
+            # We got lucky that the gateway also killed the market leg; had it died
+            # a moment later we would have sold the position twice.
+            #
+            # A cancel normally confirms in well under a second (PendingCancel →
+            # Cancelled took ~650ms on that same run), so the 15s ceiling only
+            # trips when something is genuinely wrong.
             log.info(f"  ⏳ {label} not fully filled — cancelling remainder, escalating...")
-            ib.cancelOrder(trade.order)
-            ib.sleep(1)
+            try:
+                ib.cancelOrder(trade.order)
+            except Exception as e:
+                if _is_connection_error(ib, e):
+                    _abort_unconfirmed(trade, label)
+                    return False
+                raise
+            if not _await_terminal(trade, CANCEL_CONFIRM_SECS):
+                # Under-filling is recoverable — the slot is simply not taken and
+                # the next run can use it. Double-selling is not. Stop here.
+                _abort_unconfirmed(trade, label)
+                return False
         _record_leg(trade, label)
         return _remaining() < 1
 
@@ -852,9 +936,9 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
 
     if not mkt.get("use_bid_as_limit"):
         if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return _finalize("filled")
-        if result.get("status") in ("failed_permissions", "failed_funds"): return result
+        if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
     if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return _finalize("filled")
-    if result.get("status") in ("failed_permissions", "failed_funds"): return result
+    if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
 
     # Market order for the REMAINING contracts only (never the full quantity) so a
     # partial fill on a cancelled limit leg can't lead to an over-sell — #72.
@@ -883,6 +967,19 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
                 log.info(f"  ⏳ Partial: {int(filled_qty)}/{qty} filled after {elapsed}s — waiting...")
             else:
                 log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
+        # Nothing is placed after the market leg, so an unsettled order here can't
+        # cause an over-sell — but it CAN still fill after we record it, which is
+        # how BE's premium went missing. Leave a breadcrumb so the post-run broker
+        # reconcile and the Discord card both flag it instead of reporting a clean
+        # miss.
+        if not _is_terminal(trade):
+            log.warning(f"  ⚠️  {ticker} — market order still {trade.orderStatus.status} after "
+                        f"{MARKET_WAIT_SECS}s; recorded fill may be incomplete and the order "
+                        f"can still fill at IBKR")
+            result["market_order_unconfirmed"] = {
+                "order_status": trade.orderStatus.status,
+                "order_id": getattr(trade.order, "orderId", None),
+            }
         _record_leg(trade, "market")
 
     if filled_total >= contracts:
