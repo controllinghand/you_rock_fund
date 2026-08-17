@@ -115,6 +115,7 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_insufficient_cash": "⏭️",
         "skipped_contract_size": "⚠️",
         "skipped_delta":         "⏭️",
+        "skipped_budget":        "⏭️",
         "failed_no_connection":  "🔌",
         "cancel_unconfirmed":    "❗",
         "unfilled":              "❌",
@@ -129,6 +130,7 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         "skipped_insufficient_cash": "skipped — not enough cash to secure",
         "skipped_contract_size": "skipped — contract too large",
         "skipped_delta":         "skipped — no strike within delta range",
+        "skipped_budget":        "skipped — adjusted strike costs more than the remaining budget",
         # Infrastructure, not strategy. Spelled out so this can never be read as
         # "the delta was wrong" the way a bare skipped_delta was on 2026-08-17.
         "failed_no_connection":  "FAILED — gateway connection lost mid-run (not a strategy skip)",
@@ -256,6 +258,12 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
         footnotes.append(
             "* ⚠️ Gateway connection lost = the IBKR link died mid-run. These names were "
             "NOT evaluated — orders may still be working at IBKR. Verify positions."
+        )
+    if "skipped_budget" in statuses:
+        footnotes.append(
+            "* Adjusted strike over budget = the stock rose since Saturday, so the strike "
+            "moved up and one contract would cost more collateral than the account has left. "
+            "Skipped rather than deployed onto margin."
         )
     if "cancel_unconfirmed" in statuses:
         footnotes.append(
@@ -506,14 +514,31 @@ def _deployed_field(deployed: dict) -> dict | None:
                    f"({deployed['stock_count']} held, cost basis)")
     if deployed.get("cc_count"):
         detail += f" · {deployed['cc_count']} CC"
+    # Parked cash-sweep shares are deployed capital but are NOT CC-backed stock —
+    # kept in their own bucket so the wheel figure means what it says.
+    if deployed.get("park_value"):
+        detail += f" · parked ${deployed['park_value']:,.0f}"
+
+    # Per-slot breakdown, largest first: a single name quietly becoming half the
+    # fund should be obvious without doing the arithmetic by hand.
+    slot_lines = []
+    for s in (deployed.get("positions") or [])[:8]:
+        tag = {"CSP": "", "STK": " (stock)", "PARK": " (parked)"}.get(s.get("kind"), "")
+        slot_lines.append(f"`{s['pct_of_total']:>5.1f}%`  **{s['symbol']}**{tag}  "
+                          f"${s['capital']:,.0f}")
+    slots_block = ("\n" + "\n".join(slot_lines)) if slot_lines else ""
 
     warn = ""
     if deployed.get("on_margin"):
-        warn = (f"\n🚨 **ON MARGIN** — CSP collateral exceeds cash by "
-                f"${deployed.get('cash_shortfall', 0):,.0f}. These puts are not "
-                f"fully cash-secured.")
-    return {"name": "💰 Capital Deployed", "value": f"{line}\n{detail}{warn}",
-            "inline": False}
+        warn += (f"\n🚨 **ON MARGIN** — CSP collateral exceeds cash by "
+                 f"${deployed.get('cash_shortfall', 0):,.0f}. These puts are not "
+                 f"fully cash-secured.")
+    if deployed.get("concentrated"):
+        warn += (f"\n⚠️ **{deployed.get('top_symbol')} is {deployed.get('top_pct'):.0f}% "
+                 f"of the deployment** (over {deployed.get('concentration_warn_pct', 50):.0f}%) "
+                 f"— worth checking why one name took this much.")
+    return {"name": "💰 Capital Deployed",
+            "value": f"{line}\n{detail}{slots_block}{warn}", "inline": False}
 
 
 def post_weekly_results(state: dict, fund_budget: float = 250_000,

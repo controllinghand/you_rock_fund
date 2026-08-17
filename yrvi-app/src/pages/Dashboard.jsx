@@ -407,6 +407,44 @@ export default function Dashboard() {
                   </div>
                 </div>
 
+                {/* Per-slot breakdown — largest first, so one name quietly becoming
+                    half the fund is visible without doing the arithmetic by hand. */}
+                {(d.positions?.length ?? 0) > 0 && (
+                  <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-800">
+                    <div className="text-gray-500 text-xs mb-2">Deployment by slot</div>
+                    <div className="space-y-1.5">
+                      {d.positions.map(p => {
+                        const hot = p.pct_of_total > (d.concentration_warn_pct ?? 50)
+                        return (
+                          <div key={`${p.symbol}-${p.kind}`} className="flex items-center gap-3 text-sm">
+                            <div className="w-16 font-semibold text-gray-900 dark:text-white truncate">{p.symbol}</div>
+                            <div className="flex-1 h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full ${hot ? 'bg-amber-500' : 'bg-blue-500'}`}
+                                style={{ width: `${Math.min(p.pct_of_total, 100)}%` }}
+                              />
+                            </div>
+                            <div className={`w-14 text-right font-mono text-xs ${hot ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-gray-500'}`}>
+                              {p.pct_of_total.toFixed(1)}%
+                            </div>
+                            <div className="w-24 text-right font-mono text-gray-900 dark:text-white">{money(p.capital)}</div>
+                            <div className="w-16 text-gray-400 dark:text-gray-600 text-xs">
+                              {p.kind === 'CSP' ? `${p.contracts}x` : p.kind === 'PARK' ? 'parked' : 'stock'}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {d.concentrated && (
+                  <div className="mt-3 text-xs bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-300 rounded-lg px-3 py-2">
+                    <span className="font-semibold">{d.top_symbol}</span> is <span className="font-mono font-semibold">{d.top_pct?.toFixed(0)}%</span> of
+                    the deployment, over the {d.concentration_warn_pct ?? 50}% threshold — worth checking why one name took this much.
+                  </div>
+                )}
+
                 {over && (
                   <div className="mt-4 text-xs bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 rounded-lg px-3 py-2">
                     CSP collateral exceeds available cash by <span className="font-mono font-semibold">{money(d.cash_shortfall)}</span> —

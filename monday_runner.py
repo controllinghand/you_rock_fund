@@ -257,10 +257,14 @@ def _fetch_account_and_deployed(fallback: float) -> tuple[float, float, dict | N
             from capital import compute_deployed, from_ib_positions
             ib.reqPositions()
             ib.sleep(2)
+            # Parked cash-sweep shares are deployed, but they are not wheel stock
+            # backing a covered call — give them their own bucket.
+            _park = (_load_state().get("cash_park") or {})
             deployed = compute_deployed(
                 from_ib_positions(ib.positions(ACCOUNT)),
                 cash=by_tag.get("TotalCashValue"),
                 net_liq=by_tag.get("NetLiquidation"),
+                park_symbol=_park.get("instrument") if _park.get("status") == "open" else None,
             )
             log.info(f"  📊 Deployed ${deployed['total_deployed']:,.0f} "
                      f"(CSP ${deployed['csp_collateral']:,.0f} + stock "
@@ -524,8 +528,12 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 
     # ── Live execution ────────────────────────────────────────
     from trader import execute_positions
+    # Pass the budget the sizer actually planned against, so execution-time strike
+    # adjustments are re-checked against the same ceiling instead of the static
+    # TOTAL_FUND_BUDGET (which on a compounding account is unrelated to net liq).
     results = execute_positions(positions, extra_targets=filtered_targets,
-                                target_fills=target_fills, status_callback=progress_callback)
+                                target_fills=target_fills, status_callback=progress_callback,
+                                budget=effective_budget)
 
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)
