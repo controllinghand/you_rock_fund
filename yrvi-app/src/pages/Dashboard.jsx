@@ -342,6 +342,81 @@ export default function Dashboard() {
             ))}
           </div>
 
+          {/* Capital deployed — is the fund actually cash-secured right now?
+              Sourced from live IBKR positions (api computes it in the same
+              snapshot as the holdings below), NOT from state.json: on 2026-08-17
+              state was missing a filled CSP, so a state-derived version of this
+              would have shown a comfortable 93% while the account was ~$25k onto
+              margin. */}
+          {positions.deployed && (() => {
+            const d    = positions.deployed
+            const pct  = d.deployed_pct ?? 0
+            const over = d.on_margin === true
+            // Amber before the line, red past it — 100% of net liq is the point
+            // where the puts stop being fully backed by the fund's own capital.
+            const tone = over || pct > 100
+              ? { bar: 'bg-red-500',    text: 'text-red-600 dark:text-red-400',       ring: 'border-red-300 dark:border-red-800' }
+              : pct >= 95
+              ? { bar: 'bg-amber-500',  text: 'text-amber-600 dark:text-amber-400',   ring: 'border-amber-300 dark:border-amber-800' }
+              : { bar: 'bg-emerald-500',text: 'text-gray-900 dark:text-white',        ring: 'border-gray-200 dark:border-gray-800' }
+            const money = v => v != null ? `$${Math.round(v).toLocaleString()}` : '—'
+            return (
+              <div className={`bg-white dark:bg-gray-900 border rounded-xl p-5 ${tone.ring}`}>
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="text-gray-900 dark:text-white font-semibold text-sm">💰 Capital Deployed</div>
+                  <span className="text-gray-400 dark:text-gray-600 text-xs">currently committed</span>
+                  {over && (
+                    <span className="ml-auto text-xs font-semibold bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 border border-red-300 dark:border-red-800 px-2 py-0.5 rounded-full">
+                      🚨 ON MARGIN
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-baseline gap-3 flex-wrap">
+                  <div className={`text-3xl font-bold font-mono ${tone.text}`}>{money(d.total_deployed)}</div>
+                  {d.net_liq != null && (
+                    <div className="text-sm text-gray-500">
+                      <span className={`font-semibold ${tone.text}`}>{pct.toFixed(0)}%</span> of {money(d.net_liq)} net liq
+                    </div>
+                  )}
+                </div>
+
+                {d.net_liq != null && (
+                  <div className="mt-3 h-2 w-full bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                    <div className={`h-full ${tone.bar} transition-all`} style={{ width: `${Math.min(pct, 100)}%` }} />
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
+                  <div>
+                    <div className="text-gray-500 text-xs mb-1">CSP collateral</div>
+                    <div className="font-mono font-semibold text-gray-900 dark:text-white">{money(d.csp_collateral)}</div>
+                    <div className="text-gray-400 dark:text-gray-600 text-xs">{d.csp_count} put{d.csp_count === 1 ? '' : 's'}</div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-xs mb-1">Stock (cost basis)</div>
+                    <div className="font-mono font-semibold text-gray-900 dark:text-white">{money(d.stock_value)}</div>
+                    <div className="text-gray-400 dark:text-gray-600 text-xs">
+                      {d.stock_count} held{d.cc_count ? ` · ${d.cc_count} CC` : ''}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-gray-500 text-xs mb-1">Cash available</div>
+                    <div className="font-mono font-semibold text-gray-900 dark:text-white">{money(d.cash)}</div>
+                    <div className="text-gray-400 dark:text-gray-600 text-xs">backs the puts</div>
+                  </div>
+                </div>
+
+                {over && (
+                  <div className="mt-4 text-xs bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 rounded-lg px-3 py-2">
+                    CSP collateral exceeds available cash by <span className="font-mono font-semibold">{money(d.cash_shortfall)}</span> —
+                    these puts are <span className="font-semibold">not fully cash-secured</span> and the account is using margin.
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+
           {/* Live holdings table */}
           {(positions.portfolio?.length ?? 0) > 0 && (
             <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden">

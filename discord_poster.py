@@ -482,9 +482,44 @@ def _goal_lines(ytd_total: float, capital: float, goal_pct: float,
     return lines
 
 
+def _deployed_field(deployed: dict) -> dict | None:
+    """The 'how much capital is committed right now' field for the results card.
+
+    Deliberately built from a capital.py snapshot of LIVE IBKR positions. A
+    state.json-derived version of this number would have read a comfortable 93%
+    on 2026-08-17 while the account sat ~$25k onto margin, because state was
+    missing a filled CSP — a check sharing a data source with the thing it
+    checks is not a check.
+    """
+    if not deployed:
+        return None
+    total = deployed.get("total_deployed", 0.0)
+    parts = [f"**${total:,.0f}**"]
+    if deployed.get("deployed_pct") is not None:
+        parts.append(f"({deployed['deployed_pct']:.0f}% of net liq)")
+    line = " ".join(parts)
+
+    detail = (f"CSP collateral ${deployed.get('csp_collateral', 0):,.0f} "
+              f"({deployed.get('csp_count', 0)} puts)")
+    if deployed.get("stock_count"):
+        detail += (f" · stock ${deployed.get('stock_value', 0):,.0f} "
+                   f"({deployed['stock_count']} held, cost basis)")
+    if deployed.get("cc_count"):
+        detail += f" · {deployed['cc_count']} CC"
+
+    warn = ""
+    if deployed.get("on_margin"):
+        warn = (f"\n🚨 **ON MARGIN** — CSP collateral exceeds cash by "
+                f"${deployed.get('cash_shortfall', 0):,.0f}. These puts are not "
+                f"fully cash-secured.")
+    return {"name": "💰 Capital Deployed", "value": f"{line}\n{detail}{warn}",
+            "inline": False}
+
+
 def post_weekly_results(state: dict, fund_budget: float = 250_000,
                          capital: float = None, goal_pct: float = 0.24,
-                         net_liq: float = None, manual: bool = False):
+                         net_liq: float = None, manual: bool = False,
+                         deployed: dict = None):
     """Post rich embed after Monday CSP execution completes.
 
     manual=True tags the footer so it's clear the run was a manual Run Now rather
@@ -524,6 +559,12 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
         {"name": "Total Realized",   "value": f"${total_realized:,.0f}",  "inline": True},
         {"name": "​",           "value": "​",                   "inline": True},
     ]
+
+    # Committed capital sits directly under the premium row — high in the card,
+    # because "are these puts actually cash-secured?" outranks the week's yield.
+    dep_field = _deployed_field(deployed)
+    if dep_field:
+        fields.append(dep_field)
 
     trades_text, _ = _build_trades_section(state)
     if trades_text:

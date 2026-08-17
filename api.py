@@ -2174,6 +2174,7 @@ _IBKR_EMPTY: dict = {
     "settled_cash": None, "unrealized_pnl": None, "realized_pnl": None,
     "maintenance_margin": None, "excess_liquidity": None,
     "account": None, "account_summary": None, "portfolio": [], "error": None,
+    "deployed": None,
 }
 
 def _get_ibkr_data(settings: dict) -> dict:
@@ -2357,6 +2358,21 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
                                 item["unrealizedPNL"] = old.get("unrealizedPNL")
                                 item["priceStale"]    = True
                 result["portfolio"] = portfolio
+
+                # Committed capital, derived from the LIVE broker positions we
+                # just read — never from state.json. On 2026-08-17 state was
+                # missing a filled CSP, so a state-sourced version of this gauge
+                # would have shown a comfortable 93% while the account was ~$25k
+                # onto margin. See capital.py.
+                try:
+                    from capital import compute_deployed, from_api_portfolio
+                    result["deployed"] = compute_deployed(
+                        from_api_portfolio(portfolio),
+                        cash=result.get("settled_cash"),
+                        net_liq=result.get("account_value"),
+                    )
+                except Exception as de:
+                    print(f"[api] deployed-capital calc failed: {de}")
 
                 # Account-level Unrealized P&L: prefer the SUM of the per-position
                 # values (which we already have and which match the holdings
@@ -3183,6 +3199,9 @@ def get_positions():
         "monday_context":  state.get("monday_context", {}),
         "portfolio":       enriched_portfolio,
         "account_summary": ibkr.get("account_summary"),  # None when IBKR disconnected
+        # Committed capital, computed from the live broker positions in the same
+        # snapshot — never from state.json. None when IBKR is unreachable.
+        "deployed":        ibkr.get("deployed"),
         "excluded_tickers": load_settings().get("excluded_tickers", []),
     }
 
