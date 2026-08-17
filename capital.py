@@ -35,43 +35,80 @@ on_margin       csp_collateral > cash. This is the PRECISE test: stock is alread
 """
 
 
-def compute_deployed(rows: list, cash: float = None, net_liq: float = None) -> dict:
+CONCENTRATION_WARN_PCT = 50.0   # one name past half the deployment is worth a look
+
+
+def compute_deployed(rows: list, cash: float = None, net_liq: float = None,
+                     park_symbol: str = None) -> dict:
     """Summarise committed capital from normalized broker position rows.
 
-    rows: dicts with sec_type ("OPT"/"STK"), right ("P"/"C"/None), strike,
-          position (signed), avg_cost (per share).
+    rows: dicts with symbol, sec_type ("OPT"/"STK"), right ("P"/"C"/None),
+          strike, position (signed), avg_cost (per share).
     cash / net_liq: from the broker's account summary; optional, and the derived
           ratio/flag are simply omitted when they are not supplied.
+    park_symbol: the cash-sweep instrument (QQQ/SGOV) when a park is open. Its
+          shares are real deployed capital but they are NOT wheel stock backing a
+          covered call — they are idle cash parked until Friday. Bucketed
+          separately so the CC-backed figure means what it says.
+
+    `positions` breaks the total down per slot, largest first, each with its share
+    of the deployment, so a single name quietly becoming half the fund is visible.
     """
+    park_symbol    = (park_symbol or "").upper() or None
     csp_collateral = 0.0
     stock_value    = 0.0
+    park_value     = 0.0
     csp_count = cc_count = stock_count = 0
+    slots: list = []
 
     for r in rows or []:
-        sec   = (r.get("sec_type") or "").upper()
-        right = (r.get("right") or "").upper()
-        qty   = float(r.get("position") or 0)
+        sec    = (r.get("sec_type") or "").upper()
+        right  = (r.get("right") or "").upper()
+        qty    = float(r.get("position") or 0)
+        symbol = (r.get("symbol") or "?").upper()
         if sec == "OPT" and qty < 0:
             if right.startswith("P"):
                 strike = float(r.get("strike") or 0)
-                csp_collateral += strike * 100.0 * abs(qty)
+                cap    = strike * 100.0 * abs(qty)
+                csp_collateral += cap
                 csp_count += 1
+                slots.append({"symbol": symbol, "kind": "CSP", "capital": round(cap, 2),
+                              "contracts": int(abs(qty)), "strike": strike})
             elif right.startswith("C"):
                 # A covered call ties up no additional capital — the shares back
                 # it — but the count is worth surfacing next to the stock value.
                 cc_count += 1
         elif sec == "STK" and qty > 0:
-            stock_value += qty * float(r.get("avg_cost") or 0)
-            stock_count += 1
+            cap = qty * float(r.get("avg_cost") or 0)
+            if park_symbol and symbol == park_symbol:
+                park_value += cap
+                slots.append({"symbol": symbol, "kind": "PARK", "capital": round(cap, 2),
+                              "shares": qty})
+            else:
+                stock_value += cap
+                stock_count += 1
+                slots.append({"symbol": symbol, "kind": "STK", "capital": round(cap, 2),
+                              "shares": qty})
 
-    total = csp_collateral + stock_value
+    total = csp_collateral + stock_value + park_value
+    slots.sort(key=lambda s: s["capital"], reverse=True)
+    for s in slots:
+        s["pct_of_total"] = round(s["capital"] / total * 100, 1) if total else 0.0
+
+    top_pct = slots[0]["pct_of_total"] if slots else 0.0
     out = {
         "csp_collateral": round(csp_collateral, 2),
         "stock_value":    round(stock_value, 2),
+        "park_value":     round(park_value, 2),
         "total_deployed": round(total, 2),
         "csp_count":      csp_count,
         "cc_count":       cc_count,
         "stock_count":    stock_count,
+        "positions":      slots,
+        "top_symbol":       slots[0]["symbol"] if slots else None,
+        "top_pct":          top_pct,
+        "concentrated":     top_pct > CONCENTRATION_WARN_PCT,
+        "concentration_warn_pct": CONCENTRATION_WARN_PCT,
     }
     if cash is not None:
         out["cash"] = round(float(cash), 2)
@@ -93,6 +130,7 @@ def from_ib_positions(positions) -> list:
         if c is None:
             continue
         rows.append({
+            "symbol":   getattr(c, "symbol", "") or "",
             "sec_type": getattr(c, "secType", ""),
             "right":    getattr(c, "right", "") or "",
             "strike":   getattr(c, "strike", 0) or 0,
@@ -112,6 +150,7 @@ def from_api_portfolio(portfolio: list) -> list:
     rows = []
     for p in portfolio or []:
         rows.append({
+            "symbol":   p.get("symbol", ""),
             "sec_type": p.get("secType", ""),
             "right":    p.get("right") or "",
             "strike":   p.get("strike") or 0,

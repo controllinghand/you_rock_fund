@@ -2366,10 +2366,17 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
                 # onto margin. See capital.py.
                 try:
                     from capital import compute_deployed, from_api_portfolio
+                    # Parked cash-sweep shares are deployed capital but are NOT
+                    # wheel stock backing a covered call — they are idle cash
+                    # parked until Friday. Pass the instrument so it gets its own
+                    # bucket instead of inflating the CC-backed figure.
+                    _park = (load_state().get("cash_park") or {})
+                    _park_sym = _park.get("instrument") if _park.get("status") == "open" else None
                     result["deployed"] = compute_deployed(
                         from_api_portfolio(portfolio),
                         cash=result.get("settled_cash"),
                         net_liq=result.get("account_value"),
+                        park_symbol=_park_sym,
                     )
                 except Exception as de:
                     print(f"[api] deployed-capital calc failed: {de}")

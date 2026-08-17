@@ -257,10 +257,14 @@ def _fetch_account_and_deployed(fallback: float) -> tuple[float, float, dict | N
             from capital import compute_deployed, from_ib_positions
             ib.reqPositions()
             ib.sleep(2)
+            # Parked cash-sweep shares are deployed, but they are not wheel stock
+            # backing a covered call — give them their own bucket.
+            _park = (_load_state().get("cash_park") or {})
             deployed = compute_deployed(
                 from_ib_positions(ib.positions(ACCOUNT)),
                 cash=by_tag.get("TotalCashValue"),
                 net_liq=by_tag.get("NetLiquidation"),
+                park_symbol=_park.get("instrument") if _park.get("status") == "open" else None,
             )
             log.info(f"  📊 Deployed ${deployed['total_deployed']:,.0f} "
                      f"(CSP ${deployed['csp_collateral']:,.0f} + stock "

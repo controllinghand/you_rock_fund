@@ -84,6 +84,16 @@ export default function TradeHistory() {
     ? slippages.reduce((a, b) => a + b, 0) / slippages.length
     : null
 
+  // Capital committed per slot, and each slot's share of the week's deployment.
+  // Derived here rather than fetched: for a cash-secured put the collateral is
+  // exactly strike x 100 x contracts, so the table already holds everything needed.
+  const CONCENTRATION_WARN_PCT = 50
+  const slotCapital = ex =>
+    (ex.status === 'filled' || ex.status === 'partial_fill') && ex.strike != null && ex.contracts
+      ? ex.strike * 100 * ex.contracts
+      : null
+  const deployedTotal = executions.reduce((sum, ex) => sum + (slotCapital(ex) ?? 0), 0)
+
   return (
     <div className="space-y-6">
       <div>
@@ -108,7 +118,7 @@ export default function TradeHistory() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-gray-500 text-xs border-b border-gray-200 dark:border-gray-800">
-                {['Ticker', 'Status', 'Contracts', 'Strike', 'Fill', 'Screener', 'Slippage', 'Premium', 'Time'].map(h => (
+                {['Ticker', 'Status', 'Contracts', 'Strike', 'Fill', 'Screener', 'Slippage', 'Premium', 'Capital', '% Dep', 'Time'].map(h => (
                   <th key={h} className={`${h === 'Ticker' || h === 'Status' ? 'text-left' : 'text-right'} px-4 py-3`}>{h}</th>
                 ))}
               </tr>
@@ -144,6 +154,24 @@ export default function TradeHistory() {
                     <td className="px-4 py-3 text-right text-green-400 font-medium">
                       {ex.premium_collected ? `$${ex.premium_collected.toLocaleString()}` : '—'}
                     </td>
+                    {(() => {
+                      const cap = slotCapital(ex)
+                      const pct = cap != null && deployedTotal ? (cap / deployedTotal) * 100 : null
+                      const hot = pct != null && pct > CONCENTRATION_WARN_PCT
+                      return (
+                        <>
+                          <td className="px-4 py-3 text-right font-mono text-gray-700 dark:text-gray-300">
+                            {cap != null ? `$${Math.round(cap).toLocaleString()}` : '—'}
+                          </td>
+                          <td className={`px-4 py-3 text-right font-mono text-xs ${
+                            hot ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                : 'text-gray-500 dark:text-gray-600'}`}
+                              title={hot ? `Over ${CONCENTRATION_WARN_PCT}% of the week's deployment` : undefined}>
+                            {pct != null ? `${pct.toFixed(1)}%` : '—'}
+                          </td>
+                        </>
+                      )
+                    })()}
                     <td className="px-4 py-3 text-right text-gray-500 dark:text-gray-600 text-xs">
                       {fmtTime(ex.exec_timestamp)}
                     </td>
@@ -161,6 +189,12 @@ export default function TradeHistory() {
                       .filter(e => e.status === 'filled' || e.status === 'dry_run' || e.status === 'partial_fill')
                       .reduce((sum, e) => sum + (e.premium_collected ?? 0), 0)
                       .toLocaleString()}
+                </td>
+                <td className="px-4 py-3 text-right font-bold text-gray-900 dark:text-white font-mono">
+                  ${Math.round(deployedTotal).toLocaleString()}
+                </td>
+                <td className="px-4 py-3 text-right text-gray-500 dark:text-gray-600 text-xs font-mono">
+                  {deployedTotal ? '100%' : '—'}
                 </td>
                 <td />
               </tr>
