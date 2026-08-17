@@ -5,7 +5,7 @@ import os
 import shutil
 import time
 from datetime import datetime, timezone, timedelta
-from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder
+from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilter
 
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 
@@ -33,6 +33,223 @@ MARKET_WAIT_SECS    = 60    # total polling window for market orders
 MARKET_POLL_SECS    = 5     # check every N seconds
 RECONNECT_WAIT_SECS = 30
 MAX_RECONNECTS      = 3
+CANCEL_CONFIRM_SECS = 15    # how long to wait for a cancel to reach a terminal state
+CANCEL_POLL_SECS    = 0.5
+
+# An order in one of these states can no longer fill, so its filled quantity is
+# final and it is safe to place the next escalation leg.
+_TERMINAL_ORDER_STATES = ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+
+# Statuses that must stop the escalation ladder rather than fall through to the
+# next leg.
+_ABORT_ESCALATION_STATUSES = ("failed_permissions", "failed_funds", "cancel_unconfirmed")
+
+
+class GatewayUnavailable(Exception):
+    """The IBKR connection died — this is infrastructure, not a strategy decision.
+
+    Raised instead of returning None so a dead socket can never be reported as a
+    trading outcome. On 2026-08-17 the gateway wedged mid-pipeline and every
+    remaining candidate came back as "skipped_delta" — nine tickers logged as if
+    their deltas were out of range, in the same millisecond, while the real cause
+    was `Socket disconnect`. Worse, swallowing the exception ALSO bypassed the
+    reconnect handler in execute_positions, so the run marched on against a dead
+    socket instead of reconnecting or stopping.
+    """
+
+
+# Substrings that identify a transport failure rather than a bad contract.
+# ib_insync surfaces these as plain Exceptions, so matching text is the only
+# option; the isConnected() check below is the primary signal.
+_CONN_ERROR_MARKERS = (
+    "not connected",
+    "socket disconnect",
+    "connection reset",
+    "connection refused",
+    "broken pipe",
+    "peer closed connection",
+    "timeouterror",
+)
+
+
+def _is_connection_error(ib: IB, exc: Exception) -> bool:
+    """True when exc means 'the gateway went away', not 'this contract is bad'."""
+    if not ib.isConnected():
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in _CONN_ERROR_MARKERS)
+
+
+def _discord_alert(message: str) -> None:
+    """Plain-text Discord alert (mirrors monday_runner._discord_alert). Defined
+    locally rather than imported to keep trader.py free of a monday_runner cycle.
+    No-op when Discord is disabled or unconfigured; never raises."""
+    try:
+        if not get_settings().get("discord_webhook_enabled", True):
+            return
+        from secrets_client import get_secret
+        webhook = get_secret("discord_webhook_url", "DISCORD_WEBHOOK_URL")
+        if not webhook:
+            return
+        import requests
+        requests.post(webhook, json={"content": message}, timeout=5)
+    except Exception as e:
+        log.warning(f"  ⚠️  Discord alert failed: {e}")
+
+
+def _broker_fill_for(ib: IB, symbol: str, expiry: str, strike: float) -> tuple[int, float] | None:
+    """Return (contracts_sold, avg_price) for a short put from IBKR's execution
+    record, or None if no matching SLD executions exist."""
+    try:
+        fills = ib.reqExecutions(ExecutionFilter())
+    except Exception as e:
+        log.warning(f"  ⚠️  could not fetch executions for {symbol}: {e}")
+        return None
+    qty, notional = 0.0, 0.0
+    for f in fills:
+        c, ex = f.contract, f.execution
+        if (c.symbol == symbol and c.right == "P"
+                and c.lastTradeDateOrContractMonth == expiry
+                and float(c.strike) == float(strike)
+                and ex.side == "SLD"):
+            qty      += float(ex.shares)
+            notional += float(ex.shares) * float(ex.price)
+    if qty <= 0:
+        return None
+    return int(qty), round(notional / qty, 4)
+
+
+def _reconcile_results_against_broker(ib: IB, results: list, attempted: dict) -> list:
+    """Check this run's recorded outcomes against what IBKR actually has.
+
+    Why this exists: on 2026-08-17 the gateway died mid-escalation on BE. The
+    cancel of the working limit order was issued but never confirmed, so the
+    order stayed live at IBKR and filled six minutes later — while the run had
+    already recorded "failed — order unfilled". The result was an untracked short
+    put: $570 of premium missing from the week and $43,000 of collateral invisible
+    to the next sizing pass, which then over-deployed past the net-liq cap.
+
+    Two checks, both read-only — this NEVER places, cancels or modifies an order:
+      1. Working orders still live at IBKR for a ticker we did not record as
+         filled. This is the early-warning case: it catches BE's order while it
+         is still open, before it fills.
+      2. Short put positions matching a contract this run attempted but recorded
+         as anything other than filled. That is a fill we missed; we pull the real
+         price from the execution record and correct the result in place.
+
+    Only contracts THIS run attempted are considered, matched on
+    symbol+expiry+strike, so open CSPs from previous weeks are never touched.
+
+    Discrepancies are alerted, not just logged — a silent auto-repair would hide
+    that the gateway is dying mid-run. Never raises: a reconcile that can abort a
+    run after orders are placed would be worse than the drift it detects.
+    """
+    discrepancies: list = []
+    own_connection = False   # True when WE reconnected, so we must close it here:
+                             # the caller still holds the dead handle and its
+                             # disconnect() would leave this client id open.
+    try:
+        if not ib.isConnected():
+            log.warning("  ⚠️  Broker reconcile — not connected; attempting one reconnect")
+            try:
+                ib = _reconnect(ib)
+                own_connection = True
+            except Exception as e:
+                msg = (f"⚠️ **YRVI** Could not verify this run against IBKR — the gateway "
+                       f"is unreachable ({e}). Orders may have filled after the run gave up. "
+                       f"CHECK OPEN ORDERS AND POSITIONS MANUALLY.")
+                log.error(f"  ❌ {msg}")
+                _discord_alert(msg)
+                return [{"kind": "unverified", "detail": str(e)}]
+
+        recorded_filled = {
+            r["ticker"] for r in results
+            if r.get("status") in ("filled", "partial_fill", "dry_run")
+        }
+
+        # ── 1. Working orders we don't think we have ──────────────────
+        try:
+            live_states = {"PendingSubmit", "PreSubmitted", "Submitted", "PendingCancel", "ApiPending"}
+            for t in ib.reqAllOpenOrders():
+                c = t.contract
+                if c.symbol in attempted and t.orderStatus.status in live_states:
+                    detail = (f"{c.symbol} {getattr(c, 'right', '')}{getattr(c, 'strike', '')} "
+                              f"x{t.order.totalQuantity} {t.order.action} — "
+                              f"status {t.orderStatus.status}")
+                    log.error(f"  ❗ ORDER STILL LIVE AT IBKR: {detail}")
+                    discrepancies.append({"kind": "order_still_live", "ticker": c.symbol,
+                                          "detail": detail})
+        except Exception as e:
+            log.warning(f"  ⚠️  open-order check failed: {e}")
+
+        # ── 2. Positions we hold but recorded as not filled ───────────
+        try:
+            for p in ib.positions():
+                c = p.contract
+                if c.secType != "OPT" or getattr(c, "right", "") != "P" or p.position >= 0:
+                    continue
+                info = attempted.get(c.symbol)
+                if not info:
+                    continue
+                if (c.lastTradeDateOrContractMonth != info["expiry"]
+                        or float(c.strike) != float(info["strike"])):
+                    continue
+                if c.symbol in recorded_filled:
+                    continue
+
+                qty = int(abs(p.position))
+                fill = _broker_fill_for(ib, c.symbol, info["expiry"], info["strike"])
+                price = fill[1] if fill else None
+                premium = round(price * qty * 100, 2) if price else 0.0
+                detail = (f"{c.symbol} ${info['strike']:.2f}P x{qty}"
+                          + (f" @ ${price:.2f} — ${premium:,.0f}" if price else " (price unknown)"))
+                log.error(f"  ❗ UNRECORDED FILL AT IBKR: {detail}")
+
+                for r in results:
+                    if r.get("ticker") == c.symbol:
+                        r.update({
+                            "status":             "filled",
+                            "contracts":          qty,
+                            "filled_contracts":   qty,
+                            "fill_price":         price,
+                            "premium_collected":  premium,
+                            "order_type":         "recovered_from_broker",
+                            "simulated":          False,
+                            "delta_at_entry":     info.get("delta_at_entry"),
+                            "iv_at_entry":        info.get("iv_at_entry"),
+                            "exec_timestamp":     datetime.now(timezone.utc).isoformat(),
+                            "recovered_from_broker": True,
+                            "recovery_note": ("recorded as not filled by the run; found "
+                                              "open at IBKR during post-run reconcile"),
+                        })
+                        break
+                discrepancies.append({"kind": "unrecorded_fill", "ticker": c.symbol,
+                                      "contracts": qty, "fill_price": price,
+                                      "premium_collected": premium, "detail": detail})
+        except Exception as e:
+            log.warning(f"  ⚠️  position check failed: {e}")
+
+    except Exception as e:                       # belt and braces — never fatal
+        log.warning(f"  ⚠️  broker reconcile failed: {e}")
+        return discrepancies
+    finally:
+        if own_connection:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+
+    if discrepancies:
+        lines = "\n".join(f"• {d.get('detail', d.get('kind'))}" for d in discrepancies)
+        _discord_alert(
+            f"⚠️ **YRVI** Post-run broker reconcile found {len(discrepancies)} "
+            f"discrepancy(ies) between the run and IBKR:\n{lines}\n"
+            f"Unrecorded fills have been corrected in state.json. "
+            f"Any order still live at IBKR needs a manual decision."
+        )
+    else:
+        log.info("  ✅ Broker reconcile — run matches IBKR")
+    return discrepancies
 
 
 def _append_trade_log(record: dict) -> None:
@@ -276,6 +493,8 @@ def verify_and_adjust_strike(
             return None
         c = qualified[0]
     except Exception as e:
+        if _is_connection_error(ib, e):
+            raise GatewayUnavailable(f"{ticker} delta-check qualify: {e}") from e
         log.error(f"  ❌ {ticker} delta-check qualify error: {e}")
         return None
 
@@ -301,6 +520,8 @@ def verify_and_adjust_strike(
             return None
         und_con_id = stk_q[0].conId
     except Exception as e:
+        if _is_connection_error(ib, e):
+            raise GatewayUnavailable(f"{ticker} stock qualify for chain lookup: {e}") from e
         log.error(f"  ❌ {ticker} stock qualify error for chain lookup: {e}")
         return None
 
@@ -315,7 +536,11 @@ def verify_and_adjust_strike(
                 if not alt_q:
                     continue
                 alt_c = alt_q[0]
-            except Exception:
+            except Exception as e:
+                # A dead socket would otherwise fail all 15 strikes in a row and
+                # look like "no strike has an acceptable delta".
+                if _is_connection_error(ib, e):
+                    raise GatewayUnavailable(f"{ticker} chain scan at ${alt_strike:.2f}: {e}") from e
                 continue
             alt_delta, alt_iv = _get_greeks_for_contract(ib, alt_c)
             if alt_delta is None:
@@ -570,6 +795,58 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
                 return True  # genuine permissions rejection
         return False
 
+    def _is_terminal(trade) -> bool:
+        """True when the order can no longer fill, so its quantity is final."""
+        if trade.orderStatus.status in _TERMINAL_ORDER_STATES:
+            return True
+        # A fully-filled order sometimes reports remaining==0 before the status
+        # flips to Filled.
+        return (trade.orderStatus.remaining or 0) == 0 and (trade.orderStatus.filled or 0) > 0
+
+    def _await_terminal(trade, timeout: float) -> bool:
+        """Poll until the order can no longer fill. True if it settled in time.
+
+        Returning False means the order may STILL BE WORKING at IBKR, so its
+        filled quantity is not final and placing another leg for the 'remaining'
+        contracts could sell the same position twice.
+        """
+        waited = 0.0
+        while True:
+            if _is_terminal(trade):
+                return True
+            if waited >= timeout:
+                return False
+            if not ib.isConnected():
+                # No point polling a dead socket — this is exactly the BE case:
+                # the cancel was sent, the gateway died, the order stayed live.
+                return False
+            ib.sleep(CANCEL_POLL_SECS)
+            waited += CANCEL_POLL_SECS
+
+    def _abort_unconfirmed(trade, label: str) -> None:
+        """Record what filled and stop the ladder — the cancel never confirmed."""
+        _record_leg(trade, label)
+        st = trade.orderStatus.status
+        log.error(
+            f"  ❗ {ticker} — {label} CANCEL NOT CONFIRMED after {CANCEL_CONFIRM_SECS}s "
+            f"(status {st}, filled {int(trade.orderStatus.filled or 0)}/{contracts}). "
+            f"The order may still be working at IBKR — NOT escalating, because "
+            f"selling the remainder now could double the position."
+        )
+        _finalize("cancel_unconfirmed")
+        result["cancel_unconfirmed"] = {
+            "leg": label,
+            "order_status": st,
+            "order_id": getattr(trade.order, "orderId", None),
+            "perm_id": getattr(trade.order, "permId", None),
+        }
+        _discord_alert(
+            f"❗ **YRVI** {ticker} — the {label} cancel was not confirmed (status `{st}`). "
+            f"Escalation was stopped so the position can't be sold twice. "
+            f"The order may still be working at IBKR — **check open orders**. "
+            f"Filled so far: {filled_total}/{contracts}."
+        )
+
     def try_limit(price: float, label: str, wait: int) -> bool:
         qty = _remaining()
         if qty < 1:
@@ -586,9 +863,31 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         ib.sleep(wait - 3)
         if trade.orderStatus.status != "Filled":
             # Not fully filled — cancel the remainder, then record whatever DID fill.
+            #
+            # The cancel must be CONFIRMED before the next leg goes out. This used
+            # to be `cancelOrder(...)` followed by a flat `ib.sleep(1)`, which is a
+            # race: on 2026-08-17 the BE cancel was sent at 10:04:20, the gateway
+            # died before IBKR acknowledged it, the order stayed live and filled at
+            # 10:10:17 — six minutes after the run had written it off as unfilled.
+            # We got lucky that the gateway also killed the market leg; had it died
+            # a moment later we would have sold the position twice.
+            #
+            # A cancel normally confirms in well under a second (PendingCancel →
+            # Cancelled took ~650ms on that same run), so the 15s ceiling only
+            # trips when something is genuinely wrong.
             log.info(f"  ⏳ {label} not fully filled — cancelling remainder, escalating...")
-            ib.cancelOrder(trade.order)
-            ib.sleep(1)
+            try:
+                ib.cancelOrder(trade.order)
+            except Exception as e:
+                if _is_connection_error(ib, e):
+                    _abort_unconfirmed(trade, label)
+                    return False
+                raise
+            if not _await_terminal(trade, CANCEL_CONFIRM_SECS):
+                # Under-filling is recoverable — the slot is simply not taken and
+                # the next run can use it. Double-selling is not. Stop here.
+                _abort_unconfirmed(trade, label)
+                return False
         _record_leg(trade, label)
         return _remaining() < 1
 
@@ -637,9 +936,9 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
 
     if not mkt.get("use_bid_as_limit"):
         if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return _finalize("filled")
-        if result.get("status") in ("failed_permissions", "failed_funds"): return result
+        if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
     if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return _finalize("filled")
-    if result.get("status") in ("failed_permissions", "failed_funds"): return result
+    if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
 
     # Market order for the REMAINING contracts only (never the full quantity) so a
     # partial fill on a cancelled limit leg can't lead to an over-sell — #72.
@@ -668,6 +967,19 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
                 log.info(f"  ⏳ Partial: {int(filled_qty)}/{qty} filled after {elapsed}s — waiting...")
             else:
                 log.info(f"  ⏳ Market status: {status} after {elapsed}s — waiting...")
+        # Nothing is placed after the market leg, so an unsettled order here can't
+        # cause an over-sell — but it CAN still fill after we record it, which is
+        # how BE's premium went missing. Leave a breadcrumb so the post-run broker
+        # reconcile and the Discord card both flag it instead of reporting a clean
+        # miss.
+        if not _is_terminal(trade):
+            log.warning(f"  ⚠️  {ticker} — market order still {trade.orderStatus.status} after "
+                        f"{MARKET_WAIT_SECS}s; recorded fill may be incomplete and the order "
+                        f"can still fill at IBKR")
+            result["market_order_unconfirmed"] = {
+                "order_status": trade.orderStatus.status,
+                "order_id": getattr(trade.order, "orderId", None),
+            }
         _record_leg(trade, "market")
 
     if filled_total >= contracts:
@@ -781,6 +1093,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
     slot       = 0
     reconnects = 0
+    attempted_contracts: dict = {}   # ticker → final contract worked this run
 
     while filled_count < _target:
         pos = next_candidate()
@@ -876,7 +1189,37 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 continue
 
             _status(ticker=ticker, stage="placing order — limit mid")
+            # Record what we are about to work, so the post-run reconcile can match
+            # broker positions against THIS run's contracts and never touch an open
+            # CSP carried over from a previous week.
+            attempted_contracts[ticker] = {
+                "expiry":         contract.lastTradeDateOrContractMonth,
+                "strike":         float(strike),
+                "contracts":      contracts,
+                "delta_at_entry": round(final_delta, 4) if final_delta is not None else None,
+                "iv_at_entry":    round(final_iv, 4) if final_iv is not None else None,
+            }
             result = place_order_with_escalation(ib, contract, contracts, mkt, ticker, dry_run=dry_run)
+        except GatewayUnavailable as e:
+            # Infrastructure, not strategy. Reported under its own status so the
+            # Discord card can never imply the delta was out of range, and routed
+            # through the same reconnect/abort path as any other IBKR error.
+            log.error(f"  ❌ {ticker} — GATEWAY CONNECTION LOST: {e}")
+            results.append({"ticker": ticker, "status": "failed_no_connection",
+                            "reason": str(e)})
+            _status(ticker=ticker, stage=None,
+                    result={"ticker": ticker, "status": "failed_no_connection"})
+            if reconnects >= MAX_RECONNECTS:
+                log.error(f"  ❌ Max reconnects ({MAX_RECONNECTS}) reached — stopping execution")
+                break
+            try:
+                ib = _reconnect(ib)
+                reconnects += 1
+                log.info(f"  ✅ Reconnected after gateway loss ({reconnects}/{MAX_RECONNECTS})")
+            except Exception as re_err:
+                log.error(f"  ❌ Reconnect failed: {re_err} — stopping execution")
+                break
+            continue
         except Exception as e:
             log.error(f"  ❌ {ticker} — IBKR error: {e}")
             results.append({"ticker": ticker, "status": "failed"})
@@ -950,6 +1293,17 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
         if filled_count < _target:
             ib.sleep(3)
 
+    # Verify against the broker BEFORE dropping the connection. Runs on every
+    # execution, not only after a visible wedge: it is two read-only calls, and
+    # the run that most needs checking is the one that does not know it failed.
+    if not dry_run:
+        _status(ticker=None, stage="verifying against IBKR")
+        broker_discrepancies = _reconcile_results_against_broker(
+            ib, results, attempted_contracts
+        )
+    else:
+        broker_discrepancies = []
+
     ib.disconnect()
 
     # ── Summary ───────────────────────────────────────────────
@@ -968,8 +1322,22 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
         fill_str = f"@ ${fill:.2f} via {otype} — ${prem:,.0f}{sim_tag}" if fill else ""
         log.info(f"  {r['ticker']:6s}  {status:20s}  {fill_str}")
 
+    # A fill recovered by the broker reconcile never incremented the in-loop
+    # counter, so re-derive it from the corrected results.
+    recovered = [d for d in broker_discrepancies if d.get("kind") == "unrecorded_fill"]
+    if recovered:
+        filled_count = sum(
+            1 for r in results
+            if r.get("status") in ("filled", "partial_fill", "dry_run")
+        )
+        log.warning(f"  ⚠️  {len(recovered)} fill(s) recovered from IBKR after the run "
+                    f"reported them as failed — filled_count corrected to {filled_count}")
+
     log.info(f"\n  Fills: {filled_count}/{_target}  |  "
              f"Total Premium: ${total_premium:,.0f}")
+    if broker_discrepancies:
+        log.warning(f"  ⚠️  Broker reconcile found {len(broker_discrepancies)} discrepancy(ies) "
+                    f"— see alerts above")
     log.info("=" * 65)
 
     # Merge with existing state so wheel_holdings and monday_context survive.
