@@ -2177,6 +2177,86 @@ _IBKR_EMPTY: dict = {
     "deployed": None,
 }
 
+# Qualified Stock contracts, keyed by symbol. Qualifying costs a round trip and
+# a conId never changes, so cache it for the life of the process — otherwise the
+# 30s poll re-qualifies the same five names all day long.
+_stk_contract_cache: dict = {}
+
+
+def _underlying_prices(ib, symbols: list) -> dict:
+    """Live underlying price per symbol, so an option row can say what the stock
+    is actually doing without opening a second app to look it up.
+
+    Streaming first, last-daily-close as the fallback: on a closed market (or a
+    symbol without a streaming entitlement) every tick field comes back nan, and
+    that is NOT the same as "no price" — the daily bar is a different request
+    path and usually still answers. Same shape as wheel_manager._get_stock_price.
+    """
+    from ib_insync import Stock
+    out: dict = {}
+    if not symbols:
+        return out
+
+    missing = [s for s in symbols if s not in _stk_contract_cache]
+    if missing:
+        try:
+            for q in ib.qualifyContracts(*[Stock(s, "SMART", "USD") for s in missing]):
+                _stk_contract_cache[q.symbol] = q
+        except Exception as e:
+            print(f"[api] underlying qualify failed: {e}")
+
+    subs = []
+    for sym in symbols:
+        c = _stk_contract_cache.get(sym)
+        if c is None:
+            continue
+        try:
+            subs.append((sym, c, ib.reqMktData(c, snapshot=False)))
+        except Exception as e:
+            print(f"[api] underlying reqMktData failed for {sym}: {e}")
+    if not subs:
+        return out
+
+    def _px(t):
+        for v in (t.last, t.close, t.bid):
+            if v is not None and v == v and v > 0:   # v == v filters nan
+                return round(float(v), 2)
+        return None
+
+    # Poll instead of a flat sleep, and stop the moment every name has ticked —
+    # same reasoning as the PnLSingle loop below: a fixed wait is either slow for
+    # everyone or too short on a cold subscription.
+    waited = 0.0
+    while waited < 4.0:
+        ib.sleep(0.5)
+        waited += 0.5
+        if all(_px(t) is not None for _, _, t in subs):
+            break
+
+    for sym, c, t in subs:
+        px = _px(t)
+        try:
+            ib.cancelMktData(c)
+        except Exception:
+            pass
+        if px is None:
+            # Short timeout on purpose: this runs inside the poll that every
+            # dashboard endpoint waits on, and a sulking historical farm must
+            # never be able to hold the whole snapshot hostage.
+            try:
+                bars = ib.reqHistoricalData(
+                    c, endDateTime="", durationStr="5 D", barSizeSetting="1 day",
+                    whatToShow="TRADES", useRTH=True, formatDate=1, timeout=10,
+                )
+                if bars and bars[-1].close and bars[-1].close > 0:
+                    px = round(float(bars[-1].close), 2)
+            except Exception as e:
+                print(f"[api] {sym}: underlying daily-close fallback failed: {e}")
+        if px is not None:
+            out[sym] = px
+    return out
+
+
 def _get_ibkr_data(settings: dict) -> dict:
     # Fast path: a warm cache needs no lock and no IBKR round trip.
     now = time.time()
@@ -2357,6 +2437,32 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
                                 item["marketValue"]   = old.get("marketValue")
                                 item["unrealizedPNL"] = old.get("unrealizedPNL")
                                 item["priceStale"]    = True
+
+                # ── Underlying price per option row ─────────────────────────
+                # An option row on its own never says whether the stock is
+                # anywhere near the strike, which is the one thing worth knowing
+                # at a glance. Only symbols we don't already hold as stock need
+                # their own quote — a STK row's marketPrice IS the underlying.
+                try:
+                    stk_px = {it["symbol"]: it["marketPrice"] for it in portfolio
+                              if it["secType"] == "STK" and it.get("marketPrice") is not None}
+                    need = sorted({it["symbol"] for it in portfolio
+                                   if it["secType"] == "OPT" and it["symbol"] not in stk_px})
+                    stk_px.update(_underlying_prices(ib, need))
+                    for it in portfolio:
+                        it["underlyingPrice"] = stk_px.get(it["symbol"])
+                    # Same rule as the option prices above: hold the last good
+                    # value rather than blanking the row on one silent tick.
+                    if prev:
+                        prev_px = {p.get("symbol"): p.get("underlyingPrice")
+                                   for p in prev.get("portfolio", [])
+                                   if p.get("underlyingPrice") is not None}
+                        for it in portfolio:
+                            if it.get("underlyingPrice") is None:
+                                it["underlyingPrice"] = prev_px.get(it["symbol"])
+                except Exception as ue:
+                    print(f"[api] underlying price fetch failed: {ue}")
+
                 result["portfolio"] = portfolio
 
                 # Committed capital, derived from the LIVE broker positions we
