@@ -124,6 +124,24 @@ function fmtInstrument(item) {
   return `${item.symbol} ${fmtExpiry(item.expiry)} ${item.strike}${item.right}`
 }
 
+// Live distance from the underlying to the strike, same convention as the entry
+// buffer in trader.py: (stock − strike) / stock for a put, mirrored for a call.
+// Positive = out of the money.
+function liveBuffer(item) {
+  const px = item.underlyingPrice
+  if (px == null || px <= 0 || item.secType !== 'OPT' || item.strike == null) return null
+  return item.right === 'C'
+    ? ((item.strike - px) / px) * 100
+    : ((px - item.strike) / px) * 100
+}
+
+function bufferColor(pct) {
+  if (pct == null) return 'text-gray-400 dark:text-gray-500'
+  if (pct < 0) return 'text-red-500'
+  if (pct < 5) return 'text-amber-500'
+  return 'text-green-600 dark:text-green-500'
+}
+
 function fmtPnl(n) {
   if (n == null) return '—'
   const sign = n >= 0 ? '+' : '−'
@@ -469,8 +487,14 @@ export default function Dashboard() {
               <table className="w-full text-sm min-w-[900px]">
                 <thead>
                   <tr className="text-gray-500 text-xs border-b border-gray-200 dark:border-gray-800">
-                    {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Price', 'Unrealized P&L', 'Entry δ', 'Entry IV', 'Buffer %', 'Total Premium'].map(h => (
-                      <th key={h} className={`${h === 'Instrument' ? 'text-left' : 'text-right'} px-4 py-3`}>{h}</th>
+                    {['Instrument', 'Position', 'Market Value', 'Avg Price', 'Price', 'Unrealized P&L', 'Entry δ', 'Entry IV', 'Entry Buffer %', 'Total Premium'].map(h => (
+                      <th
+                        key={h}
+                        className={`${h === 'Instrument' ? 'text-left' : 'text-right'} px-4 py-3`}
+                        title={h === 'Entry Buffer %' ? 'Buffer at entry — the live buffer is under the instrument name'
+                             : h === 'Price'          ? 'Option price. The underlying is under the instrument name.'
+                             : undefined}
+                      >{h}</th>
                     ))}
                     <th className="text-center px-4 py-3" title="Exclude from the wheel — no CSPs, no covered calls, never sold by the app">Exclude</th>
                   </tr>
@@ -478,7 +502,37 @@ export default function Dashboard() {
                 <tbody>
                   {positions.portfolio.map((item, i) => (
                     <tr key={i} className="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
-                      <td className="px-4 py-3 text-gray-900 dark:text-white font-medium">{fmtInstrument(item)}</td>
+                      <td className="px-4 py-3 text-gray-900 dark:text-white font-medium">
+                        <div>{fmtInstrument(item)}</div>
+                        {/* Underlying on its own line: the row already answers
+                            "what is the option worth", never "where is the
+                            stock" — which is the reason to reach for another
+                            app. Costs vertical space, not a column. */}
+                        {item.secType === 'OPT' && (() => {
+                          const buf = liveBuffer(item)
+                          return (
+                            <div className="text-xs font-mono font-normal mt-0.5">
+                              {item.underlyingPrice != null ? (
+                                <>
+                                  <span className="text-gray-500" title={`${item.symbol} last price`}>
+                                    {item.symbol} ${item.underlyingPrice.toFixed(2)}
+                                  </span>
+                                  {buf != null && (
+                                    <span
+                                      className={`ml-1.5 ${bufferColor(buf)}`}
+                                      title={`Stock is ${Math.abs(buf).toFixed(1)}% ${buf >= 0 ? 'away from' : 'through'} the $${item.strike} strike right now`}
+                                    >
+                                      {buf >= 0 ? `${buf.toFixed(1)}% OTM` : `${Math.abs(buf).toFixed(1)}% ITM`}
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="text-gray-300 dark:text-gray-600">{item.symbol} —</span>
+                              )}
+                            </div>
+                          )
+                        })()}
+                      </td>
                       <td className={`px-4 py-3 text-right font-mono font-semibold ${item.position > 0 ? 'text-green-400' : item.position < 0 ? 'text-orange-400' : 'text-gray-500'}`}>
                         {item.position > 0 ? `+${item.position}` : item.position}
                       </td>
