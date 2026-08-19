@@ -128,6 +128,10 @@ _watchdog_state: dict = {
     "gateway_cold_restart_at": None,  # one-shot COLD restart (clears saved token) this episode
     "ibkr_cold_restart_at":    None,  # one-shot COLD restart this handshake-dead episode
     "last_full_restart_at":    None,  # cross-episode cooldown (lockout guard)
+    "ibkr_restart_window_note_at": None,  # sent the "scheduled restart in progress" notice
+                                          # this episode. Deliberately NOT last_ibkr_alert:
+                                          # that key latches self-heal OFF until recovery.
+    "gateway_restart_window_note_at": None,  # same, for the port-down path
 }
 _gateway_login_status: str = "unknown"
 _gateway_last_event:   str = ""
@@ -153,6 +157,17 @@ FULL_RESTART_GRACE = 360  # seconds to let an auto full restart recover before p
 COLD_RESTART_GRACE = 420  # seconds to let a COLD restart (cleared token → fresh login)
                           # recover before paging. Longer than full: a cold login is
                           # slower than a token restore, and on LIVE waits on the 2FA push.
+AUTO_RESTART_PATIENCE = 900   # seconds an outage may look like "just the nightly restart"
+                              # before the watchdog stops excusing it and self-heals.
+                              # A healthy restart is back in 30-60s; even a slow Intel box
+                              # re-logs in well inside 15 min. Past that it is a real fault,
+                              # NOT the scheduled restart, and must be treated as one.
+                              # Without this bound the auto-restart window disarmed
+                              # self-heal for the whole episode: on 2026-08-16 two boxes
+                              # wedged at ~00:11, inside the 11:59 PM window, and sat down
+                              # for 30.5h and 35h with only a "this is likely the scheduled
+                              # daily restart" notice. The 35h outage swallowed that box's
+                              # Monday 08-17 CSP run.
 FULL_RESTART_COOLDOWN = 1800  # min seconds between auto full restarts of the gateway.
                               # Lockout guard: combined with the one-shot-per-episode
                               # cap, the watchdog can never loop fresh logins into an
@@ -925,6 +940,7 @@ def _watchdog_check() -> None:
             for k in ("gateway_down_since", "last_gateway_alert", "gateway_full_restart_at",
                       "gateway_cold_restart_at", "ibkr_down_since", "last_ibkr_alert",
                       "ibkr_soft_restart_at", "ibkr_full_restart_at", "ibkr_cold_restart_at",
+                      "ibkr_restart_window_note_at", "gateway_restart_window_note_at",
                       "scheduler_down_since", "last_scheduler_alert"):
                 _watchdog_state[k] = None
             return
@@ -950,12 +966,16 @@ def _watchdog_check() -> None:
         #   • exit 4   → image/version mismatch, needs a Reset Installation
         #   • locked   → account locked; restarting risks a deeper lockout
         #   • failed   → wrong password; restarting just loops failed logins → lockout
-        #   • in the auto-restart window → gateway is already cycling on its own
+        #   • in the auto-restart window → gateway is already cycling on its own,
+        #     but only for AUTO_RESTART_PATIENCE: a restart that hasn't come back by
+        #     then is a fault, not a restart, and excusing it forever is what caused
+        #     the 30h+ outages this guard is now bounded to prevent.
         docker_st = _get_docker_container_state()
         c_exit    = docker_st["exit_code"]
         login_st  = _gateway_login_status
         no_restart = (c_exit == 4 or login_st in ("locked", "failed")
-                      or _in_auto_restart_window(now))
+                      or (_in_auto_restart_window(now)
+                          and down_sec < AUTO_RESTART_PATIENCE))
 
         if (down_sec >= alert_threshold
                 and _watchdog_state["last_gateway_alert"] is None
@@ -1001,8 +1021,11 @@ def _watchdog_check() -> None:
                     )
             else:
                 # Non-restartable cause → targeted page, no auto-restart.
-                _watchdog_state["last_gateway_alert"] = now
+                # last_gateway_alert is latched per-branch, NOT up front: the
+                # auto-restart-window branch below must leave it clear so self-heal
+                # re-arms once AUTO_RESTART_PATIENCE expires.
                 if c_exit == 4:
+                    _watchdog_state["last_gateway_alert"] = now
                     _send_discord_alert(
                         f"🚨 **YRVI** IB Gateway version mismatch — installed Gateway version not found "
                         f"(exit code 4). The Docker image updated to a newer Gateway version.\n"
@@ -1010,26 +1033,32 @@ def _watchdog_check() -> None:
                         f"No CLI needed."
                     )
                 elif login_st == "locked":
+                    _watchdog_state["last_gateway_alert"] = now
                     _send_discord_alert(
                         f"🔒 **YRVI** IB Gateway account locked out — too many failed login attempts. "
                         f"Reset your IBKR password in Client Portal, then restart the gateway.\n"
                         f"🔴 `{_compose_hint('restart', 'ib_gateway')}`"
                     )
                 elif login_st == "failed":
+                    _watchdog_state["last_gateway_alert"] = now
                     _send_discord_alert(
                         f"❌ **YRVI** IB Gateway login failed — wrong IBKR username or password. "
                         f"Update credentials in the dashboard Settings page, then restart the gateway.\n"
                         f"🔴 `{_compose_hint('restart', 'ib_gateway')}`"
                     )
-                else:  # auto-restart window
-                    _send_discord_alert(
-                        f"🚨 **YRVI** IB Gateway API port unreachable for {mins} min "
-                        f"(`{host}:{port}`). This is likely the scheduled daily restart — "
-                        f"a ✅ recovery message will follow once it's back up. "
-                        f"If it doesn't recover, VNC is available on host port 5900.\n"
-                        f"🔴 Manual restart: "
-                        f"`{_compose_hint('restart', 'ib_gateway')}`"
-                    )
+                else:  # auto-restart window, still inside AUTO_RESTART_PATIENCE
+                    # Deliberately does NOT latch last_gateway_alert — that would gate
+                    # the restart branch above off for the rest of the episode, so a
+                    # nightly restart that never came back would never be self-healed.
+                    if _watchdog_state["gateway_restart_window_note_at"] is None:
+                        _watchdog_state["gateway_restart_window_note_at"] = now
+                        _send_discord_alert(
+                            f"🔄 **YRVI** IB Gateway API port unreachable for {mins} min "
+                            f"(`{host}:{port}`). The scheduled daily restart is in progress, "
+                            f"so auto-recovery is holding off briefly. If it isn't back within "
+                            f"{AUTO_RESTART_PATIENCE // 60} min the watchdog will self-heal and "
+                            f"report what it did — no action needed yet."
+                        )
         elif (full_at is not None
                 and _watchdog_state["gateway_cold_restart_at"] is None
                 and _watchdog_state["last_gateway_alert"] is None
@@ -1090,6 +1119,7 @@ def _watchdog_check() -> None:
         _watchdog_state["last_gateway_alert"]      = None
         _watchdog_state["gateway_full_restart_at"] = None
         _watchdog_state["gateway_cold_restart_at"] = None
+        _watchdog_state["gateway_restart_window_note_at"] = None
 
     # ── IBKR API connection (only when gateway port is up) ────────
     # Port open but ib_insync failing → gateway logged in but API broken (Scenario 3)
@@ -1108,24 +1138,30 @@ def _watchdog_check() -> None:
             # process (no 2FA, no container bounce). So self-heal FIRST and only
             # page a human if that fails. State machine, all gated on a persistent
             # outage (>= ALERT_THRESHOLD) and firing each step once per outage:
-            #   1. in the auto-restart window → don't self-heal (gateway is already
-            #      cycling); just inform, matching the old behavior.
+            #   1. in the auto-restart window AND still inside AUTO_RESTART_PATIENCE →
+            #      hold off self-heal (the gateway is genuinely cycling) and post ONE
+            #      informational notice. This must NOT set last_ibkr_alert: that key
+            #      gates the whole block below and is only cleared on recovery or a
+            #      port-down, so latching it here disarmed self-heal for the entire
+            #      episode and turned a failed nightly restart into a multi-day
+            #      outage (see AUTO_RESTART_PATIENCE). Past the patience bound we
+            #      fall through and treat it as the real fault it is.
             #   2. first response → send a soft restart. If the command server
             #      accepts it, note the time and wait. If it doesn't (older image
             #      without the command server), page a human immediately.
             #   3. soft restart didn't recover within the grace window → escalate.
             if down_sec >= alert_threshold and _watchdog_state["last_ibkr_alert"] is None:
-                if _in_auto_restart_window(now):
-                    _watchdog_state["last_ibkr_alert"] = now
-                    _send_discord_alert(
-                        f"🚨 **YRVI** IB Gateway port is open but IBKR API connection failed "
-                        f"for {int(down_sec / 60)} min (`{err}`). "
-                        f"This is likely the scheduled daily restart — "
-                        f"a ✅ recovery message will follow once it's back up. "
-                        f"If it doesn't recover, VNC is available on host port 5900.\n"
-                        f"🔴 Manual restart: "
-                        f"`{_compose_hint('restart', 'ib_gateway')}`"
-                    )
+                if _in_auto_restart_window(now) and down_sec < AUTO_RESTART_PATIENCE:
+                    if _watchdog_state["ibkr_restart_window_note_at"] is None:
+                        _watchdog_state["ibkr_restart_window_note_at"] = now
+                        _send_discord_alert(
+                            f"🔄 **YRVI** IB Gateway port is open but the IBKR API handshake "
+                            f"failed for {int(down_sec / 60)} min (`{err}`). The scheduled "
+                            f"daily restart is in progress, so auto-recovery is holding off "
+                            f"briefly. If it isn't back within "
+                            f"{AUTO_RESTART_PATIENCE // 60} min the watchdog will self-heal "
+                            f"and report what it did — no action needed yet."
+                        )
                 elif soft_at is None:
                     soft_ok, soft_why = _soft_restart_ibgateway()
                     if soft_ok:
@@ -1286,6 +1322,7 @@ def _watchdog_check() -> None:
             _watchdog_state["ibkr_soft_restart_at"] = None
             _watchdog_state["ibkr_full_restart_at"] = None
             _watchdog_state["ibkr_cold_restart_at"] = None
+            _watchdog_state["ibkr_restart_window_note_at"] = None
     else:
         # Gateway port is down — clear IBKR state; its episode timer resets when port returns
         _watchdog_state["ibkr_down_since"] = None
@@ -1293,6 +1330,7 @@ def _watchdog_check() -> None:
         _watchdog_state["ibkr_soft_restart_at"] = None
         _watchdog_state["ibkr_full_restart_at"] = None
         _watchdog_state["ibkr_cold_restart_at"] = None
+        _watchdog_state["ibkr_restart_window_note_at"] = None
 
     # ── Scheduler heartbeat ───────────────────────────────────────
     sched_ok = _scheduler_pid() is not None
@@ -1897,6 +1935,8 @@ def restart_gateway():
     _watchdog_state["last_full_restart_at"] = now
     _watchdog_state["last_gateway_alert"]   = None
     _watchdog_state["last_ibkr_alert"]      = None
+    _watchdog_state["ibkr_restart_window_note_at"]    = None
+    _watchdog_state["gateway_restart_window_note_at"] = None
     print(f"[api/gateway-restart] operator-triggered full restart (live={is_live})")
     msg = ("Gateway restarting — re-running login. "
            + ("⚠️ LIVE: approve the IB Key 2FA push on your phone now. "
