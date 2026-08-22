@@ -320,7 +320,32 @@ export default function Dashboard() {
                 <div className="text-4xl font-bold text-gray-900 dark:text-white font-mono tracking-tight">{countdown}</div>
                 <div className="text-gray-500 dark:text-gray-600 text-sm mt-1.5">{execLabel}</div>
               </div>
-              <Clock size={52} className="text-blue-600/30" />
+              {/* Strategy track + countdown share the card's right edge.
+                  This lives here rather than in StatusBar because that header
+                  is already full at 1280 — the account number overflows it
+                  before anything is added, and a pill there pushed the
+                  LIVE/PAPER badge off screen, which that file calls out as the
+                  one thing that must never happen.
+
+                  Server-resolved from the live settings on every /api/status
+                  poll, never a stored label, so it cannot drift from the box
+                  it describes: change any pinned setting and it falls to
+                  Custom on its own. See tracks.py. */}
+              <div className="flex flex-col items-end gap-3">
+                {status?.track && (
+                  <span
+                    title={`Strategy track: ${status.track.name} — ${status.track.short}. Change it in Settings → Fund Settings.`}
+                    className={`text-xs font-bold px-3 py-1 rounded-full border whitespace-nowrap ${
+                      status.track.id === 'YRVI-Custom'
+                        ? 'bg-gray-100 text-gray-600 border-gray-300 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700'
+                        : 'bg-purple-100 text-purple-700 border-purple-300 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-800'
+                    }`}
+                  >
+                    {status.track.emoji} {status.track.id}
+                  </span>
+                )}
+                <Clock size={52} className="text-blue-600/30" />
+              </div>
             </div>
           </div>
         )}

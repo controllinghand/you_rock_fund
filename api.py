@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from secrets_client import get_secret
 from market_calendar import is_market_holiday, is_first_trading_day_of_week
+from tracks import all_tracks, resolve_track
 
 load_dotenv()
 
@@ -3276,6 +3277,10 @@ def get_status():
         "account":            ibkr["account"],
         "next_execution":       _next_execution(),
         "trading_mode":         settings.get("trading_mode", "paper"),
+        # Derived from the live settings on every call, never stored — see
+        # tracks.py. A stored label would be a cache that eventually disagrees
+        # with the box it claims to describe.
+        "track":                resolve_track(settings),
         "dry_run":              settings.get("dry_run", False),
         "execution_time":       settings.get("execution_time", "10:00"),
         "wheel_count":          wheel_count,
@@ -3540,6 +3545,19 @@ def get_live_ready():
 @app.get("/api/settings")
 def get_settings_endpoint():
     return load_settings()
+
+
+@app.get("/api/tracks")
+def get_tracks():
+    """Track definitions plus the one currently in effect.
+
+    The definitions (which settings a track pins, and to what) are served from
+    here rather than duplicated in the frontend — two copies of this table is
+    precisely how the badge would start disagreeing with the box. The Settings
+    page re-runs the match against its unsaved edits to preview the selection;
+    the authoritative answer is always this `active`, recomputed from disk.
+    """
+    return {"tracks": all_tracks(), "active": resolve_track(load_settings())}
 
 class SettingsUpdate(BaseModel):
     fund_budget:              Optional[float] = None

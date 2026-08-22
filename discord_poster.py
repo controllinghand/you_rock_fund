@@ -10,7 +10,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from config import MAX_PER_POSITION, TRADING_MODE, ACCOUNT, MODE_LABEL
+from config import MAX_PER_POSITION, TRADING_MODE, ACCOUNT, MODE_LABEL, get_settings
+from tracks import resolve_track
 from secrets_client import get_secret
 
 load_dotenv()
@@ -24,6 +25,28 @@ from app_timezone import LOCAL_TZ as PST  # noqa: E402
 _version_file = Path(__file__).parent / "VERSION"
 _VERSION = f"v{_version_file.read_text().strip()}" if _version_file.exists() else "unknown"
 _FOOTER  = f"You Rock Volatility Income Fund · {_VERSION} · {MODE_LABEL}"
+
+
+def _footer(suffix: str = "") -> str:
+    """Provenance line for every post, stamped with the active strategy track.
+
+    Discord is the permanent audit trail, so the footer answers "which arm
+    produced these numbers?" — the dashboard badge only ever says what the box
+    is running *now*. That matters most for the standalone boxes, where Discord
+    is the only channel there is.
+
+    Resolved HERE, on every post, rather than baked into the module-level
+    _FOOTER: config.get_settings() hot-reloads from settings.json, so a track
+    changed in the UI is reflected on the next post without a restart. A
+    module-level snapshot would go stale the moment someone switched tracks —
+    the same trap the DRY_RUN import snapshot fell into.
+    """
+    try:
+        track = resolve_track(get_settings())
+        stamp = f" · {track['emoji']} {track['id']}"
+    except Exception:
+        stamp = ""          # a footer must never be the reason a post fails
+    return f"{_FOOTER}{stamp}{suffix}"
 
 COLOR_GREEN  = 0x2ECC71   # yield ≥ 1%
 COLOR_YELLOW = 0xF1C40F   # yield 0.5–1%
@@ -541,6 +564,19 @@ def _deployed_field(deployed: dict) -> dict | None:
             "value": f"{line}\n{detail}{slots_block}{warn}", "inline": False}
 
 
+def _track_field() -> dict:
+    """Inline field naming the active strategy track, for the weekly results
+    card. Degrades to the old zero-width spacer if resolution fails, so the
+    grid never collapses and a post never dies over a label."""
+    try:
+        track = resolve_track(get_settings())
+        return {"name": "Track",
+                "value": f"{track['emoji']} {track['id']}",
+                "inline": True}
+    except Exception:
+        return {"name": "\u200b", "value": "\u200b", "inline": True}
+
+
 def post_weekly_results(state: dict, fund_budget: float = 250_000,
                          capital: float = None, goal_pct: float = 0.24,
                          net_liq: float = None, manual: bool = False,
@@ -582,7 +618,11 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
         {"name": "Shares Sold P&L",  "value": f"${shares_sold_pnl:,.0f}", "inline": True},
         {"name": "Week Yield",       "value": f"{yield_pct:.2f}%",        "inline": True},
         {"name": "Total Realized",   "value": f"${total_realized:,.0f}",  "inline": True},
-        {"name": "​",           "value": "​",                   "inline": True},
+        # Was a zero-width spacer holding the 3-column grid. The track earns
+        # that slot: this is the post whose numbers get compared across boxes,
+        # so the arm that produced them belongs in the card, not only the
+        # footer. Same field count, same layout.
+        _track_field(),
     ]
 
     # Committed capital sits directly under the premium row — high in the card,
@@ -703,7 +743,7 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
                      f"${total_realized:,.0f} realized ({yield_pct:.2f}%)",
         "color":     _yield_color(yield_pct),
         "fields":    fields,
-        "footer":    {"text": _FOOTER + (" · Manual run" if manual else "")},
+        "footer":    {"text": _footer(" · Manual run" if manual else "")},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 
@@ -735,7 +775,7 @@ def post_preview(positions: list, budget: float):
             {"name": "Positions",         "value": str(len(positions)),   "inline": True},
             {"name": "Est. Total Prem.",  "value": f"~${est_total:,.0f}", "inline": True},
         ],
-        "footer":    {"text": _FOOTER},
+        "footer":    {"text": _footer()},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 
@@ -787,7 +827,7 @@ def post_emergency_share_sale(result: dict):
                 {"name": "Realized P&L", "value": pnl_str,               "inline": True},
                 {"name": "Reason",       "value": reason_str,            "inline": True},
             ],
-            "footer":    {"text": f"{_FOOTER} — SHARES SOLD"},
+            "footer":    {"text": _footer(" — SHARES SOLD")},
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }],
     })
@@ -929,7 +969,7 @@ def post_weekly_review(state: dict, called_away: list, new_assignments: list,
         "description": f"**${grand_total:,.0f} realized**  ({yield_pct:.2f}% yield)",
         "color":       _yield_color(yield_pct),
         "fields":      fields,
-        "footer":      {"text": _FOOTER},
+        "footer":      {"text": _footer()},
         "timestamp":   datetime.now(timezone.utc).isoformat(),
     }]})
 
@@ -964,7 +1004,7 @@ def post_called_away_alert(called_away: list):
             "value":  "Capital returns to the CSP pool — new positions sized Monday 10:00 AM",
             "inline": False,
         }],
-        "footer":    {"text": _FOOTER},
+        "footer":    {"text": _footer()},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})
 
@@ -989,6 +1029,6 @@ def post_assignment_alert(new_assignments: list):
             "value":  "Wheel check runs Monday 9:55AM — screener check + 0.20-delta covered calls",
             "inline": False,
         }],
-        "footer":    {"text": _FOOTER},
+        "footer":    {"text": _footer()},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]})

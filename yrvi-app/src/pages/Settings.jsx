@@ -241,8 +241,16 @@ export default function SettingsPage() {
   const [deleting, setDeleting]               = useState(false)
   const fileInputRef                          = useRef(null)
 
+  const [trackDefs, setTrackDefs] = useState([])
+
   const { theme, setTheme } = useThemeContext()
   const { setDirty } = useUnsavedChanges()
+
+  useEffect(() => {
+    axios.get('/api/tracks')
+      .then(r => setTrackDefs(r.data?.tracks ?? []))
+      .catch(() => setTrackDefs([]))   // selector hides; the toggles still work
+  }, [])
 
   useEffect(() => {
     axios.get('/api/settings').then(r => {
@@ -278,6 +286,33 @@ export default function SettingsPage() {
   const set = useCallback((key, val) => {
     setSettings(prev => ({ ...prev, [key]: val }))
   }, [])
+
+  // Selecting a track stages every setting it pins, in one update — the
+  // toggles below visibly move, then Save writes them like any other edit.
+  // There is no separate "track" field on disk: the track IS those settings.
+  const applyTrack = useCallback((track) => {
+    setSettings(prev => ({ ...prev, ...(track.pins ?? {}) }))
+  }, [])
+
+  // Mirror of tracks.py resolve_track(), run against the UNSAVED edits so the
+  // selection previews before saving. The pin TABLE still comes from the
+  // server (/api/tracks) — only the comparison lives here, so there is one
+  // definition. StatusBar shows the server's own answer, which means any
+  // divergence between these two matchers surfaces immediately as a mismatch
+  // between this page and the badge rather than hiding.
+  const resolveTrack = useCallback((cur) => {
+    const matches = (key, want) => {
+      if (!(key in (cur ?? {}))) return false      // absence is not a match
+      const have = cur[key]
+      if (typeof want === 'boolean') return !!have === want
+      if (typeof want === 'number')  return Math.abs(Number(have) - want) < 1e-9
+      return have === want
+    }
+    return trackDefs.find(t =>
+      Object.keys(t.pins ?? {}).length > 0 &&
+      Object.entries(t.pins).every(([k, v]) => matches(k, v))
+    ) ?? trackDefs.find(t => t.id === 'YRVI-Custom') ?? null
+  }, [trackDefs])
 
   const showMsg = (type, text) => {
     setMsg({ type, text })
@@ -668,6 +703,74 @@ export default function SettingsPage() {
 
       {/* Fund Settings */}
       <Section title="Fund Settings" emoji="💰">
+        {/* Strategy track. A track is not a stored field — it IS the settings
+            it pins, so picking one just stages those toggles (they visibly
+            move below) and Save writes them normally. Which track you are on
+            is therefore always derived from what is actually on disk, and
+            changing any pinned setting by hand drops you to Custom on its own.
+            Custom is a RESULT, never a choice: there is nothing for it to
+            write, so it renders as a state, not a button. */}
+        {trackDefs.length > 0 && (() => {
+          const active   = resolveTrack(settings)
+          const isCustom = active?.id === 'YRVI-Custom'
+          return (
+            <div className="pb-1">
+              <div className="flex items-baseline justify-between gap-2 mb-2">
+                <span className="text-sm font-semibold text-gray-900 dark:text-white">Strategy Track</span>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${
+                  isCustom
+                    ? 'bg-gray-100 text-gray-600 border-gray-300 dark:bg-gray-800 dark:text-gray-400 dark:border-gray-700'
+                    : 'bg-purple-100 text-purple-700 border-purple-300 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-800'
+                }`}>
+                  {active ? `${active.emoji} ${active.id}` : '—'}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-600 mb-3 leading-relaxed">
+                Picks a tested combination of the wheel settings below in one step. The
+                badge always reflects the settings as they actually are — adjust any of
+                them yourself and it becomes Custom.
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {trackDefs.filter(t => t.id !== 'YRVI-Custom').map(t => {
+                  const on = active?.id === t.id
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => applyTrack(t)}
+                      aria-pressed={on}
+                      title={t.description}
+                      className={`text-left rounded-lg border p-3 transition ${
+                        on
+                          ? 'border-purple-400 bg-purple-50 dark:bg-purple-900/20 dark:border-purple-700 ring-1 ring-purple-300 dark:ring-purple-800'
+                          : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900/40'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span>{t.emoji}</span>
+                        <span className="text-sm font-semibold text-gray-900 dark:text-white">{t.name}</span>
+                      </div>
+                      <div className="text-[11px] font-mono text-gray-400 dark:text-gray-600 mt-0.5">{t.id}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-500 mt-1 leading-snug">{t.short}</div>
+                    </button>
+                  )
+                })}
+              </div>
+              {isCustom && (
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
+                  🔧 Your settings don’t match a named track. Nothing is wrong — the
+                  results just aren’t comparable to the tracked funds. Pick one above
+                  to snap back to it.
+                </p>
+              )}
+              {active && !isCustom && (
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
+                  {active.description}
+                </p>
+              )}
+            </div>
+          )
+        })()}
         <SliderRow label="Initial Fund Budget"  value={settings.fund_budget}      min={10000}  max={2000000} step={10000} format={v => `$${v.toLocaleString()}`} onChange={v => set('fund_budget', v)} />
         <SliderRow
           label="Annual Goal %"
