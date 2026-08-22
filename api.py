@@ -2390,9 +2390,18 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
             # ── Positions via reqPositions (no subscription, no hang)
             pnl_reqs: list = []   # bound before the try so `finally` can always cancel
             try:
-                ib.reqPositions()
-                ib.sleep(2)
-                raw_positions = ib.positions()
+                # Use the list reqPositions() RETURNS, not ib.positions().
+                # ib.positions() is ib_insync's accumulating cache, and it only
+                # drops a contract when IBKR sends an explicit posSize == 0. An
+                # assigned or expired option never gets that zero — it simply
+                # stops appearing in later snapshots — so it lingers in that dict
+                # for the life of the connection. With one long-lived shared
+                # connection (v5.2.96) that means forever: on 2026-08-22 all five
+                # Aug-21 puts had been assigned Friday, yet every poll still
+                # reported them short, double-counting $240,250 of phantom CSP
+                # collateral and showing Capital Deployed at 239% instead of 119%.
+                # The returned list is exactly what IBKR sent for THIS request.
+                raw_positions = ib.reqPositions()
                 print(f"[api] reqPositions returned {len(raw_positions)} items")
 
                 # ── Per-position market value + unrealized P&L via reqPnLSingle.
