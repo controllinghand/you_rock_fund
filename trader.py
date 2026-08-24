@@ -5,6 +5,7 @@ import os
 import shutil
 import time
 from datetime import datetime, timezone, timedelta
+from typing import NamedTuple
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilter
 
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
@@ -413,19 +414,40 @@ def is_nan(val) -> bool:
         return True
 
 
-def _get_greeks_for_contract(ib: IB, contract) -> tuple[float | None, float | None]:
-    """Request delayed market data and return (put delta, implied vol) from the
-    same greeks snapshot. Either value may be None if IBKR has no data."""
-    tkr = ib.reqMktData(contract, genericTickList="106", snapshot=False)
+class StrikeProbe(NamedTuple):
+    """One strike's execution-relevant snapshot. Any field may be None if IBKR
+    had no data for it within the request window."""
+    delta: float | None
+    iv:    float | None
+    oi:    float | None
+    bid:   float | None
+
+
+def _probe_strike(ib: IB, contract) -> StrikeProbe:
+    """Delta, implied vol, open interest and bid for one strike, from a SINGLE
+    market-data request.
+
+    Open interest (tick 101) and the bid ride along with the greeks at no extra
+    cost — measured live, both populate at ~1s while delta is the slowest tick,
+    so the existing 3s window already covers them. Carrying them here is what
+    lets the chain scan judge a strike on what actually decides the trade
+    (liquidity and yield) at the moment it picks, rather than one gate later.
+    """
+    tkr = ib.reqMktData(contract, genericTickList="106,101", snapshot=False)
     ib.sleep(3)
     ib.cancelMktData(contract)
     ib.sleep(0.5)
+
+    def _clean(v):
+        return float(v) if (v is not None and not is_nan(v) and v > 0) else None
+
+    oi, bid = _clean(tkr.putOpenInterest), _clean(tkr.bid)
     for greeks in (tkr.modelGreeks, tkr.lastGreeks, tkr.bidGreeks, tkr.askGreeks):
         if greeks is not None and not is_nan(greeks.delta):
             iv = getattr(greeks, "impliedVol", None)
             iv = iv if (iv is not None and not is_nan(iv)) else None
-            return greeks.delta, iv
-    return None, None
+            return StrikeProbe(greeks.delta, iv, oi, bid)
+    return StrikeProbe(None, None, oi, bid)
 
 
 def _get_stock_price(ib: IB, ticker: str) -> float | None:
@@ -466,6 +488,39 @@ def _fetch_available_cash(ib: IB) -> float | None:
     return None
 
 
+def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str | None:
+    """Is this strike worth writing? Returns None if yes, else a short reason.
+
+    Two tests, both mirroring thresholds the rest of the system already uses:
+      - OI notional (OI × strike × 100) against min_oi_notional / min_oi_floor,
+        the same gate check_liquidity applies at the end of the funnel
+      - bid yield (bid / strike) against min_bid_yield_pct — the fund's 1% bar
+
+    The yield test matters because the scan walks DOWNWARD: every step further
+    OTM buys a lower delta with a smaller premium. Without it, an OI-aware scan
+    happily trades away yield to find a liquid strike and writes a put well
+    under the 1% bar. On 2026-08-24 IONQ would have been written at 0.66%.
+
+    Unknown OI or bid (IBKR returned no tick) is treated as PASS — a missing
+    tick must never push the scan past an otherwise good strike. Those fall
+    through to check_liquidity, where a real skip belongs.
+
+    Thresholds hot-reload from settings.json on every call.
+    """
+    s = get_settings()
+    if oi is not None:
+        if oi < s.get("min_oi_floor", MIN_OI_FLOOR):
+            return f"OI {oi:.0f} below floor"
+        notional = oi * strike * 100
+        if notional < s.get("min_oi_notional", MIN_OI_NOTIONAL):
+            return f"OI {oi:.0f} = ${notional:,.0f} notional"
+    if bid is not None:
+        yld = bid / strike if strike > 0 else 0
+        if yld < s.get("min_bid_yield_pct", MIN_BID_YIELD_PCT):
+            return f"bid ${bid:.2f} = {yld * 100:.2f}% yield"
+    return None
+
+
 def verify_and_adjust_strike(
         ib: IB, ticker: str, screener_strike: float,
         expiry_str: str, screener_delta: float,
@@ -498,7 +553,8 @@ def verify_and_adjust_strike(
         log.error(f"  ❌ {ticker} delta-check qualify error: {e}")
         return None
 
-    live_delta, live_iv = _get_greeks_for_contract(ib, c)
+    probe = _probe_strike(ib, c)
+    live_delta, live_iv = probe.delta, probe.iv
 
     if live_delta is None:
         log.warning(f"  ⚠️  {ticker} — no live delta from IBKR; "
@@ -529,6 +585,29 @@ def verify_and_adjust_strike(
     ib.sleep(1)
 
     def _scan_strikes(candidates: list, label: str) -> tuple | None:
+        """Return the best strike among `candidates`, preferring one that is
+        actually worth writing.
+
+        Two tiers, in order:
+          1. delta within cap AND clears the OI floor AND pays the 1% bid yield
+          2. otherwise: the first strike within the delta cap — byte-for-byte
+             the old behaviour, left to check_liquidity to accept or skip
+
+        Candidates arrive highest-strike-first in both scan directions, so the
+        tier-1 winner is also the most premium among strikes worth writing.
+
+        Why tier 1 exists: selecting on delta alone kept landing on dead
+        off-round strikes one increment from a deep one — on 2026-08-24 MRNA
+        took $124 (OI 42) with $120 (OI 3698) four dollars below, and the name
+        was skipped for $0 rather than written slightly deeper.
+
+        Why tier 2 is a plain delta match and NOT a relaxed tier-1: anything
+        smarter changes which strike gets picked when tier 1 finds nothing, and
+        every such "improvement" trades yield for fillability. Falling back to
+        exactly what the old scan chose means this can only ever turn a skip
+        into a fill, never a good fill into a worse one.
+        """
+        delta_only: tuple | None = None
         for alt_strike in candidates:
             alt_c = Option(ticker, expiry, alt_strike, "P", "SMART", currency="USD")
             try:
@@ -542,14 +621,26 @@ def verify_and_adjust_strike(
                 if _is_connection_error(ib, e):
                     raise GatewayUnavailable(f"{ticker} chain scan at ${alt_strike:.2f}: {e}") from e
                 continue
-            alt_delta, alt_iv = _get_greeks_for_contract(ib, alt_c)
-            if alt_delta is None:
+            alt = _probe_strike(ib, alt_c)
+            if alt.delta is None or abs(alt.delta) > MAX_DELTA:
                 continue
-            if abs(alt_delta) <= MAX_DELTA:
+            candidate = (alt_c, alt_strike, orig_delta, alt.delta, alt.iv, True)
+            shortfall = _strike_shortfall(alt.oi, alt.bid, alt_strike)
+            if shortfall is None:
                 log.warning(f"  {label} {ticker} strike adjusted ${screener_strike:.2f} → "
-                            f"${alt_strike:.2f} (delta {orig_delta:.3f} → {alt_delta:.3f})")
-                return alt_c, alt_strike, orig_delta, alt_delta, alt_iv, True
-        return None
+                            f"${alt_strike:.2f} (delta {orig_delta:.3f} → {alt.delta:.3f}"
+                            f"{f', OI {alt.oi:.0f}' if alt.oi is not None else ''}"
+                            f"{f', {alt.bid / alt_strike * 100:.2f}% yield' if alt.bid else ''})")
+                return candidate
+            if delta_only is None:
+                delta_only = candidate      # preserve the old pick as the fallback
+            log.info(f"  ↷ {ticker} ${alt_strike:.2f} delta {alt.delta:.3f} OK but "
+                     f"{shortfall} — looking deeper")
+        if delta_only is not None:
+            log.warning(f"  {label} {ticker} no strike clears delta, open interest AND yield "
+                        f"— falling back to ${delta_only[1]:.2f} (delta {delta_only[3]:.3f}); "
+                        f"liquidity gate decides")
+        return delta_only
 
     if abs(live_delta) > MAX_DELTA:
         # Stock fell — scan downward for first strike with delta ≤ MAX_DELTA
