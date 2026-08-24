@@ -2403,17 +2403,32 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
                 # collateral and showing Capital Deployed at 239% instead of 119%.
                 # The returned list is exactly what IBKR sent for THIS request.
                 raw_positions = ib.reqPositions()
-                print(f"[api] reqPositions returned {len(raw_positions)} items")
+                # Drop CLOSED positions. IBKR reports a position that was closed
+                # during this session as an explicit position == 0 row, and those
+                # rows keep coming back in every later snapshot. They are not
+                # holdings and must not reach the table: reqPnLSingle still
+                # returns a residual value for the conId, so a sold-out name
+                # renders as "position 0" sitting next to a full market value and
+                # unrealized P&L. On 2026-08-24 the five stocks the CSP-only box
+                # liquidated that morning (AAOI, BE, CBRS, CRDO, NBIS) all showed
+                # up that way — AAOI as 0 shares worth $77,742.
+                #
+                # This is the mirror image of the ghost-option bug fixed in
+                # v5.2.101: there the cache never sent the zero, so assigned puts
+                # lingered; here IBKR does send it and we were rendering it.
+                acct_positions = [
+                    pos for pos in raw_positions
+                    if not (account_env and pos.account != account_env)
+                    and (pos.position or 0) != 0
+                ]
+                print(f"[api] reqPositions returned {len(raw_positions)} items "
+                      f"({len(acct_positions)} open after dropping closed/other-account rows)")
 
                 # ── Per-position market value + unrealized P&L via reqPnLSingle.
                 # ib.portfolio() only populates after a reqAccountUpdates stream,
                 # which we never start; reqPnLSingle gives IBKR-computed value and
                 # unrealizedPnL per conId (correct cost basis/sign), and needs the
                 # account's market-data entitlement (OPRA for options).
-                acct_positions = [
-                    pos for pos in raw_positions
-                    if not (account_env and pos.account != account_env)
-                ]
                 pnl_lookup: dict = {}
                 for pos in acct_positions:
                     try:
