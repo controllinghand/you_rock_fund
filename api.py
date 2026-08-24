@@ -919,6 +919,74 @@ def _watchdog_cadence(now: datetime) -> tuple:
     return WATCHDOG_INTERVAL, ALERT_THRESHOLD
 
 
+# A healthy full IBKR fetch takes ~8s on the slowest box (Intel mini, 9 positions —
+# the reqPnLSingle poll runs to near its 8s cap). 45s is >5x that, so this can never
+# fire on a merely slow box; anything past it is genuinely unresponsive.
+IBKR_PROBE_TIMEOUT = 45
+
+_ibkr_probe_inflight = threading.Event()
+
+
+def _probe_ibkr_bounded(settings: dict, timeout: float = IBKR_PROBE_TIMEOUT) -> dict:
+    """The watchdog's view of IBKR health, bounded in time.
+
+    The watchdog only ever reads `connected` and `error`, but it used to get them
+    from _get_ibkr_data() — the FULL dashboard fetch, which takes _ibkr_lock and
+    round-trips positions, per-position P&L and account summary. When the gateway
+    wedges, that call blocks indefinitely, and because the heartbeat is written
+    only after _watchdog_check() returns, the watchdog stopped checking in. The
+    supervisor that is supposed to notice a hung gateway hung on the same gateway.
+
+    That is what made 2026-08-24 unrecoverable. The execution-window cadence
+    (poll 60s, act after 120s) exists precisely to clear a wedge while the run is
+    still retrying — but it never got to run, because the thread wasn't looping.
+    Recovery fell through to the 20-minute selfheal, and the Monday run had died
+    22 minutes earlier.
+
+    Running the fetch in a throwaway thread and giving up on it after `timeout`
+    turns "the watchdog dies with the gateway" into "the watchdog observes that
+    the gateway is unresponsive" — which is a fact it already knows how to act on,
+    on its own cadence.
+
+    A timed-out probe is reported as not-connected, which is true and is what we
+    want the caller to escalate on. The abandoned thread is a daemon holding
+    _ibkr_lock; it unblocks on its own when the gateway comes back. While it is
+    still out there we do NOT start a second one — that would queue on the lock
+    and hang the new probe too — and its mere existence is fresh evidence the
+    gateway is still unresponsive.
+    """
+    def _unresponsive(msg: str) -> dict:
+        return {**_IBKR_EMPTY, "connected": False, "error": msg}
+
+    if _ibkr_probe_inflight.is_set():
+        return _unresponsive(
+            "previous IBKR probe still running — gateway unresponsive")
+
+    holder: dict = {}
+
+    def _work():
+        try:
+            holder["data"] = _get_ibkr_data(settings)
+        except Exception as e:                      # mirror the old call's behaviour
+            holder["error"] = e
+        finally:
+            _ibkr_probe_inflight.clear()
+
+    _ibkr_probe_inflight.set()
+    t = threading.Thread(target=_work, daemon=True, name="yrvi-watchdog-ibkr-probe")
+    t.start()
+    t.join(timeout)
+
+    if t.is_alive():
+        print(f"[api/watchdog] IBKR probe exceeded {timeout:.0f}s — treating as "
+              f"unresponsive (gateway wedged); watchdog stays alive to escalate")
+        return _unresponsive(f"IBKR probe exceeded {timeout:.0f}s (gateway unresponsive)")
+
+    if "error" in holder:
+        return _unresponsive(f"IBKR probe failed: {holder['error']}")
+    return holder.get("data") or _unresponsive("IBKR probe returned nothing")
+
+
 def _watchdog_check() -> None:
     """Check gateway and scheduler health; send Discord alerts on persistent failures."""
     now = datetime.now(PST)
@@ -1126,7 +1194,7 @@ def _watchdog_check() -> None:
     # Port open but ib_insync failing → gateway logged in but API broken (Scenario 3)
     # or stuck on an unexpected dialog that kept the port open (Scenario 2 edge case).
     if gw_up:
-        ibkr = _get_ibkr_data(settings)
+        ibkr = _probe_ibkr_bounded(settings)
         if not ibkr["connected"]:
             if _watchdog_state["ibkr_down_since"] is None:
                 _watchdog_state["ibkr_down_since"] = now
@@ -1380,6 +1448,13 @@ def _run_watchdog() -> None:
 _WATCHDOG_SELF_HEAL_STALE_MIN = 20  # a bit past the scheduler's 15-min dead-man's-switch
                                      # threshold, so its page fires first and this is the
                                      # backstop.
+# Inside the execution window that ordering is wrong: a 20-minute wait to recover the
+# watchdog is longer than the run itself survives, and paging before acting just means
+# the operator reads about a run that is already lost. In the window, act first.
+# A healthy cycle there writes a heartbeat about every 70s (bounded probe + 60s sleep),
+# so 5 minutes is ~4 missed cycles — far too many to be a slow box, fast enough to
+# still matter to the run.
+_WATCHDOG_SELF_HEAL_STALE_MIN_EXEC = 5
 
 
 def _run_watchdog_selfheal_monitor() -> None:
@@ -1402,9 +1477,13 @@ def _run_watchdog_selfheal_monitor() -> None:
                 ts = datetime.fromisoformat(
                     json.loads(WATCHDOG_HEARTBEAT_FILE.read_text())["timestamp"])
                 age_min = (datetime.now(PST) - ts).total_seconds() / 60
-            if age_min is None or age_min >= _WATCHDOG_SELF_HEAL_STALE_MIN:
+            stale_min = (_WATCHDOG_SELF_HEAL_STALE_MIN_EXEC
+                         if _in_execution_window(datetime.now(PST))
+                         else _WATCHDOG_SELF_HEAL_STALE_MIN)
+            if age_min is None or age_min >= stale_min:
                 print(f"[api/watchdog-selfheal] heartbeat "
-                      f"{'missing' if age_min is None else f'stale {int(age_min)} min'} — "
+                      f"{'missing' if age_min is None else f'stale {int(age_min)} min'} "
+                      f"(threshold {stale_min} min) — "
                       f"restarting the api process to recover the watchdog thread")
                 try:
                     _send_discord_alert(
@@ -1416,7 +1495,7 @@ def _run_watchdog_selfheal_monitor() -> None:
                 os._exit(1)  # let `restart: unless-stopped` do the recovery
         except Exception as e:
             print(f"[api/watchdog-selfheal] check failed: {e}")
-        time.sleep(120)
+        time.sleep(60 if _in_execution_window(datetime.now(PST)) else 120)
 
 
 _LOG_RELEVANT_KEYWORDS = (
