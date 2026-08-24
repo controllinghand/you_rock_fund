@@ -24,7 +24,11 @@ TRACKS = [
     {
         "id":    "YRVI-26",
         "name":  "Ride the Wave",
-        "emoji": "🌊",
+        # 🏄 not 🌊: this renders in the Discord embed FOOTER as well as the
+        # Track field, and the footer draws at ~16px where the water-wave glyph
+        # turns into an unreadable smudge. A custom server emoji isn't an option —
+        # embed footers don't parse <:name:id> markup, they print it literally.
+        "emoji": "🏄",
         "short": "Wheel, hold through drawdowns",
         "description": (
             "The original wheel. After an assignment the fund writes covered "
@@ -40,7 +44,10 @@ TRACKS = [
     {
         "id":    "YRVI-SL",
         "name":  "Stop Loss",
-        "emoji": "🛑",
+        # ✋, a single codepoint with Emoji_Presentation=Yes, so it needs no
+        # U+FE0F to render as emoji. Like 🏄 above, chosen for a bold flat
+        # silhouette that survives the ~16px Discord embed footer.
+        "emoji": "✋",
         "short": "Wheel + 10% stop",
         "description": (
             "The wheel, plus a 10% stop loss on wheel holdings checked at the "
