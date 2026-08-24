@@ -54,6 +54,46 @@ function wheelCheckTime(val) {
   return `${h12}:${String(wm).padStart(2, '0')} ${wh >= 12 ? 'PM' : 'AM'} PST`
 }
 
+// Every half hour of the day, plus IBKR's 11:59 PM default. The list used to run
+// 7 PM → 2 AM only, on the assumption that the gateway restart belongs overnight.
+// That assumption cost a Monday run: the gateway wedges as its JVM ages, and with
+// the restart pinned to the small hours the week's execution always landed on an
+// 8-10 hour old gateway with no way to schedule a fresher one.
+const RESTART_TIME_OPTIONS = (() => {
+  const pad = n => String(n).padStart(2, '0')
+  const opts = []
+  for (let mins = 0; mins < 1440; mins += 30) {
+    const h = Math.floor(mins / 60)
+    const m = mins % 60
+    opts.push(`${pad(h % 12 || 12)}:${pad(m)} ${h >= 12 ? 'PM' : 'AM'}`)
+    if (h === 23 && m === 30) opts.push('11:59 PM')   // keep the default in order
+  }
+  return opts
+})()
+
+// "07:00 AM" → minutes past midnight, for the collision check below.
+function restartTimeToMins(val) {
+  const m = /^(\d{2}):(\d{2}) (AM|PM)$/.exec(val || '')
+  if (!m) return null
+  let h = parseInt(m[1], 10) % 12
+  if (m[3] === 'PM') h += 12
+  return h * 60 + parseInt(m[2], 10)
+}
+
+// A restart inside the execution window is the one genuinely damaging choice on
+// this control: the gateway would be reconnecting exactly while the wheel check
+// and CSP pipeline are placing orders. Warn from the wheel check (exec − 5 min)
+// through an hour past execution, matching the api's own EXEC_WINDOW_AFTER_MIN.
+function restartHitsExecWindow(restartVal, execVal) {
+  const r = restartTimeToMins(restartVal)
+  if (r === null || !/^\d{2}:\d{2}$/.test(execVal || '')) return false
+  const [eh, em] = execVal.split(':').map(n => parseInt(n, 10))
+  if (isNaN(eh) || isNaN(em)) return false
+  const start = (eh * 60 + em - 5 + 1440) % 1440
+  const end   = (eh * 60 + em + 60) % 1440
+  return start <= end ? (r >= start && r <= end) : (r >= start || r <= end)
+}
+
 function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange, description }) {
   const fillPct = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0
   return (
@@ -1148,18 +1188,26 @@ export default function SettingsPage() {
             onChange={e => { set('auto_restart_time', e.target.value); setPatchResult(null) }}
             className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
           >
-            {[
-              '07:00 PM','07:30 PM','08:00 PM','08:30 PM',
-              '09:00 PM','09:30 PM','10:00 PM','10:30 PM',
-              '11:00 PM','11:30 PM','11:59 PM',
-              '12:00 AM','12:30 AM','01:00 AM','01:30 AM','02:00 AM',
-            ].map(t => (
+            {RESTART_TIME_OPTIONS.map(t => (
               <option key={t} value={t}>{t}{t === '11:59 PM' ? ' (default)' : ''}</option>
             ))}
           </select>
           <div className="mt-2 text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
-            IB Gateway restarts at this time each night to keep the session fresh. Choose a time with no trading activity.
+            IB Gateway restarts at this time each day to keep the session fresh. The gateway
+            gets less stable the longer it runs, so a restart a few hours before your
+            execution time means the week's run starts on a fresh gateway. Avoid times when a
+            job is scheduled.
           </div>
+          {restartHitsExecWindow(settings.auto_restart_time ?? '11:59 PM', settings.execution_time) && (
+            <div className="mt-2 text-xs text-amber-600 dark:text-amber-500 leading-relaxed">
+              ⚠️ This restart lands inside your execution window
+              {wheelCheckTime(settings.execution_time)
+                ? <> ({wheelCheckTime(settings.execution_time)} wheel check → an hour past
+                  {' '}{fmtExecTime(settings.execution_time)})</>
+                : null}. The gateway would be reconnecting while orders are being placed.
+              Pick a time outside that window.
+            </div>
+          )}
         </div>
 
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
