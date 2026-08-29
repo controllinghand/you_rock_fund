@@ -11,6 +11,9 @@ trade_log.txt
 wheel_log.txt
 risk_log.txt
 scheduler_log.txt
+cash_park_log.txt
+# rotated backups written by log_setup.py (wheel_log.txt.1, .2, …)
+*.txt.[0-9]
 state.json
 ytd_tracker.json
 earnings_cache.json

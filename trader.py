@@ -8,16 +8,10 @@ from datetime import datetime, timezone, timedelta
 from typing import NamedTuple
 from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilter
 
+import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.FileHandler("trade_log.txt"),
-        logging.StreamHandler()
-    ]
-)
+log_setup.configure("trade_log.txt")
 log = logging.getLogger(__name__)
 
 TRADE_LOG_JSON      = "trade_log.json"

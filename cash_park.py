@@ -31,6 +31,7 @@ from datetime import datetime
 
 from ib_insync import IB, Stock, Order
 
+import log_setup
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_CASH_PARK, ACCOUNT, ACCOUNT_TYPE,
     MODE_LABEL, get_settings, connect_with_retry,
@@ -49,8 +50,7 @@ NET_LIQ_CAP_PCT  = 0.10
 
 log = logging.getLogger(__name__)
 if not any(getattr(h, "_cash_park", False) for h in log.handlers):
-    _fh = logging.FileHandler("cash_park_log.txt")
-    _fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s"))
+    _fh = log_setup.rotating_handler("cash_park_log.txt")
     _fh._cash_park = True
     log.addHandler(_fh)
     log.setLevel(logging.INFO)

@@ -389,6 +389,7 @@ docker compose --env-file .env.compose logs -f ib_gateway  # IB Gateway login st
 tail -f docker/data/trade_log.txt    # CSP execution details and order fills
 tail -f docker/data/wheel_log.txt    # Wheel check: stop loss exits, covered calls
 tail -f docker/data/risk_log.txt     # Daily risk monitor and P&L snapshots
+# Logs rotate at 25 MB, keeping 6 backups (wheel_log.txt.1 … .6).
 cat docker/data/state.json           # Full system state: positions, wheel holdings, P&L
 ```
 

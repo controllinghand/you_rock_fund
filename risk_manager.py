@@ -15,19 +15,13 @@ from datetime import datetime, date, timedelta
 
 from ib_insync import IB, Stock
 
+import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_RISK, ACCOUNT, ACCOUNT_TYPE, get_settings, connect_with_retry
 from screener import get_all_candidates
 
 STATE_FILE = "state.json"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.FileHandler("risk_log.txt"),
-        logging.StreamHandler()
-    ]
-)
+log_setup.configure("risk_log.txt")
 log = logging.getLogger(__name__)
 
 

@@ -434,7 +434,10 @@ docker compose --env-file .env.compose restart web
 - `trade_log.txt`
 - `wheel_log.txt`
 - `risk_log.txt`
+- `cash_park_log.txt`
 - service stdout and stderr logs
+
+> **Log rotation.** Since v5.2.109 the `.txt` logs are capped at 25 MB with 6 backups (`log_setup.py`), so each is bounded at 175 MB. Rotated files sit beside the active one as `wheel_log.txt.1` … `.6`, newest first; `tail -f wheel_log.txt` is unaffected.
 
 To use visible local files instead of a named volume, copy:
 
@@ -819,6 +822,7 @@ These files are persisted in `yrvi_data`:
 - `trade_log.txt`
 - `wheel_log.txt`
 - `risk_log.txt`
+- `cash_park_log.txt`
 - `scheduler_stdout.log`
 - `scheduler_stderr.log`
 - `api_stdout.log`
