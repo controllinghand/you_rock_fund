@@ -1,3 +1,17 @@
+## [5.2.110] — 2026-08-29
+### Fixed
+- **Which file a log line lands in no longer depends on import order.** Every module configured the *root* logger, and `basicConfig()` is a no-op once root has handlers — so whoever imported first won and everyone else's file stayed empty. On YRVIP that meant `risk_log.txt` was **0 bytes since 2026-06-18** despite the risk monitor running ~30 times, `trade_log.txt` held 258 bytes, and `wheel_log.txt` held 523 MB that was almost entirely the *api* container's ib_insync chatter — because a dashboard Run Now lazily imports `wheel_manager`, and that call captured root for the whole process. The documented one-file-per-concern layout has therefore been fiction for months. Modules now use `log_setup.get_logger(name, filename)`, which owns a handler on its own file and cannot be hijacked.
+- **`api.py` never configured the root logger at all**, which is what left it open to capture. It now calls `configure_root("api_log.txt")`, so dashboard polling and its IBKR reconnect chatter land in a process log of their own instead of in a *wheel* log.
+
+### Added
+- **`api_log.txt`** — the api container's process log, symlinked into `/data` and rotated like the rest.
+
+### Notes
+- Module loggers still propagate, so `scheduler_log.txt` remains a complete view of everything that process did and `tail -f scheduler_log.txt` during a Monday run is unchanged. The per-module files are an addition, not a redirection — the only lines that *moved* are the api container's, out of `wheel_log.txt` and into `api_log.txt`.
+- Library output (ib_insync, apscheduler, uvicorn) belongs to no YRVI module, so it goes to the process log that `configure_root()` installs. A module run directly (`python wheel_manager.py detect`) configures root console-only: its own lines are still persisted by its own handler, and library chatter goes to the terminal rather than into the module file.
+- Module loggers take explicit names (`"wheel"`, `"trader"`, …) rather than `__name__`, which becomes `"__main__"` under a direct run and would otherwise split one module's output across two logger identities.
+- Verified against the real modules in both running containers, with `cwd` redirected so the live logs were untouched: in the scheduler each of `wheel`/`trader`/`risk`/`cash_park` resolved to its own file, and in the api container `wheel_manager`'s line reached `wheel_log.txt` while the simulated ib_insync line reached only `api_log.txt`.
+
 ## [5.2.109] — 2026-08-29
 ### Added
 - **The `.txt` logs now rotate** — 25 MB per file, 6 backups, so each is bounded at 175 MB instead of growing without limit. `wheel_log.txt` on YRVIP had reached **523 MB / 2.36 M lines** since 2026-06-18, which makes the file a chore to read at exactly the moment you need it. New `log_setup.py` is the single place this is configured; `trader.py`, `scheduler.py`, `risk_manager.py`, `wheel_manager.py` and `cash_park.py` all use it.

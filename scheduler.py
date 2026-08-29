@@ -11,7 +11,7 @@ from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_
 from secrets_client import get_secret
 from market_calendar import is_first_trading_day_of_week, is_market_holiday, is_last_trading_day_of_week
 
-log_setup.configure("scheduler_log.txt")
+log_setup.configure_root("scheduler_log.txt")
 log = logging.getLogger(__name__)
 
 STATE_FILE      = "state.json"

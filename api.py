@@ -28,9 +28,15 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import log_setup
 from secrets_client import get_secret
 from market_calendar import is_market_holiday, is_first_trading_day_of_week
 from tracks import all_tracks, resolve_track
+
+# The api is an entry point and had never configured the root logger, so the
+# first lazily-imported module (wheel_manager, on a dashboard Run Now) captured
+# it — which is how this container's ib_insync chatter ended up in wheel_log.txt.
+log_setup.configure_root("api_log.txt")
 
 load_dotenv()
 

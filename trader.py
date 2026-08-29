@@ -1,5 +1,4 @@
 import json
-import logging
 import math
 import os
 import shutil
@@ -11,8 +10,7 @@ from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilte
 import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 
-log_setup.configure("trade_log.txt")
-log = logging.getLogger(__name__)
+log = log_setup.get_logger("trader", "trade_log.txt")
 
 TRADE_LOG_JSON      = "trade_log.json"
 MAX_SPREAD_PCT      = 0.20  # fallback default — settings.json overrides via check_liquidity
@@ -1528,6 +1526,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
 
 
 if __name__ == "__main__":
+    log_setup.configure_root()
     from screener import get_top_targets
     from position_sizer import size_all
     all_targets = get_top_targets(10)
