@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta
 from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder
 
+import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_WHEEL, ACCOUNT, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from screener import get_all_candidates
 from market_calendar import is_market_holiday
@@ -50,14 +51,7 @@ CC_SCAN_STABLE_ROUNDS = 4     # stop once the ready-count is flat this many poll
 # but none reached CC_DELTA_MIN" (None). Only the latter should sell shares.
 CC_NO_DATA       = "NO_DATA"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.FileHandler("wheel_log.txt"),
-        logging.StreamHandler()
-    ]
-)
+log_setup.configure("wheel_log.txt")
 log = logging.getLogger(__name__)
 
 

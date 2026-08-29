@@ -6,18 +6,12 @@ import socket
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
+import log_setup
 from config import NUM_POSITIONS, TOTAL_FUND_BUDGET, IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, get_settings, MODE_LABEL
 from secrets_client import get_secret
 from market_calendar import is_first_trading_day_of_week, is_market_holiday, is_last_trading_day_of_week
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    handlers=[
-        logging.FileHandler("scheduler_log.txt"),
-        logging.StreamHandler()
-    ]
-)
+log_setup.configure("scheduler_log.txt")
 log = logging.getLogger(__name__)
 
 STATE_FILE      = "state.json"
