@@ -147,6 +147,7 @@ for runtime_file in \
     wheel_log.txt \
     risk_log.txt \
     cash_park_log.txt \
+    api_log.txt \
     scheduler_stdout.log \
     scheduler_stderr.log \
     api_stdout.log \

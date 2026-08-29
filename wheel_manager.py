@@ -16,7 +16,6 @@ run_wheel_check() — Monday, 5 min before the configured execution time (runs b
     Returns (freed_capital, skip_tickers) for run_pipeline to consume.
 """
 import json
-import logging
 from datetime import datetime, timedelta
 from ib_insync import IB, Stock, Option, LimitOrder, MarketOrder
 
@@ -51,8 +50,7 @@ CC_SCAN_STABLE_ROUNDS = 4     # stop once the ready-count is flat this many poll
 # but none reached CC_DELTA_MIN" (None). Only the latter should sell shares.
 CC_NO_DATA       = "NO_DATA"
 
-log_setup.configure("wheel_log.txt")
-log = logging.getLogger(__name__)
+log = log_setup.get_logger("wheel", "wheel_log.txt")
 
 
 # ── State ──────────────────────────────────────────────────────
@@ -1810,6 +1808,7 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
 
 
 if __name__ == "__main__":
+    log_setup.configure_root()
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     if cmd == "detect":

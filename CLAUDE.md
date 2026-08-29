@@ -33,9 +33,19 @@ nohup python scheduler.py > nohup.out 2>&1 &
 tail -f trade_log.txt        # CSP execution details
 tail -f wheel_log.txt        # Wheel check and assignment logs
 tail -f risk_log.txt         # Daily risk monitor logs
-tail -f scheduler_log.txt    # Scheduler heartbeat
+tail -f cash_park_log.txt    # Cash sweep buy/sell
+tail -f scheduler_log.txt    # Scheduler process log (its own lines + library output)
+tail -f api_log.txt          # Dashboard/api process log (incl. IBKR connection chatter)
 cat state.json               # Full system state (see schema below)
 ```
+
+Logging is configured in `log_setup.py` (v5.2.110). Each module owns a rotating
+file (25 MB × 6 backups) via `get_logger(name, filename)`, so its lines land there
+regardless of import order; entry points call `configure_root(filename)` once for
+the console plus a per-process log, which is where library output (ib_insync,
+apscheduler, uvicorn) goes. Module lines still propagate, so a process log remains
+a complete view of that process. Never point a handler at `/app/<log>.txt`
+directly — it is a symlink into `/data` and rotation would rename the link.
 
 ## Weekly Schedule
 

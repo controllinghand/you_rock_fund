@@ -10,7 +10,6 @@ run_daily_monitor():
   - Updates state.json with current prices and weekly P&L snapshot
 """
 import json
-import logging
 from datetime import datetime, date, timedelta
 
 from ib_insync import IB, Stock
@@ -21,8 +20,7 @@ from screener import get_all_candidates
 
 STATE_FILE = "state.json"
 
-log_setup.configure("risk_log.txt")
-log = logging.getLogger(__name__)
+log = log_setup.get_logger("risk", "risk_log.txt")
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -273,4 +271,5 @@ def _log_pnl_summary(pnl: dict):
 
 
 if __name__ == "__main__":
+    log_setup.configure_root()
     run_daily_monitor()

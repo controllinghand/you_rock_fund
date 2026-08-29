@@ -26,7 +26,6 @@ Design guards (see the buy path):
     wheel/CSP paths.
 """
 import json
-import logging
 from datetime import datetime
 
 from ib_insync import IB, Stock, Order
@@ -48,12 +47,7 @@ MIN_BUY_USD      = 1.0
 # Never park more than this share of net-liquidation, regardless of idle cash.
 NET_LIQ_CAP_PCT  = 0.10
 
-log = logging.getLogger(__name__)
-if not any(getattr(h, "_cash_park", False) for h in log.handlers):
-    _fh = log_setup.rotating_handler("cash_park_log.txt")
-    _fh._cash_park = True
-    log.addHandler(_fh)
-    log.setLevel(logging.INFO)
+log = log_setup.get_logger("cash_park", "cash_park_log.txt")
 
 
 # ── State ──────────────────────────────────────────────────────
@@ -562,8 +556,7 @@ def _record_park_pnl(state: dict, realized: float) -> None:
 
 if __name__ == "__main__":
     import sys
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s  %(levelname)s  %(message)s")
+    log_setup.configure_root()
     cmd = sys.argv[1] if len(sys.argv) > 1 else "sell"
     if cmd == "sell":
         print(sell_park(dry_run="--dry" in sys.argv))
