@@ -6,22 +6,24 @@ Common issues and fixes for You Rock Club members setting up YRVI on a Mac Mini.
 
 ### Q: Docker fails with "address already in use" on port 5900
 
-**A:** macOS Screen Sharing is binding port 5900 in a way that collides with IB Gateway's VNC port. (Normally they coexist — the gateway binds IPv4 `127.0.0.1:5900` while Screen Sharing answers on the LAN IP / IPv6 — but a boot-order race can occasionally cause this.)
+**A:** Fixed in **v5.2.108** — upgrade and it goes away. The gateway's VNC port is no
+longer published to the host at all, so there is nothing left to collide with.
 
-Easiest fix — give the gateway its own port. In `.env.compose` set:
-```
-IB_GATEWAY_VNC_PORT=5901
-```
-then restart:
-```bash
-docker compose --env-file .env.compose down
-./setup_docker.sh --paper
-```
-Now connect your VNC client to `127.0.0.1:5901` instead.
+What was happening: macOS Screen Sharing binds `*:5900`, which conflicts with the
+gateway's `127.0.0.1:5900` publish, and whichever service starts first at boot wins.
+Lose that race and `docker compose up` aborts on `ib_gateway` — leaving `api`,
+`scheduler`, `web` and `view-gateway` stuck in **Created**, because they all
+`depends_on` it. The symptom is a Docker Desktop container list where only
+`secrets` is green and everything else shows a play button.
 
-Alternatively, turn Screen Sharing off (**System Settings → General → Sharing → Screen Sharing → OFF**) and keep the gateway on 5900.
+The port was never needed: the dashboard's built-in **View Gateway** reaches the
+gateway at `ib_gateway:5900` over the Compose network, not through the host.
 
-> For remote *terminal* access, use SSH: **System Settings → General → Sharing → Remote Login → On**, then `ssh [your-user]@[MAC_MINI_IP]`.
+> If you are on an older version and can't upgrade yet, turn Screen Sharing off
+> (**System Settings → General → Sharing → Screen Sharing → OFF**) or set
+> `IB_GATEWAY_VNC_PORT=5901` in `.env.compose` and re-run `./setup_docker.sh --paper`.
+
+> For remote *terminal* access, use SSH: **System Settings → General → Sharing → Remote Login → On**, then `ssh [your-user]@[MAC_MINI_IP]`. SSH does not touch port 5900.
 
 ---
 
@@ -35,7 +37,7 @@ Alternatively, turn Screen Sharing off (**System Settings → General → Sharin
 
 The password auto-fills from your `vnc_server_password` secret, so there's nothing to type. You'll see the IB Gateway GUI and can dismiss whatever dialog is blocking it. See [docs/view-gateway.md](docs/view-gateway.md) for details.
 
-> Older versions told you to install RealVNC or TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port is still there at `127.0.0.1:5900` if you ever want an external client as a fallback; on macOS use the literal `127.0.0.1`, never `localhost`.)
+> Older versions told you to install RealVNC or TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. As of v5.2.108 the raw VNC port isn't published to the host at all; if you specifically want an external client, re-publish it yourself via `docker-compose.override.yml.example`.
 
 ---
 

@@ -330,7 +330,7 @@ There's a **View Gateway** viewer built into the dashboard — no VNC client to 
 
 The password auto-fills from your `vnc_server_password` secret — nothing to type. You'll see the IB Gateway GUI and can dismiss any dialog that's blocking login. See [docs/view-gateway.md](docs/view-gateway.md).
 
-> Older versions had you install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. (The raw VNC port on `127.0.0.1:5900` still works with an external client like [TigerVNC](https://tigervnc.org/) if you ever want a fallback.)
+> Older versions had you install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed — View Gateway is built in. As of v5.2.108 the raw VNC port isn't published to the host; if you specifically want an external VNC client, re-publish the port yourself — see the `ib_gateway` snippet in `docker-compose.override.yml.example` to use a client like [TigerVNC](https://tigervnc.org/).
 
 ---
 

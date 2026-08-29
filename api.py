@@ -222,7 +222,8 @@ def _compose_hint(*args: str) -> str:
 # fallback for advanced users or when the dashboard itself is unreachable.
 _MANUAL_RESTART_HINT = (
     "🔧 **Fix:** open the dashboard → **Help** → **Restart Gateway** (one click; "
-    "live re-login needs the IB Key 2FA push). VNC also available on host port 5900.\n"
+    "live re-login needs the IB Key 2FA push). To see the Gateway screen itself, "
+    "use **Help** → **View Gateway**.\n"
     f"🔴 Advanced/fallback: `{_compose_hint('restart', 'ib_gateway')}`"
 )
 

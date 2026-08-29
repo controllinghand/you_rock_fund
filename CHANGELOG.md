@@ -1,3 +1,14 @@
+## [5.2.108] — 2026-08-29
+### Fixed
+- **macOS Screen Sharing can no longer strand the entire stack at boot.** The gateway's VNC port was published to the host as `127.0.0.1:${IB_GATEWAY_VNC_PORT:-5900}:5900`, and macOS `screensharingd` binds `*:5900` — an IPv4 wildcard that conflicts with a loopback publish on the same port. Which one gets it is decided by boot order. On 2026-08-29 YRVIP rebooted twice while a Screen Sharing session was connected; Screen Sharing won both races, `compose up` aborted at `ib_gateway` with `bind: address already in use`, and because `api`, `scheduler`, `web` and `view-gateway` all `depends_on` it, every one of them was left in **Created**. Docker Desktop showed a single green container out of six and the box sat dead for 12 hours, missing Saturday assignment detection. The publish is now removed: `x11vnc` still listens on 5900 *inside* the container, `view-gateway` reaches it at `ib_gateway:5900` over the Compose network exactly as before, and nothing binds 5900 on the host.
+
+### Removed
+- **`IB_GATEWAY_VNC_PORT` from `.env.compose`** — it only ever selected the host side of a publish that no longer exists. Anyone who wants a raw VNC port for an external client re-publishes it deliberately via the new commented `ib_gateway` snippet in `docker-compose.override.yml.example`.
+
+### Notes
+- The docs described this failure in three places (`FAQ.md`, `README.md`, `MAC_MINI_SETUP.md`) and told the operator to work around it by turning Screen Sharing off or moving the port by hand. `MAC_MINI_SETUP.md` went further and asserted the two "coexist fine" because Screen Sharing answers only on the LAN IP and IPv6 — `netstat` on the wedged box showed `*.5900 LISTEN` on both tcp4 and tcp6, so that was never true; coexistence was just Docker usually winning the race. A documented workaround for a collision with a port the application does not use was the wrong trade, and all of that prose is now corrected.
+- Removing the publish costs nothing operationally: the built-in View Gateway (`/viewer/`, core since 5.2.69) has been the supported way to see the Gateway screen for 39 releases, and it never went through the host port.
+
 ## [5.2.107] — 2026-08-24
 ### Changed
 - **Track icons: YRVI-26 is now 🏄 (was 🌊) and YRVI-SL is ✋ (was 🛑).** The track emoji is stamped into the Discord embed *footer* as well as the Track field, and the footer draws at roughly 16px — where a detailed multi-tone glyph like the water wave turns into an unreadable smudge that reads as a broken-image icon. A custom server emoji is not an alternative: embed footers don't parse `<:name:id>` markup, they print it literally, so the only fix covering both places is a glyph with a bolder, flatter silhouette. `tracks.py` is the single source — the dashboard badge reads it from `/api/tracks`, so nothing else changed.

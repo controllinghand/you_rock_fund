@@ -386,7 +386,7 @@ def run_pipeline():
     if not _ibkr_reachable():
         msg = "IB Gateway unreachable before Monday run — trades will not execute"
         log.error(f"❌ {msg}")
-        _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login / VNC port 5900.")
+        _discord_alert(f"🚨 **YRVI** {msg}. Check gateway login via Help → View Gateway.")
     # ── Live progress feed ───────────────────────────────────────────
     # Written from the very first second so the dashboard can swap the
     # Next-Execution countdown for live "Working on X" status for the WHOLE

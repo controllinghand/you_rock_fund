@@ -76,7 +76,7 @@ ssh [your-user]@[MAC_MINI_IP]
 
 > 💡 Connect over your local network (Ethernet on both machines is most reliable) or via your router's remote access / VPN if accessing from outside your home.
 
-> ⚠️ **VNC port note (important).** The IB Gateway container serves its own VNC on **`127.0.0.1:5900`** for 2FA/dialogs. macOS Screen Sharing also uses port 5900, but on different addresses (your LAN IP and IPv6 `::1`), so the two **coexist fine**. The catch: when you point a VNC client at the gateway, **always use `127.0.0.1:5900` (literal IPv4) — never `localhost:5900`.** On macOS `localhost` resolves to IPv6 `::1` first, which macOS Screen Sharing answers, so `localhost` sends you to the wrong server and you get an "authentication failed". If `docker compose up` ever fails with *"address already in use"* on 5900, either turn Screen Sharing off or set `IB_GATEWAY_VNC_PORT` to a free port in `.env.compose`.
+> ℹ️ **VNC port note.** The IB Gateway container serves its own VNC on port `5900` **inside the container**, which is what the dashboard's View Gateway connects to (`ib_gateway:5900`, over the Compose network). As of v5.2.108 that port is **not published to the host**, so it can't collide with macOS Screen Sharing — earlier versions published `127.0.0.1:5900`, and losing the boot race against Screen Sharing aborted `compose up` and stranded the whole stack. You need no VNC client and no port juggling; if you want one anyway, re-publish it yourself — see the `ib_gateway` snippet in `docker-compose.override.yml.example` — then connect to the port you chose.
 
 ### Enable Automatic Login
 1. System Settings → Users & Groups (search "automatic" in Settings search bar)
@@ -359,10 +359,11 @@ then open `http://localhost:3000` and use View Gateway as above (it opens the vi
 
 > We used to recommend installing RealVNC/TigerVNC and connecting an external client to
 > `127.0.0.1:5900`. That's **no longer needed** — View Gateway is built in. The raw VNC port
-> is still exposed on the container at `127.0.0.1:5900` if you ever want an external client as
-> a fallback; on macOS use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost`
-> resolves to IPv6 `::1`, which macOS Screen Sharing answers → auth fails against the wrong
-> server).
+> is no longer published to the host at all (v5.2.108); if you want an external client,
+> re-publish it yourself — see the `ib_gateway` snippet in
+> `docker-compose.override.yml.example` — and connect to the literal IPv4 address and the
+> port you chose, never `localhost` (which resolves to IPv6 `::1`, where macOS Screen
+> Sharing answers → auth fails against the wrong server).
 
 ---
 
