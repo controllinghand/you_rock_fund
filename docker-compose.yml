@@ -101,7 +101,15 @@ services:
     ports:
       - "127.0.0.1:${IB_GATEWAY_LIVE_PORT:-4001}:4003"
       - "127.0.0.1:${IB_GATEWAY_PAPER_PORT:-4002}:4004"
-      - "127.0.0.1:${IB_GATEWAY_VNC_PORT:-5900}:5900"
+      # The gateway's x11vnc still listens on 5900 INSIDE the container — that is
+      # what view-gateway connects to (ib_gateway:5900, over the Compose network).
+      # It is deliberately NOT published to the host. macOS Screen Sharing binds
+      # *:5900, which collides with a 127.0.0.1:5900 publish, and whoever wins is
+      # decided by boot order: on 2026-08-29 a reboot while screen-shared handed
+      # 5900 to screensharingd, `compose up` aborted on ib_gateway, and every
+      # service that depends on it was left in Created — the whole stack down for
+      # 12 hours over a port nothing in the app actually uses. Need a raw VNC
+      # client anyway? Re-publish it yourself; see docker-compose.override.yml.example.
 
   api:
     build:

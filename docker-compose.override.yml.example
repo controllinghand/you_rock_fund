@@ -14,3 +14,15 @@ services:
   ib_gateway:
     volumes:
       - ./docker/data/ib_gateway_settings:/home/ibgateway/Jts
+
+  # Re-publish the gateway's raw VNC port to the host. Not published by default:
+  # macOS Screen Sharing binds *:5900 and whichever of the two starts first at
+  # boot wins, and a lost race aborts `compose up` at ib_gateway — taking the
+  # whole stack down. The dashboard's built-in View Gateway (/viewer/) does not
+  # need this; it reaches ib_gateway:5900 over the Compose network. Add this only
+  # if you want an external VNC client (e.g. TigerVNC), and pick a port Screen
+  # Sharing isn't already on — 5901 is a safe choice.
+  #
+  # ib_gateway:
+  #   ports:
+  #     - "127.0.0.1:5901:5900"

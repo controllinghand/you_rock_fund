@@ -20,7 +20,7 @@ const LABELS = {
   render_secret:               { label: 'Render Screener API Secret',   required: true  },
   account_live:                { label: 'IBKR Live Account ID',         required: false },
   tws_userid_live:             { label: 'IBKR Live Username',           required: false },
-  vnc_server_password:         { label: 'VNC Password',                 required: false, description: 'Default: ibgateway123!test — used to connect via VNC to the IB Gateway container (port 5900)' },
+  vnc_server_password:         { label: 'VNC Password',                 required: false, description: 'Default: ibgateway123!test — auto-fills the dashboard\'s View Gateway viewer (and any external VNC client you opt into)' },
   discord_webhook_url:          { label: 'Discord Webhook URL',          required: false, description: 'All Discord notifications — weekly plan, execution results, assignments, and alerts — go to this channel.' },
   // discord_feedback_webhook_url is auto-populated (api.py _FEEDBACK_WEBHOOK_DEFAULT) and hidden from the Secrets UI — see deriveSecrets filter.
   flex_token:    { label: 'IBKR Flex Token',    required: false, description: 'Flex Web Service token from IBKR Portal → Performance & Reports → Flex Queries. Required for "Fetch from IBKR" in the Reconciler.' },

@@ -166,9 +166,9 @@ Your own account, your own network, your own devices — and self-supported. The
 
 To check the Gateway's screen — a login, 2FA prompt, error dialog, or just its status — use the **View Gateway** viewer built into the dashboard. No VNC client to download: open **Help → System Diagnostics → View Gateway**, then **👁 Open viewer (view-only)** (the password auto-fills). See [docs/view-gateway.md](docs/view-gateway.md).
 
-> Earlier versions told you to install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed. The raw VNC port still exists on `127.0.0.1:5900` (IPv4) as an optional external-client fallback; on macOS always use the literal `127.0.0.1:5900`, **never `localhost:5900`** (`localhost` resolves to IPv6 `::1`, which macOS Screen Sharing answers → "authentication failed" against the wrong server).
+> Earlier versions told you to install RealVNC/TigerVNC and connect to `127.0.0.1:5900`. That's no longer needed. As of v5.2.108 the gateway's VNC port is **not published to the host at all** — View Gateway reaches it at `ib_gateway:5900` over the Compose network. if you specifically want an external VNC client, re-publish the port yourself — see the `ib_gateway` snippet in `docker-compose.override.yml.example`.
 
-> If `docker compose up` ever fails with *"address already in use"* on 5900, turn Screen Sharing off (**System Settings → General → Sharing → Screen Sharing → OFF**) or set `IB_GATEWAY_VNC_PORT` to a free port in `.env.compose`. For remote terminal access, use SSH (**Remote Login → On**).
+> Because nothing binds 5900 on the host any more, macOS Screen Sharing and YRVI no longer compete for it — the *"address already in use"* startup failure that used to strand the stack is gone. For remote terminal access, use SSH (**Remote Login → On**).
 
 #### macOS Setup (Paper)
 
