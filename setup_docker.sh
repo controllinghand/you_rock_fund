@@ -210,8 +210,8 @@ ok "Secrets container running"
 
 secrets_complete() {
     curl -sf "$SECRETS_URL/secrets/status" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('complete') else 'false')" 2>/dev/null \
-        || echo "false"
+        | grep -q '"complete"[[:space:]]*:[[:space:]]*true' \
+        && echo "true" || echo "false"
 }
 
 if [ "$(secrets_complete)" = "true" ]; then
@@ -264,9 +264,9 @@ fi
 # verifies the required secrets are populated there.
 if [ "$TRADING_MODE" = "live" ]; then
     LIVE_ACCT=$(curl -sf "$SECRETS_URL/secret/account_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     LIVE_USER=$(curl -sf "$SECRETS_URL/secret/tws_userid_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     if [ -z "$LIVE_ACCT" ] || [ -z "$LIVE_USER" ]; then
         fail "Live mode requires account_live and tws_userid_live in the secrets UI ($SECRETS_URL)"
     fi
@@ -303,10 +303,8 @@ if docker compose $ENV_FILE_ARGS up -d --build; then
     info "Checking dry_run setting..."
     sleep 5
     DRY_RUN=$(curl -sf http://127.0.0.1:8000/api/settings 2>/dev/null \
-        | python3 -c \
-          "import sys,json; print(json.load(sys.stdin).get('dry_run','?'))" \
-          2>/dev/null \
-        || echo "?")
+        | sed -n 's/.*"dry_run"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+    [ -z "$DRY_RUN" ] && DRY_RUN="?"
     if [ "$DRY_RUN" = "False" ] || [ "$DRY_RUN" = "false" ]; then
         ok "dry_run=false — paper trading handles safety; orders go to your paper account"
     elif [ "$DRY_RUN" = "True" ] || [ "$DRY_RUN" = "true" ]; then
@@ -338,7 +336,12 @@ if $IS_WINDOWS; then
         "$PROJ_WIN" "$LOGFILE" > "$BATCH"
     BATCH_WIN=$(cygpath -w "$BATCH")
 
-    if schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
+    # MSYS_NO_PATHCONV=1 is required here: Git Bash's MSYS layer auto-converts
+    # any bare /leading-slash token to a Windows path before exec, which mangles
+    # schtasks.exe's /tn, /sc, /f flags into garbage ("Invalid argument/option -
+    # 'C:/Program Files/Git/create'") and makes registration fail even when
+    # elevated — masked as a permissions error since stderr is discarded below.
+    if MSYS_NO_PATHCONV=1 schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
         ok "Task Scheduler job '$TASK_NAME' registered — containers auto-start on every login"
         info "  Reboot log: $LOGFILE"
     else

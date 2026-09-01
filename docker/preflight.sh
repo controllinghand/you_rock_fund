@@ -61,14 +61,18 @@ status_body="$(curl -sf http://localhost:8001/secrets/status 2>/dev/null || true
 if [ -z "$status_body" ]; then
     fail "Secrets container is not running — run setup_docker.sh first"
 else
-    complete="$(printf '%s' "$status_body" | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('complete') else 'false')" 2>/dev/null || echo "false")"
+    if printf '%s' "$status_body" | grep -q '"complete"[[:space:]]*:[[:space:]]*true'; then
+        complete="true"
+    else
+        complete="false"
+    fi
     if [ "$complete" != "true" ]; then
         fail "Required secrets not configured — open http://localhost:8001 to enter missing secrets"
     fi
 
     # Sanity check: account and username must not be identical (common copy/paste mistake)
-    paper_acct="$(curl -sf http://localhost:8001/secret/account_paper 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || true)"
-    paper_user="$(curl -sf http://localhost:8001/secret/tws_userid_paper 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || true)"
+    paper_acct="$(curl -sf http://localhost:8001/secret/account_paper 2>/dev/null | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    paper_user="$(curl -sf http://localhost:8001/secret/tws_userid_paper 2>/dev/null | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
     if [ -n "$paper_acct" ] && [ "$paper_acct" = "$paper_user" ]; then
         fail "tws_userid_paper must be the paper login username, not the paper account id (open http://localhost:8001 to fix)."
     fi
