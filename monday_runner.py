@@ -255,23 +255,45 @@ def _reconcile_before_run(dry_run: bool = False) -> dict:
         if purged:
             log.info(f"  🧹 Cleared {len(purged)} stale 0-share holding(s): "
                      f"{', '.join(purged)}")
-        if drift or result.get("dropped"):
+        # A called-away holding also appears in `dropped` (same predicate: had
+        # shares, gone from the broker), so report it FIRST and suppress the plain
+        # line for it. Otherwise the alert says "BE no longer held" about shares
+        # that were called away at a known strike for a known P&L — the vaguest
+        # available description of the most interesting thing in the message.
+        # That is what David's box reported on 2026-09-11: correct bookkeeping,
+        # and an alert that mentioned neither the strike nor the −$500.
+        called_away = result.get("called_away") or []
+        ca_tickers  = {h.get("ticker") for h in called_away}
+
+        if drift or result.get("dropped") or called_away:
             bits = []
             for c in result.get("share_corrections", []):
                 bits.append(f"{c['ticker']} {c['was']}→{c['now']} shares")
             for h in result.get("new_assignments", []):
                 bits.append(f"{h['ticker']} +{h['shares']} (new assignment)")
+            for h in called_away:
+                strike = h.get("current_cc_strike") or h.get("assigned_strike") or 0.0
+                bits.append(
+                    f"{h.get('ticker')} {h.get('shares', 0)} shares called away "
+                    f"@ ${strike:,.2f} — stock P&L ${h.get('_stock_pnl', 0.0):+,.0f}")
             for t in result.get("dropped", []):
+                if t in ca_tickers:
+                    continue
                 bits.append(f"{t} no longer held")
             for t in purged:
                 bits.append(f"{t} stale 0-share row cleared")
             detail = "; ".join(bits)
             log.warning(f"  ⚠️  State was STALE — reconciled from IBKR: {detail}")
+            # Conditional, not asserted. The old wording told the reader flatly
+            # that the weekend detection had failed — but a call-away spotted by a
+            # FRIDAY preview happened hours ago, and Saturday's job has not had its
+            # turn yet. Accusing a job that was never due is how an alert teaches
+            # people to stop reading it.
             _discord_alert(
                 f"⚠️ **YRVI** Monday reconcile{tag} corrected a stale state.json: "
-                f"{detail}.\nThis means the weekend assignment detection did not run or "
-                f"did not complete — worth checking why, since this only caught it by "
-                f"re-checking."
+                f"{detail}.\nIf the Saturday assignment detection had already run "
+                f"since this happened, it did not complete — worth checking why, "
+                f"since this only caught it by re-checking."
             )
         else:
             log.info("  ✅ Holdings already match IBKR — no drift")
