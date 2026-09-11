@@ -58,6 +58,7 @@ function RunProgress({ runStatus }) {
   const source  = runStatus.source === 'scheduler' ? 'Scheduled run' : 'Run in progress'
   const phaseLabel = phase === 'CSP pipeline' ? 'CSP pipeline'
                    : phase === 'wheel check'  ? 'Wheel check'
+                   : phase === 'reconcile'    ? 'Reconciling positions'
                    : null
 
   return (

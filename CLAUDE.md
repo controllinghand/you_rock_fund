@@ -53,7 +53,7 @@ directly — it is a symlink into `/data` and rotation would rename the link.
 |---|---|---|
 | Saturday 8:00AM | Assignment detection | `wheel_manager.detect_assignments()` |
 | Saturday 6:00PM | Screener preview | `screener` + `position_sizer` |
-| Monday 9:55AM | Reconcile vs IBKR → wheel check → CSP pipeline (one chained job): stop loss sells + covered calls, then screen → size → execute | `scheduler.run_pipeline()` → `monday_runner._reconcile_before_run()` + `wheel_manager.run_wheel_check()` + `trader.execute_positions()` |
+| Monday 9:55AM | Reconcile vs IBKR → wheel check → CSP pipeline → cash sweep (one chained job) | `scheduler.run_pipeline()` → `monday_runner.run_monday()` |
 | Tue–Thu 9:00AM | Daily risk monitor | `risk_manager.run_daily_monitor()` |
 | Thu/Fri 12:30PM | Cash-sweep sell (last trading day only) | `cash_park.sell_park()` |
 
@@ -158,9 +158,24 @@ Each module connects with a distinct client ID to allow concurrent connections:
 
 ### Monday Data Flow
 
-`scheduler.run_pipeline()` runs both halves as ONE chained job (the wheel
-check's return dict is passed to the CSP pipeline in memory — no state.json
-hand-off, so the pipeline can never start before the wheel check finishes).
+**`monday_runner.run_monday()` is THE Monday sequence — every entry point calls
+it.** The scheduled 9:55 job (`scheduler.run_pipeline`), Run Now and Run Screener
+all go through it; the scheduler only owns scheduling (right day? gateway up? the
+dashboard status feed, the event loop, top-level failure alerts). **A new step in
+the Monday workflow goes in `run_monday`.** It used to be reimplemented in
+`scheduler.run_pipeline`, and the two drifted for six versions — the reconcile
+was added to `run_monday` in v5.2.78 and never reached the scheduled job, so the
+one run that trades unattended every week was the one still trading on a stale
+state.json. Merged in v5.2.115.
+
+Callers differ only in what they pass: `client_id` (the scheduler uses
+IBKR_CLIENT_ID_WHEEL=2, the API PREVIEW=4, so a Run Now clicked mid-job cannot
+collide), `manual` (tags the Discord weekly post), `progress_callback` /
+`phase_callback` (live status feed), and `dry_run`.
+
+It runs both halves as ONE chained job (the wheel check's return dict is passed
+to the CSP pipeline in memory — no state.json hand-off, so the pipeline can never
+start before the wheel check finishes).
 
 ```
 Step 0 — reconcile (_reconcile_before_run):

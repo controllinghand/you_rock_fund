@@ -255,23 +255,45 @@ def _reconcile_before_run(dry_run: bool = False) -> dict:
         if purged:
             log.info(f"  🧹 Cleared {len(purged)} stale 0-share holding(s): "
                      f"{', '.join(purged)}")
-        if drift or result.get("dropped"):
+        # A called-away holding also appears in `dropped` (same predicate: had
+        # shares, gone from the broker), so report it FIRST and suppress the plain
+        # line for it. Otherwise the alert says "BE no longer held" about shares
+        # that were called away at a known strike for a known P&L — the vaguest
+        # available description of the most interesting thing in the message.
+        # That is what David's box reported on 2026-09-11: correct bookkeeping,
+        # and an alert that mentioned neither the strike nor the −$500.
+        called_away = result.get("called_away") or []
+        ca_tickers  = {h.get("ticker") for h in called_away}
+
+        if drift or result.get("dropped") or called_away:
             bits = []
             for c in result.get("share_corrections", []):
                 bits.append(f"{c['ticker']} {c['was']}→{c['now']} shares")
             for h in result.get("new_assignments", []):
                 bits.append(f"{h['ticker']} +{h['shares']} (new assignment)")
+            for h in called_away:
+                strike = h.get("current_cc_strike") or h.get("assigned_strike") or 0.0
+                bits.append(
+                    f"{h.get('ticker')} {h.get('shares', 0)} shares called away "
+                    f"@ ${strike:,.2f} — stock P&L ${h.get('_stock_pnl', 0.0):+,.0f}")
             for t in result.get("dropped", []):
+                if t in ca_tickers:
+                    continue
                 bits.append(f"{t} no longer held")
             for t in purged:
                 bits.append(f"{t} stale 0-share row cleared")
             detail = "; ".join(bits)
             log.warning(f"  ⚠️  State was STALE — reconciled from IBKR: {detail}")
+            # Conditional, not asserted. The old wording told the reader flatly
+            # that the weekend detection had failed — but a call-away spotted by a
+            # FRIDAY preview happened hours ago, and Saturday's job has not had its
+            # turn yet. Accusing a job that was never due is how an alert teaches
+            # people to stop reading it.
             _discord_alert(
                 f"⚠️ **YRVI** Monday reconcile{tag} corrected a stale state.json: "
-                f"{detail}.\nThis means the weekend assignment detection did not run or "
-                f"did not complete — worth checking why, since this only caught it by "
-                f"re-checking."
+                f"{detail}.\nIf the Saturday assignment detection had already run "
+                f"since this happened, it did not complete — worth checking why, "
+                f"since this only caught it by re-checking."
             )
         else:
             log.info("  ✅ Holdings already match IBKR — no drift")
@@ -603,39 +625,84 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 # ── Full Monday sequence (wheel check → CSP pipeline) ──────────
 
 def run_monday(dry_run: bool = False, progress_callback=None,
-               account_summary: tuple = None, manual: bool = False) -> dict:
+               account_summary: tuple = None, manual: bool = False,
+               client_id: int = None, phase_callback=None) -> dict:
     """
-    Run the complete Monday sequence in one call: wheel check then CSP pipeline,
-    using the wheel check's in-memory results to drive the pipeline.
+    THE Monday sequence, for every caller: reconcile → wheel check → CSP pipeline
+    → cash sweep, with the wheel check's in-memory results driving the pipeline.
 
-    dry_run=True  → faithful preview, zero side effects (Run Screener)
-    dry_run=False → live execution: sells shares, writes CCs, opens CSPs (Run Now)
+    dry_run=True  → faithful preview, places no orders (Run Screener)
+    dry_run=False → live execution: sells shares, writes CCs, opens CSPs
     manual=True   → tag the Discord weekly-results post as a manual Run Now.
+    client_id     → IBKR client id for the wheel check. Defaults to the API's
+                    PREVIEW id; the scheduler passes its own (see below).
+    phase_callback→ optional fn(name) called at each phase boundary, for a caller
+                    driving a live status feed.
+
+    scheduler.run_pipeline used to reimplement this sequence rather than call it,
+    and the two drifted: the reconcile was added here in v5.2.78 and never
+    reached the scheduled job at all, so for six versions the one run that trades
+    unattended every week was the one run still trading on a stale state.json.
+    Nobody noticed, because the alert that would have said so only existed on the
+    path that had the reconcile. If you add a step to the Monday workflow, it goes
+    HERE — that is the entire point of this function.
     """
     from wheel_manager import run_wheel_check
+
+    # Client ids are separated on purpose: a Run Now clicked while the scheduled
+    # 9:55 job is still working must not collide with it on the same id.
+    # IBKR_CLIENT_ID_WHEEL (2) belongs to the scheduler, PREVIEW (4) to the API.
+    client_id = IBKR_CLIENT_ID_PREVIEW if client_id is None else client_id
+
+    def _phase(name: str) -> None:
+        if phase_callback:
+            try:
+                phase_callback(name)
+            except Exception:
+                pass
 
     mode = "DRY RUN" if dry_run else "LIVE"
     log.info("\n" + "=" * 65)
     log.info(f"🗓️  MONDAY RUNNER [{mode}] — {datetime.now(PST).strftime('%Y-%m-%d %H:%M %Z')}")
     log.info("=" * 65)
 
+    _phase("reconcile")
     reconcile = _reconcile_before_run(dry_run=dry_run)
 
-    # Hand the reconciled holdings straight to the wheel check. Essential on a
-    # DRY RUN: the reconcile deliberately doesn't persist, so without this the
-    # preview re-reads the stale state.json and reports Monday doing nothing
-    # while the live run — which does persist — would trade. None on error or
-    # on the 0-positions bail, which correctly falls back to stored state.
-    wheel = run_wheel_check(dry_run=dry_run, client_id=IBKR_CLIENT_ID_PREVIEW,
+    # Hand the reconciled holdings straight to the wheel check, rather than
+    # letting it re-read state.json — which on a preview would be the stale file,
+    # since the reconcile's own write happens under a flag the preview shares.
+    # None on error or on the bail, which correctly falls back to stored state.
+    _phase("wheel check")
+    wheel = run_wheel_check(dry_run=dry_run, client_id=client_id,
                             holdings_override=reconcile.get("holdings"),
                             progress_callback=progress_callback)
+    log.info(f"✅ Wheel check done — freed ${wheel.get('freed_capital', 0):,.0f}  "
+             f"reserved ${wheel.get('reserved_capital', 0):,.0f}  "
+             f"skip {wheel.get('skip_tickers') or 'none'}")
+
+    _phase("CSP pipeline")
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
                              progress_callback=progress_callback,
                              account_summary=account_summary, manual=manual)
 
+    # Systemic market-data failure. Lived only in scheduler.run_pipeline, so a
+    # Run Now that placed nothing because the data farms were down said nothing —
+    # exactly the asymmetry this consolidation is meant to end. A preview never
+    # reaches it: it returns before `results` exists.
+    if not dry_run:
+        results    = csp.get("results") or []
+        actionable = [r for r in results if r.get("status") not in
+                      ("skipped_contract_size", "skipped_delta")]
+        if actionable and all(r.get("status") == "failed_market_data" for r in actionable):
+            _discord_alert(
+                "⚠️ **YRVI** All candidates failed market data — no trades placed.\n"
+                "Check IB Gateway → data farm connections and paper account market "
+                "data subscriptions."
+            )
+
     # Cash sweep — park the week's undeployed remainder (no-op unless enabled in
-    # Settings). On a dry run it only reports what it would do. Mirrors the
-    # scheduler's live path so Run Now behaves identically. Never breaks the run.
+    # Settings). On a dry run it only reports what it would do. Never breaks the run.
     park = None
     try:
         from cash_park import maybe_buy_park

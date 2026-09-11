@@ -357,20 +357,25 @@ def run_discord_preview():
 # ── Monday — wheel check → CSP pipeline (one chained job) ─────
 
 def run_pipeline():
-    """Run the wheel check and the CSP pipeline back-to-back in one job.
+    """The scheduled Monday job. Owns the SCHEDULING — is today the right day, is
+    the gateway up, the dashboard's live status feed, the event loop, and what to
+    say on Discord if the whole thing throws. The trading sequence itself belongs
+    to monday_runner.run_monday, which this calls.
 
-    The wheel check's results are handed to the CSP pipeline IN MEMORY rather
-    than via state.json. The two used to be separate cron jobs 5 min apart, but
-    when the wheel check actually sells covered calls it runs the order-escalation
-    ladder and can take 6+ min — overrunning the pipeline's start, which then read
-    a stale monday_context (cc_premium=0, active_wheel_count=0, reserved=0). That
-    dropped CC premium from the weekly total and made the pipeline over-fill CSP
-    slots against capital already tied up in wheel stock. Chaining them (the same
-    sequence as monday_runner.run_monday / the dashboard's Run Now) removes the race.
+    It used to reimplement that sequence instead, and the two drifted: the
+    reconcile was added to run_monday in v5.2.78 and never reached here, so for
+    six versions the one run that trades unattended every week was the one run
+    still trading on whatever state.json said — invisibly, because the alert that
+    would have reported it only existed on the path that had the reconcile.
+    Merged in v5.2.115 so there is one sequence and one place to change it.
 
-    This duplicates run_monday's sequence rather than calling it, which is how the
-    reconcile went missing here for six versions. Anything added to one belongs in
-    the other until they are merged.
+    (The wheel check and CSP pipeline are chained in memory rather than as two
+    cron jobs 5 min apart: a CC-selling wheel check runs the order-escalation
+    ladder and can take 6+ min, overrunning the pipeline's start, which then read
+    a stale monday_context — cc_premium 0, active_wheel_count 0, reserved 0 —
+    dropping CC premium from the weekly total and over-filling CSP slots against
+    capital already tied up in stock. Fixed v3.9.18, and now inherited from
+    run_monday rather than re-established here.)
     """
     loop = _new_loop()
     now  = datetime.now(PST)
@@ -394,7 +399,7 @@ def run_pipeline():
     import json as _json
     _progress_file  = "/data/run_progress.json"
     _ticker_results = []
-    _phase          = {"name": "wheel check"}
+    _phase          = {"name": "reconcile"}   # run_monday renames it at each boundary
 
     def _sched_progress(ticker=None, stage=None, result=None):
         if result:
@@ -418,67 +423,35 @@ def run_pipeline():
         except Exception:
             pass
 
+    def _set_phase(name):
+        """run_monday calls this at each phase boundary. Push an update as well as
+        record it, so the dashboard shows the transition the moment it happens
+        rather than at the next per-ticker callback."""
+        _phase["name"] = name
+        _sched_progress(ticker=None, stage=None)
+
     # Flip the feed to "executing" before any IBKR work so the dashboard hides
     # the countdown immediately, not only once the CSP phase starts.
-    _sched_progress(ticker=None, stage="starting wheel check")
+    _sched_progress(ticker=None, stage="starting run")
 
     try:
-        # ── Step 0: reconcile state.json against live IBKR ────────
-        # The docstring above claims this job runs "the same sequence as
-        # monday_runner.run_monday / the dashboard's Run Now". That stopped being
-        # true when the reconcile was added in v5.2.78 and nobody noticed, because
-        # the drift alert only ever fired on the path that had it — so the
-        # SCHEDULED Monday run, the one that actually trades unattended every
-        # week, was the only path still trading on whatever state.json said. A box
-        # whose weekend detection failed could only be healed by a human clicking
-        # Run Now. Restoring parity here (v5.2.114).
-        from monday_runner import _reconcile_before_run
-        _sched_progress(ticker=None, stage="reconciling positions")
-        reconcile = _reconcile_before_run(dry_run=False)
+        # The whole trading sequence — reconcile, wheel check, CSP pipeline, cash
+        # sweep — lives in run_monday. client_id is passed explicitly: the wheel
+        # check must use the SCHEDULER's IBKR id (2), not the API's preview id (4),
+        # so a Run Now clicked mid-job cannot collide with this one.
+        from monday_runner import run_monday
+        from config import IBKR_CLIENT_ID_WHEEL
+        result  = run_monday(dry_run=False, progress_callback=_sched_progress,
+                             client_id=IBKR_CLIENT_ID_WHEEL,
+                             phase_callback=_set_phase)
+        outcome = result.get("csp", {})
 
-        # ── Step 1: wheel check (stop-loss sells + covered calls) ──
-        # Its return dict IS the pipeline context (skip_tickers, freed_capital,
-        # reserved_capital, active_wheel_count, cc_premium, shares_sold_pnl, …).
-        # progress_callback streams per-ticker CC/sell activity to the feed.
-        # holdings_override hands over the freshly reconciled picture, exactly as
-        # run_monday does — None on the bail, which correctly falls back to state.
-        from wheel_manager import run_wheel_check
-        context = run_wheel_check(progress_callback=_sched_progress,
-                                  holdings_override=reconcile.get("holdings"))
-        log.info(f"✅ Wheel check done — freed ${context['freed_capital']:,.0f}  "
-                 f"reserved ${context['reserved_capital']:,.0f}  skip {context['skip_tickers'] or 'none'}")
-
-        # ── Step 2: CSP pipeline, driven by the wheel check's live results ──
-        _phase["name"] = "CSP pipeline"
-        _sched_progress(ticker=None, stage="screening candidates")
-        from monday_runner import run_csp_pipeline
-        outcome = run_csp_pipeline(context, dry_run=False, progress_callback=_sched_progress)
-
-        # Clear progress file now that execution is done
+        # Execution is over — restore the countdown.
         _clear_progress()
-
-        # ── Systemic market data failure alert ────────────────
-        results    = outcome.get("results", [])
-        actionable = [r for r in results if r.get("status") not in
-                      ("skipped_contract_size", "skipped_delta")]
-        if actionable and all(r.get("status") == "failed_market_data" for r in actionable):
-            _discord_alert(
-                "⚠️ **YRVI** All candidates failed market data — no trades placed.\n"
-                "Check IB Gateway → data farm connections and paper account market data subscriptions."
-            )
 
         log.info(f"\n✅ Done — {outcome.get('fills', 0)}/{outcome.get('target_fills', 0)} CSP fills  |  "
                  f"CSP ${outcome.get('csp_premium', 0):,.0f}  "
                  f"Total realized ${outcome.get('total_realized', 0):,.0f}")
-
-        # ── Step 3: cash sweep — park the week's undeployed remainder ──
-        # No-op unless enabled in Settings. Self-guarded (all slots filled, 10%
-        # net-liq cap, no margin) and never raises into the run.
-        try:
-            from cash_park import maybe_buy_park
-            maybe_buy_park(outcome, context, dry_run=False)
-        except Exception as e:
-            log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
 
     except Exception as e:
         log.error(f"❌ Monday run error: {e}", exc_info=True)
