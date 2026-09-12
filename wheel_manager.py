@@ -882,6 +882,12 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
     for ticker, shares in stock_positions.items():
         if ticker in existing_holdings:
             h            = _ensure_tranches(existing_holdings[ticker])
+            # A row sitting at 0 shares is a CLOSED cycle, not a live holding: the
+            # sell paths zero `shares` and leave the row behind (call-aways remove
+            # it outright, so only sales land here). If the broker now reports
+            # shares again, the name was RE-ASSIGNED and this is a brand-new cycle.
+            reopened     = h.get("shares", 0) <= 0 and shares > 0
+            _prior_cycle = (h.get("cc_status"), h.get("assignment_date")) if reopened else None
             prior_shares = sum(t.get("shares", 0) for t in h["tranches"])
             delta        = shares - prior_shares
             if h.get("shares", 0) != shares:
@@ -919,6 +925,31 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
             else:
                 log.info(f"  ✅ {ticker}: {shares} shares (existing — unchanged)")
             h["shares"]       = shares
+            if reopened:
+                # Reset the per-cycle lifecycle fields to what a NEW assignment
+                # gets. Only position/basis fields were being refreshed here, so a
+                # re-assigned name inherited the closed cycle's metadata: on
+                # 2026-09-12 IREN came back as 300 shares still carrying
+                # cc_status "sold_csp_only", assignment_date 2026-08-22 and
+                # weeks_held 3. cc_status and weeks_held are cosmetic (the Monday
+                # loop gates on shares, deliberately — see the called-away comment
+                # above), but current_cc_* are NOT: a stale cc_strike left on a
+                # reopened row is what the call-away branch would price the next
+                # exit against, booking P&L against a CC from the previous cycle.
+                # Sibling of the stale-tranche reset in _ensure_tranches, which
+                # fixed the same re-assignment bug for assigned_strike.
+                h["assignment_date"]    = datetime.now().date().isoformat()
+                h["cc_status"]          = "pending"
+                h["weeks_held"]         = 0
+                h["current_cc_strike"]  = None
+                h["current_cc_expiry"]  = None
+                h["current_cc_premium"] = 0.0
+                h["cc_contracts"]       = None
+                h["cc_contracts_needed"] = None
+                h["current_price"]      = None
+                log.info(f"  🔄 {ticker}: re-assigned after a closed cycle — "
+                         f"lifecycle fields reset (was cc_status "
+                         f"'{_prior_cycle[0]}', assigned {_prior_cycle[1]})")
             # net_cost = IBKR avgCost (premium-netted), refreshed every detection —
             # drives CC-floor / stop-loss decisions. Broker-sourced so it survives
             # a lost/stale state.json.
