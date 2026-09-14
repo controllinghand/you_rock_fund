@@ -1,3 +1,7 @@
+## [5.2.120] — 2026-09-14
+### Changed
+- **The YRVI-CSP track icon is now 🐢 instead of 🎯.** 🎯 read as "target / precision", which is not what the track is: CSP Only never holds equity through a decline, making it the slow-and-steady arm. 🐢 is a single codepoint with `Emoji_Presentation=Yes`, so like 🏄 and ✋ it needs no U+FE0F and keeps a bold flat silhouette at the ~16px Discord embed footer. Cosmetic only — `resolve_track()` keys off pinned settings, never the glyph, and the unrelated 🎯 in screener/wheel/Discord log lines are untouched.
+
 ## [5.2.118] — 2026-09-14
 ### Added
 - **The scheduled Monday run now retries once when a gateway connection failure kills it.** A wedge mid-run is the one failure this fleet sees regularly, and until now it cost the entire week. On 2026-09-14 the gateway's JVM hung at ~8h uptime, the watchdog full-restarted it, and that restart severed the in-flight run's socket inside `wheel_manager`'s CRDO market-sell. The watchdog had the gateway serving again ~60s later — but nothing re-ran the pipeline, so two CCs were written, the share sale never happened, and the CSP half never ran at all: 0 of 5 slots, no `weekly_pnl`, no cash sweep. `run_pipeline` now catches `ConnectionError` / `TimeoutError` (ib_insync's severed-socket and wedged-handshake signatures), waits for the gateway to come back, and re-runs the whole sequence once.

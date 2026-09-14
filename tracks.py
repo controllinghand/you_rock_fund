@@ -69,7 +69,12 @@ TRACKS = [
     {
         "id":    "YRVI-CSP",
         "name":  "CSP Only",
-        "emoji": "🎯",
+        # 🐢 — single codepoint with Emoji_Presentation=Yes, so like 🏄 and ✋
+        # above it needs no U+FE0F and keeps a bold flat silhouette at the ~16px
+        # Discord embed footer. Replaced 🎯, which read as "target/precision"
+        # rather than the track's actual character: never holding equity through
+        # a decline, the slow-and-steady arm.
+        "emoji": "🐢",
         "short": "No wheel — dump assignments Monday",
         "description": (
             "Cash-secured puts only. Assigned shares are sold at market at the "
