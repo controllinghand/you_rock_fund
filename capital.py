@@ -122,6 +122,53 @@ def compute_deployed(rows: list, cash: float = None, net_liq: float = None,
     return out
 
 
+def dedupe_positions(positions) -> list:
+    """Collapse duplicate rows out of a reqPositions() answer, keyed by (account, conId).
+
+    Every caller in this codebase reads the list `ib.reqPositions()` RETURNS rather
+    than `ib.positions()`, because that cache never drops an assigned or expired
+    contract (the 2026-08-22 ghost-position bug). The returned list fixes that, but
+    it is a plain list built by appending one entry per `position` callback — unlike
+    the cache, which is a dict keyed by conId and therefore self-deduplicating. So
+    nothing in the returned list guarantees a contract appears exactly once.
+
+    On 2026-09-14 it did not. The Monday recovery run's Step 0 snapshot reported
+    `CRWV 20260918x12, IREN 20260918x20` while IBKR held -6 and -10 — every option
+    row delivered exactly twice. The recovery guard read 12/6 and 20/10 covered and
+    persisted those counts to state.json. It was not reproducible afterwards (three
+    sequential calls on one connection, and two simultaneous clients, all came back
+    clean), and the suspected trigger is a race: the wheel check called reqPositions
+    ~350ms after connecting while detect_assignments' client had subscribed to the
+    position stream a second earlier. This box loses races that faster ones win.
+
+    Rather than chase a race we cannot reproduce, make the read idempotent. IBKR
+    sends one authoritative row per (account, conId), so collapsing on that key is
+    correct no matter how many times a row arrives, and is a no-op on a clean read.
+    Last row wins; insertion order is preserved, so callers that log the snapshot
+    still see it in the order IBKR sent it.
+
+    Why this matters even though the observed failure was "safe": over-counting
+    coverage makes the recovery guard leave a holding alone, which is the harmless
+    direction. But the same inflation applied to a genuinely half-covered holding
+    (6 real contracts against 12 needed) computes 12/12 and skips the top-up,
+    silently leaving shares uncovered — and applied to `open_short_put_capital` it
+    over-reserves and under-deploys the CSP budget. In api.py it would double-count
+    CSP collateral in Capital Deployed, which is the 239%-vs-119% failure that
+    gauge exists to catch.
+
+    Rows without a usable conId are kept rather than dropped — an unidentifiable
+    position is not evidence that the position is not there.
+    """
+    seen: dict = {}
+    for i, p in enumerate(positions or []):
+        con = getattr(getattr(p, "contract", None), "conId", None)
+        if not con:
+            seen[("__nokey__", i)] = p
+            continue
+        seen[(getattr(p, "account", None), con)] = p
+    return list(seen.values())
+
+
 def from_ib_positions(positions) -> list:
     """Adapt ib_insync Position objects (ib.positions()) to compute_deployed rows."""
     rows = []

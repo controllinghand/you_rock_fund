@@ -23,6 +23,7 @@ import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_WHEEL, ACCOUNT, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from screener import get_all_candidates
 from market_calendar import is_market_holiday
+from capital import dedupe_positions
 import discord_poster
 
 STATE_FILE       = "state.json"
@@ -768,7 +769,7 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
         # this request — which is what lets the guard below trust an empty read
         # rather than treat every empty read as a possible failure.
         raw_positions = [
-            p for p in (ib.reqPositions() or [])
+            p for p in dedupe_positions(ib.reqPositions())
             if not (ACCOUNT and p.account != ACCOUNT) and int(p.position or 0) != 0
         ]
         stock_positions = {
@@ -1186,7 +1187,11 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
         # ib.positions()' cache — see the note there. This snapshot decides which
         # shares are already covered and which CSPs are already open, so a stale
         # or half-filled cache here is what makes a re-run write a duplicate.
-        live_pos      = [p for p in (ib.reqPositions() or [])
+        # dedupe_positions() is what makes the accumulation below safe: this block
+        # SUMS contracts per (symbol, expiry), so a duplicated row here inflates
+        # coverage directly. On 2026-09-14 that reported CRWV 12/6 and IREN 20/10
+        # and persisted those counts to state.json — see capital.dedupe_positions.
+        live_pos      = [p for p in dedupe_positions(ib.reqPositions())
                          if not (ACCOUNT and p.account != ACCOUNT)
                          and int(p.position or 0) != 0]
         strike_lookup = {p["ticker"]: p["strike"] for p in state.get("positions", [])}
