@@ -253,6 +253,10 @@ IBKR_CLIENT_ID_PREVIEW = 4      # API-driven Monday runner (Run Screener / Run N
                                 # distinct from the scheduler's wheel id so a manual
                                 # run from the dashboard never collides with the 9:55 job
 IBKR_CLIENT_ID_CASH_PARK = 5    # cash_park.py — Monday sweep buy + end-of-week sell
+IBKR_CLIENT_ID_RETRY_PROBE = 8  # scheduler.py — readiness probe before retrying the
+                                # Monday run after a connection failure. Its own id so
+                                # the probe can never collide with the wheel check (2)
+                                # it is about to re-launch, nor with a Run Now (4).
 # 6 and 7 are owned by api.py, which deliberately does NOT import config (that
 # import chain has taken the api down before), so it defines them locally —
 # they are registered here to keep this the one place ids are allocated:
