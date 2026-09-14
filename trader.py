@@ -9,6 +9,7 @@ from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilte
 
 import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
+from capital import dedupe_positions
 
 log = log_setup.get_logger("trader", "trade_log.txt")
 
@@ -187,7 +188,9 @@ def _reconcile_results_against_broker(ib: IB, results: list, attempted: dict) ->
             # of premium and $43k of collateral invisible, $25k over net liq. This
             # request blocks until IBKR's positionEnd, so it is answered fresh, and
             # it can't hand back a stale ghost the cache never dropped.
-            for p in (ib.reqPositions() or []):
+            # Deduped so a repeated row cannot raise the same "UNRECORDED FILL AT
+            # IBKR" alarm twice for one position — see capital.dedupe_positions.
+            for p in dedupe_positions(ib.reqPositions()):
                 if ACCOUNT and p.account != ACCOUNT:
                     continue
                 c = p.contract

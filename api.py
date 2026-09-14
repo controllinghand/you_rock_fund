@@ -2606,7 +2606,13 @@ def _fetch_ibkr_data(settings: dict, now: float) -> dict:
                 # reported them short, double-counting $240,250 of phantom CSP
                 # collateral and showing Capital Deployed at 239% instead of 119%.
                 # The returned list is exactly what IBKR sent for THIS request.
-                raw_positions = ib.reqPositions()
+                # Deduped by (account, conId) first: the returned list is built by
+                # appending one entry per position callback, and on 2026-09-14 every
+                # option row arrived twice. Un-deduped, that double-counts CSP
+                # collateral in Capital Deployed — the 239%-vs-119% failure this
+                # gauge exists to catch. See capital.dedupe_positions.
+                from capital import dedupe_positions
+                raw_positions = dedupe_positions(ib.reqPositions())
                 # Drop CLOSED positions. IBKR reports a position that was closed
                 # during this session as an explicit position == 0 row, and those
                 # rows keep coming back in every later snapshot. They are not
