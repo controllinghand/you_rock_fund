@@ -3,6 +3,7 @@ import logging
 import asyncio
 import os
 import socket
+import time
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -157,6 +158,85 @@ def _ibkr_reachable() -> bool:
             return True
     except OSError:
         return False
+
+
+# ── Monday-run retry after a mid-run gateway wedge ───────────────
+# A gateway wedge mid-run is the one failure this fleet sees regularly, and until
+# now it cost the ENTIRE week. 2026-09-14 is the worked example: the JVM hung at
+# ~8h uptime, the watchdog full-restarted it, and that restart severed the
+# in-flight run's socket inside wheel_manager's CRDO market-sell. The watchdog had
+# the gateway serving again ~60s later — but nothing re-ran the pipeline, so two
+# CCs were written, the share sale never happened, and the CSP half never ran at
+# all: 0 of 5 slots, no weekly_pnl, no cash sweep.
+#
+# Nothing re-fired because there is no retry cron to fall back on. BOTH Monday
+# jobs are day_of_week="mon,tue", which reads like one — but they are guarded by
+# is_first_trading_day_of_week(), making Tuesday the HOLIDAY-Monday fallback. When
+# Monday IS the first trading day, Tuesday's firing hits the guard and skips. The
+# week simply went untraded until a human clicked Run Now.
+#
+# That Run Now is exactly what this retry automates, and it is safe for the same
+# reason: re-running run_monday is idempotent against LIVE IBKR state — the
+# reconcile re-reads positions, the recovery guard leaves holdings that already
+# carry a short call alone, and target_fills subtracts CSPs already open. Proven
+# end-to-end twice (2026-07-06 and again on 2026-09-14, which re-ran cleanly and
+# placed only the one sale the wedge had cost).
+MONDAY_RETRY_ATTEMPTS     = 2   # first run plus ONE retry — deliberately not a loop
+MONDAY_RETRY_SETTLE_SEC   = 45  # let the watchdog's restart get underway before probing
+MONDAY_RETRY_PROBE_TRIES  = 12  # 12 probes, 15s apart → ~3 min of patience for a relogin
+MONDAY_RETRY_PROBE_GAP    = 15
+MONDAY_RETRY_DEADLINE_MIN = 45  # never START a retry later than this after the run began
+
+
+def _gateway_ready_for_retry() -> tuple[bool, str]:
+    """Is it safe to re-run the Monday sequence after a connection failure?
+
+    Two questions, and `_ibkr_reachable()` answers NEITHER.
+
+    1. Is the gateway actually serving again? That helper is a bare TCP connect,
+       and the signature failure on these boxes is that the port keeps accepting
+       while the JVM is wedged: socat takes the outer connection and cannot
+       forward it, so a client logs "Connected" and then times out at the API
+       handshake. Only a real ib.connect() proves the gateway is answering, which
+       is why this probe connects for real instead of reusing the port check.
+
+    2. Is anything still IN FLIGHT? The idempotence argument for re-running holds
+       for orders that FILLED — a filled sale shows up as a position change the
+       reconcile reads, a filled CC is seen by the recovery guard. It does NOT
+       hold for an order still WORKING: a share sale placed moments before the
+       socket died has not moved the position yet, so a retry would size against
+       stale shares and place a SECOND sale, selling stock we no longer own. A
+       working order is therefore a hard stop, not something to wait out — the
+       run is abandoned and a human is alerted.
+
+    Read-only: connects, asks, disconnects. Places and cancels nothing.
+    """
+    from ib_insync import IB
+    from config import IBKR_CLIENT_ID_RETRY_PROBE
+    ib = IB()
+    try:
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID_RETRY_PROBE,
+                   timeout=15, readonly=True)
+        # reqAllOpenOrders covers orders placed by OTHER client ids too — the
+        # dead run's orders were placed on the wheel id, not this one.
+        ib.reqAllOpenOrders()
+        ib.sleep(2)
+        working = [t for t in ib.openTrades()
+                   if t.orderStatus.status not in
+                   ("Filled", "Cancelled", "ApiCancelled", "Inactive")]
+        if working:
+            desc = ", ".join(
+                f"{t.contract.symbol} {t.order.action} {t.order.totalQuantity}"
+                f" ({t.orderStatus.status})" for t in working[:5])
+            return False, f"{len(working)} order(s) still working at IBKR — {desc}"
+        return True, "gateway answering the API handshake, no working orders"
+    except Exception as e:
+        return False, f"gateway not answering — {type(e).__name__}: {e}"
+    finally:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
 
 
 def _new_loop():
@@ -434,30 +514,102 @@ def run_pipeline():
     # the countdown immediately, not only once the CSP phase starts.
     _sched_progress(ticker=None, stage="starting run")
 
+    started = datetime.now(PST)
     try:
-        # The whole trading sequence — reconcile, wheel check, CSP pipeline, cash
-        # sweep — lives in run_monday. client_id is passed explicitly: the wheel
-        # check must use the SCHEDULER's IBKR id (2), not the API's preview id (4),
-        # so a Run Now clicked mid-job cannot collide with this one.
-        from monday_runner import run_monday
-        from config import IBKR_CLIENT_ID_WHEEL
-        result  = run_monday(dry_run=False, progress_callback=_sched_progress,
-                             client_id=IBKR_CLIENT_ID_WHEEL,
-                             phase_callback=_set_phase)
-        outcome = result.get("csp", {})
+        for attempt in range(1, MONDAY_RETRY_ATTEMPTS + 1):
+            try:
+                # The whole trading sequence — reconcile, wheel check, CSP pipeline,
+                # cash sweep — lives in run_monday. client_id is passed explicitly:
+                # the wheel check must use the SCHEDULER's IBKR id (2), not the API's
+                # preview id (4), so a Run Now clicked mid-job cannot collide with it.
+                # The retry re-runs this WHOLE sequence, reconcile included — that is
+                # what makes it safe to repeat, not a resume from where it died.
+                from monday_runner import run_monday
+                from config import IBKR_CLIENT_ID_WHEEL
+                if attempt > 1:
+                    log.info(f"\n🔁 Monday run — retry {attempt - 1} of "
+                             f"{MONDAY_RETRY_ATTEMPTS - 1}, re-running from the reconcile")
+                result  = run_monday(dry_run=False, progress_callback=_sched_progress,
+                                     client_id=IBKR_CLIENT_ID_WHEEL,
+                                     phase_callback=_set_phase)
+                outcome = result.get("csp", {})
 
-        # Execution is over — restore the countdown.
-        _clear_progress()
+                # Execution is over — restore the countdown.
+                _clear_progress()
 
-        log.info(f"\n✅ Done — {outcome.get('fills', 0)}/{outcome.get('target_fills', 0)} CSP fills  |  "
-                 f"CSP ${outcome.get('csp_premium', 0):,.0f}  "
-                 f"Total realized ${outcome.get('total_realized', 0):,.0f}")
+                log.info(f"\n✅ Done — {outcome.get('fills', 0)}/{outcome.get('target_fills', 0)} CSP fills  |  "
+                         f"CSP ${outcome.get('csp_premium', 0):,.0f}  "
+                         f"Total realized ${outcome.get('total_realized', 0):,.0f}")
+                if attempt > 1:
+                    _discord_alert(
+                        f"✅ **YRVI** Monday run recovered on retry — the first attempt "
+                        f"died on a gateway connection failure and the re-run completed "
+                        f"({outcome.get('fills', 0)}/{outcome.get('target_fills', 0)} CSP fills)."
+                    )
+                break
 
-    except Exception as e:
-        log.error(f"❌ Monday run error: {e}", exc_info=True)
-        _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
-        # Don't leave the feed stuck on "executing" — restore the countdown.
-        _clear_progress()
+            except (ConnectionError, TimeoutError) as e:
+                # The wedge signature: ib_insync surfaces a severed socket as
+                # ConnectionError("Socket disconnect"), and a gateway whose port
+                # accepts but whose JVM is hung as a TimeoutError at apiStart.
+                log.error(f"❌ Monday run connection error "
+                          f"(attempt {attempt}/{MONDAY_RETRY_ATTEMPTS}): {e}", exc_info=True)
+
+                if attempt >= MONDAY_RETRY_ATTEMPTS:
+                    _discord_alert(
+                        f"🚨 **YRVI** Monday run failed on a gateway connection error and "
+                        f"the retry did not recover it: `{type(e).__name__}: {e}`. "
+                        f"Click **Run Now** once the gateway is green — it re-runs the "
+                        f"whole sequence and will not double-trade."
+                    )
+                    _clear_progress()
+                    break
+
+                elapsed_min = (datetime.now(PST) - started).total_seconds() / 60
+                if elapsed_min > MONDAY_RETRY_DEADLINE_MIN:
+                    # Past the point where retrying is the right call. The execution
+                    # time is configured for fill quality; an hour late is a different
+                    # trade from the one that was intended, and that is a decision for
+                    # a human, not for a recovery path.
+                    log.error(f"⏱️  {elapsed_min:.0f} min since the run began — past the "
+                              f"{MONDAY_RETRY_DEADLINE_MIN} min retry deadline; not retrying")
+                    _discord_alert(
+                        f"🚨 **YRVI** Monday run failed on a gateway connection error "
+                        f"{elapsed_min:.0f} min in — past the {MONDAY_RETRY_DEADLINE_MIN} "
+                        f"min retry deadline, so it was NOT retried automatically. "
+                        f"Click **Run Now** if you still want this week deployed."
+                    )
+                    _clear_progress()
+                    break
+
+                _sched_progress(ticker=None, stage="gateway failure — waiting to retry")
+                time.sleep(MONDAY_RETRY_SETTLE_SEC)
+                ready, why = False, "not probed"
+                for _ in range(MONDAY_RETRY_PROBE_TRIES):
+                    ready, why = _gateway_ready_for_retry()
+                    if ready:
+                        break
+                    log.info(f"  ⏳ Not ready to retry — {why}")
+                    time.sleep(MONDAY_RETRY_PROBE_GAP)
+
+                if not ready:
+                    log.error(f"🚫 Not retrying the Monday run — {why}")
+                    _discord_alert(
+                        f"🚨 **YRVI** Monday run died on a gateway connection error and "
+                        f"was NOT retried: {why}. Nothing further was traded this run — "
+                        f"check the account, then click **Run Now**."
+                    )
+                    _clear_progress()
+                    break
+
+                log.info(f"  ✅ {why} — retrying")
+
+            except Exception as e:
+                log.error(f"❌ Monday run error: {e}", exc_info=True)
+                _discord_alert(f"🚨 **YRVI** Monday run (wheel check / CSP pipeline) failed: `{type(e).__name__}: {e}`")
+                # Don't leave the feed stuck on "executing" — restore the countdown.
+                _clear_progress()
+                break
     finally:
         loop.close()
 
