@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 import log_setup
 from secrets_client import get_secret
+from app_identity import request_headers
 from market_calendar import is_market_holiday, is_first_trading_day_of_week
 from tracks import all_tracks, resolve_track
 
@@ -113,9 +114,27 @@ def _trading_paused() -> bool:
 ALERTS_MAX = 200
 _alerts_lock = threading.Lock()
 SECRETS_SERVICE_URL = "http://secrets:8001"
-# Feedback webhook — defaults to the shared You Rock Club feedback channel so every
-# box works out of the box; a box can override it via the discord_feedback_webhook_url secret.
-_FEEDBACK_WEBHOOK_DEFAULT = "https://discord.com/api/webhooks/1506828497757147167/364xR_1wKCz1LPREGwqpE9mmvQkwkC-EiSirRqWua69eCs-rma5Hc4j7RGIwqBas0jyE"
+# Feedback relay — the Help page's bug/feature form posts to the You Rock Club
+# API, which holds the Discord webhook and forwards the message (see
+# ledger_sync_api.relay_feedback in greer_project).
+#
+# This used to be a Discord webhook URL hardcoded right here, so feedback would
+# work on a fresh box with no setup. This repo is PUBLIC: a secret scanner found
+# that webhook on 2026-09-19 and Discord deleted it permanently, breaking the
+# Feedback button on every box at once — and the only fix would have been
+# shipping a new version to all of them. Nothing here knows a webhook URL now;
+# rotating it is one env var on the relay.
+#
+# Boxes authenticate to the relay with the render_secret they ALREADY hold for
+# the screener (a required, install-time secret), so this needed no new
+# credential on the self-hosted boxes.
+#
+# The base is derived from RENDER_URL the same way screener.py derives its
+# health URL. api.py deliberately does not import config, so the default is
+# mirrored from config.RENDER_URL — keep the two in step.
+FEEDBACK_RELAY_URL = os.environ.get(
+    "RENDER_URL", "https://yourockclub-ledger-sync.onrender.com/api/targets/csp"
+).split("/api/")[0].rstrip("/") + "/api/feedback"
 # IBKR client ids: this module owns 6 (shared status poll) and 7 (diag probe) —
 # see IBKR_CLIENT_ID_API_STATUS below and the registry in config.py.
 
@@ -4519,12 +4538,6 @@ def test_run():
 
 @app.post("/api/feedback")
 def submit_feedback(body: FeedbackRequest):
-    webhook_url = _read_secret_or_env("discord_feedback_webhook_url", "DISCORD_FEEDBACK_WEBHOOK_URL") or _FEEDBACK_WEBHOOK_DEFAULT
-    if not webhook_url:
-        raise HTTPException(
-            status_code=503,
-            detail="Feedback webhook not configured — get the URL from #yrvi_secrets in the You Rock Club Discord and add it in Secrets."
-        )
     if not body.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
@@ -4542,22 +4555,82 @@ def submit_feedback(body: FeedbackRequest):
         or "Unknown"
     )
 
-    emoji = "🐛" if body.type == "bug" else "💡"
-    label = "Bug Report" if body.type == "bug" else "Feature Request"
+    import requests as req
 
-    content = (
-        f"{emoji} **{label}** from **{sender}**\n"
-        f"```\n{body.message.strip()}\n```\n"
-        f"v{version} · {mode} mode · {now_str}"
-    )
+    # Escape hatch: a box that has set its own discord_feedback_webhook_url keeps
+    # posting straight to its own channel, bypassing the club relay entirely.
+    override = _read_secret_or_env("discord_feedback_webhook_url", "DISCORD_FEEDBACK_WEBHOOK_URL")
+    if override:
+        emoji = "🐛" if body.type == "bug" else "💡"
+        label = "Bug Report" if body.type == "bug" else "Feature Request"
+        content = (
+            f"{emoji} **{label}** from **{sender}**\n"
+            f"```\n{body.message.strip()}\n```\n"
+            f"v{version} · {mode} mode · {now_str}"
+        )
+        try:
+            r = req.post(
+                override,
+                json={"content": content, "allowed_mentions": {"parse": []}},
+                timeout=10,
+            )
+            r.raise_for_status()
+            return {"success": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Discord post failed: {e}")
+
+    # Normal path: hand the message to the club relay, which owns the webhook.
+    # The relay also does the Discord formatting, so how feedback LOOKS in the
+    # channel can change without shipping a new version to every box.
+    secret = _read_secret_or_env("render_secret", "RENDER_SECRET")
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Render Screener API Secret is missing — add it in Secrets, or post in the You Rock Club Discord.",
+        )
+
+    # The relay runs on Render's free tier and spins down after ~15 min idle, so
+    # a feedback post almost always hits a cold instance. Warm it on the cheap
+    # health route first (same trick as screener.py) so a 30–60s boot doesn't eat
+    # the POST's timeout and surface to the operator as a failure.
+    try:
+        req.get(FEEDBACK_RELAY_URL.rsplit("/api/", 1)[0] + "/health", timeout=30)
+    except Exception:
+        pass  # best-effort warm-up; the POST below is the real attempt
 
     try:
-        import requests as req
-        r = req.post(webhook_url, json={"content": content}, timeout=5)
+        r = req.post(
+            FEEDBACK_RELAY_URL,
+            json={
+                "secret":  secret,
+                "type":    body.type,
+                "message": body.message.strip(),
+                "sender":  sender,
+                "version": version,
+                "mode":    mode,
+                "sent_at": now_str,
+            },
+            headers=request_headers(),
+            timeout=30,
+        )
         r.raise_for_status()
         return {"success": True}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Discord post failed: {e}")
+        # Fail soft: leave the operator a way to get the message to us anyway.
+        detail = "Couldn't reach the feedback service — please post it in the You Rock Club Discord instead."
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 429:
+            detail = "Too many messages from this box — try again in a few minutes."
+        elif status == 401:
+            detail = "Feedback rejected — check the Render Screener API Secret in Secrets."
+        elif status == 400:
+            # The relay validates type/message too; its complaint is safe to show.
+            try:
+                detail = e.response.json().get("error") or detail  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        logger.warning(f"Feedback relay post failed: {e}")
+        raise HTTPException(status_code=502, detail=detail)
 
 
 @app.post("/api/ytd/weeks")
