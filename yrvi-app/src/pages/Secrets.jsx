@@ -22,16 +22,17 @@ const LABELS = {
   tws_userid_live:             { label: 'IBKR Live Username',           required: false },
   vnc_server_password:         { label: 'VNC Password',                 required: false, description: 'Default: ibgateway123!test — auto-fills the dashboard\'s View Gateway viewer (and any external VNC client you opt into)' },
   discord_webhook_url:          { label: 'Discord Webhook URL',          required: false, description: 'All Discord notifications — weekly plan, execution results, assignments, and alerts — go to this channel.' },
-  // discord_feedback_webhook_url is an OPTIONAL override, hidden from the Secrets UI — see deriveSecrets filter.
+  // discord_feedback_webhook_url is DEAD (v5.2.122): api.py ignores it and always uses the relay. Hidden — see deriveSecrets filter.
   flex_token:    { label: 'IBKR Flex Token',    required: false, description: 'Flex Web Service token from IBKR Portal → Performance & Reports → Flex Queries. Required for "Fetch from IBKR" in the Reconciler.' },
   flex_query_id: { label: 'IBKR Flex Query ID', required: false, description: 'Numeric query ID of your Activity Flex Query (Executions sub-type, XML format). Required for "Fetch from IBKR" in the Reconciler.' },
 }
 
 function deriveSecrets(statusSecrets) {
   if (!statusSecrets) return []
-  // discord_feedback_webhook_url is hidden: feedback normally goes through the You Rock Club
-  // relay (api.py FEEDBACK_RELAY_URL), which authenticates with render_secret. This secret is
-  // only an escape hatch for a box that wants feedback in its own channel.
+  // discord_feedback_webhook_url is hidden AND no longer read by api.py (v5.2.122): feedback
+  // always goes through the You Rock Club relay. Boxes set up before v5.2.4 still hold the
+  // webhook Discord deleted on 2026-09-19 in that secret, so honoring it sent them to a dead
+  // URL. Kept hidden rather than shown as a stale, ignored row.
   return Object.keys(statusSecrets).filter(name => name !== 'discord_feedback_webhook_url').map(name => {
     const meta = LABELS[name] || { label: name, required: false }
     return { name, label: meta.label, required: meta.required, description: meta.description }
