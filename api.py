@@ -4557,29 +4557,20 @@ def submit_feedback(body: FeedbackRequest):
 
     import requests as req
 
-    # Escape hatch: a box that has set its own discord_feedback_webhook_url keeps
-    # posting straight to its own channel, bypassing the club relay entirely.
-    override = _read_secret_or_env("discord_feedback_webhook_url", "DISCORD_FEEDBACK_WEBHOOK_URL")
-    if override:
-        emoji = "🐛" if body.type == "bug" else "💡"
-        label = "Bug Report" if body.type == "bug" else "Feature Request"
-        content = (
-            f"{emoji} **{label}** from **{sender}**\n"
-            f"```\n{body.message.strip()}\n```\n"
-            f"v{version} · {mode} mode · {now_str}"
-        )
-        try:
-            r = req.post(
-                override,
-                json={"content": content, "allowed_mentions": {"parse": []}},
-                timeout=10,
-            )
-            r.raise_for_status()
-            return {"success": True}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Discord post failed: {e}")
-
-    # Normal path: hand the message to the club relay, which owns the webhook.
+    # Feedback ALWAYS goes through the club relay — there is deliberately no
+    # per-box webhook override any more.
+    #
+    # v5.2.121 kept one, honoring a discord_feedback_webhook_url secret ahead of
+    # the relay. That was a trap: before v5.2.4 every box had to paste the club
+    # webhook into that secret by hand, so boxes from that era still hold the URL
+    # that Discord deleted on 2026-09-19 — and the override took priority, so
+    # they posted to the dead webhook and got a 404 while the working relay sat
+    # unused. Observed on the dev box immediately after upgrading to v5.2.121.
+    # An override that silently bypasses the fix on an unknown number of boxes is
+    # worth more than the feature it enabled, which nothing ever used: the secret
+    # only ever held the club's own webhook. The stale secret is simply ignored
+    # now, so upgrading is enough to fix a box.
+    #
     # The relay also does the Discord formatting, so how feedback LOOKS in the
     # channel can change without shipping a new version to every box.
     secret = _read_secret_or_env("render_secret", "RENDER_SECRET")
