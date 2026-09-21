@@ -149,6 +149,30 @@ def _account_summary(ib: IB) -> tuple:
         return None, None, None
 
 
+def _settled_by_date(ib: IB) -> tuple:
+    """(raw string, {date: amount}) from IBKR's `SettledCashByDate`, or ("", {}).
+
+    OBSERVATION ONLY — deliberately not wired into the cap yet. On 2026-09-21 the
+    sweep was refused with an Equity-with-Loan-Value of $9,368.63 while every cash
+    tag it could read said $8,405 was free; this is the one figure IBKR publishes
+    with a settlement date attached, so it is very likely the signal that would
+    have seen the constraint in real time. Nothing sampled it that morning, so that
+    is inference, not evidence. Logging it on every sweep is how it gets tested:
+    if on a Monday it reads low for TODAY while TotalCashValue reads high, the cap
+    can move onto it and the estimate in settlement.py becomes the fallback.
+
+    Best-effort — a log line must never disturb a run that is placing orders.
+    """
+    try:
+        for v in ib.accountValues(ACCOUNT):
+            # Not in accountSummary's tag list; only reqAccountUpdates carries it.
+            if v.tag == "SettledCashByDate" and v.value:
+                return v.value, settlement.parse_settled_by_date(v.value)
+    except Exception as e:
+        log.warning(f"⚠️  Could not read SettledCashByDate: {e}")
+    return "", {}
+
+
 def _price(ib: IB, ticker: str):
     contract = Stock(ticker, "SMART", "USD")
     q = ib.qualifyContracts(contract)
@@ -369,12 +393,31 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                      f"${unsettled:,.2f} — {settlement.describe(unsettled_rows)}"
                      + (f", plus ${freed:,.0f} freed by this run's sales" if freed else ""))
 
+        # IBKR's own settlement schedule, logged beside the decision this run
+        # actually made so the two can be compared later. See _settled_by_date:
+        # observation only, it does not move the cap.
+        sbd_raw, sbd = _settled_by_date(ib)
+        sbd_today    = settlement.settled_as_of(sbd)
+        if sbd:
+            schedule = "  ".join(f"{d:%Y-%m-%d}=${a:,.2f}" for d, a in sorted(sbd.items()))
+            log.info(f"  📅 IBKR SettledCashByDate: {schedule}")
+            if sbd_today is not None and total_cash is not None:
+                gap = round(total_cash - sbd_today, 2)
+                log.info(f"     spendable today ${sbd_today:,.2f} vs cash tags "
+                         f"${total_cash:,.2f} → gap ${gap:,.2f}"
+                         + ("  ⚠️  the cash tags are over-stating what can buy stock"
+                            if gap > 1 else "  (agree)"))
+
         caps = {"base": round(base, 2), "remainder": round(remainder, 2),
                 "committed_csp": committed_csp,
                 "settled_cash": round(total_cash, 2) if total_cash is not None else None,
                 "settled_effective": round(cash_cap, 2),
                 "unsettled": unsettled,
                 "unsettled_detail": settlement.describe(unsettled_rows) if unsettled else None,
+                # Persisted so a rejection can be compared against IBKR's own
+                # schedule after the fact, which 2026-09-21 had no way to do.
+                "settled_by_date": sbd_raw or None,
+                "settled_today": round(sbd_today, 2) if sbd_today is not None else None,
                 "buying_power": round(buying_power, 2) if buying_power is not None else None,
                 "netliq_cap": round(netliq_cap, 2), "all_slots_filled": all_filled,
                 "fills": fills, "target": target, "buy_amount": buy_amount}

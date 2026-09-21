@@ -114,6 +114,45 @@ def unsettled(state: dict, asof: date = None) -> tuple[float, list]:
     return round(sum(float(e.get("amount") or 0.0) for e in rows), 2), rows
 
 
+def parse_settled_by_date(raw: str) -> dict:
+    """IBKR's `SettledCashByDate` → {date: amount}.
+
+    Raw form is `20260921:17613.1462148;20260922:17905.1462148` — a settlement
+    SCHEDULE, and the only figure IBKR publishes with a time dimension. Every other
+    cash tag reports one number: on the evening of 2026-09-21 `SettledCash` read
+    $17,905.15 flat while this read $17,613.15 for that day and $17,905.15 for the
+    next, the $292.00 being the CSP + CC premiums written that morning, settling T+1.
+
+    It lives in `accountValues()`, NOT in `accountSummary()`'s tag list, which is
+    why nothing here had ever seen it. Malformed pairs are skipped rather than
+    raising — this feeds a log line, not a trading decision.
+    """
+    out = {}
+    for pair in (raw or "").split(";"):
+        day, _, amount = pair.partition(":")
+        try:
+            out[datetime.strptime(day.strip(), "%Y%m%d").date()] = float(amount)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def settled_as_of(schedule: dict, asof: date = None) -> float | None:
+    """The settled-cash figure that applies on `asof` (today).
+
+    Exact match when IBKR lists the day. Otherwise the LOWEST figure in the
+    schedule: the amounts rise as money settles, so the smallest is the one that
+    cannot over-state what is spendable right now.
+    """
+    if not schedule:
+        return None
+    asof = asof or date.today()
+    if asof in schedule:
+        return schedule[asof]
+    past = [d for d in schedule if d <= asof]
+    return schedule[max(past)] if past else min(schedule.values())
+
+
 def describe(rows: list) -> str:
     """One-line human summary for a log line or a Discord alert."""
     if not rows:
