@@ -12,13 +12,19 @@ Two entry points, both driven by settings (feature is OFF by default):
   sell_park(dry_run, ...)                               — end of week (Thu/Fri job)
 
 Design guards (see the buy path):
-  • Idle-cash basis = IBKR Buying Power (real settled cash on a cash account; a live
-    run reads it AFTER the CSPs execute, a preview subtracts the planned CSP capital).
-  • Buy amount = min(idle(+premium), settled cash [, 10% of net-liq]). The
-    settled-cash cap means it can NEVER reach into margin. The 10% net-liq cap is a
+  • Idle-cash basis = the CSP budget remainder (a live run reads the account AFTER
+    the CSPs execute, a preview subtracts the planned CSP capital).
+  • Buy amount = min(idle(+premium), spendable cash [, 10% of net-liq]). The
+    cash cap means it can NEVER reach into margin. The 10% net-liq cap is a
     SAFETY that only applies when some option slots went unfilled (partial/broken
     run) — when every slot is filled the idle cash is genuinely free, so the FULL
     amount is parked.
+  • Spendable cash = min(TotalCashValue, SettledCash, EquityWithLoanValue)
+    − open CSP collateral − proceeds still inside T+1 settlement. That last term
+    is the fund's own ledger (settlement.py), because no IBKR tag reports it: on
+    2026-09-21 every cash tag said $8,405 was free while the order-entry check
+    refused the buy. Cash/IRA accounts only — margin accounts can spend unsettled
+    proceeds.
   • Fractional via IBKR cashQty (spend the exact dollar amount).
   • Reconciles an already-open position so a failed prior sell isn't double-bought
     or stranded.
@@ -31,6 +37,7 @@ from datetime import datetime
 from ib_insync import IB, Stock, Order
 
 import log_setup
+import settlement
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_CASH_PARK, ACCOUNT, ACCOUNT_TYPE,
     MODE_LABEL, get_settings, connect_with_retry,
@@ -105,27 +112,65 @@ def _connect(client_id: int = None) -> IB:
     return connect_with_retry(_attempt, IBKR_HOST, IBKR_PORT, log)
 
 
-def _account_summary(ib: IB) -> tuple:
-    """(total_settled_cash, net_liquidation, buying_power). All None on error.
+_CASH_TAGS = ("TotalCashValue", "NetLiquidation", "BuyingPower",
+              "SettledCash", "EquityWithLoanValue")
 
-    - BuyingPower drives the idle-cash basis: on a cash account it's real settled
-      cash and already excludes capital tied up in wheel stock + reserved collateral
-      (same figure the 'Cash Account' mode deploys as the CSP budget).
-    - TotalCashValue is the no-margin cap: max(0, it) blocks any margin account (it
-      goes negative when the account is borrowing), so the sweep never uses leverage."""
+
+def _account_summary(ib: IB) -> tuple:
+    """(spendable_cash, net_liquidation, buying_power). All None on error.
+
+    - The no-margin cap takes the MIN of TotalCashValue, SettledCash and
+      EquityWithLoanValue. TotalCashValue alone was the cap until v5.2.123; on the
+      2026-09-21 rejection all three happened to agree, but SettledCash is the tag
+      that MEANS what this cap is for and ELV is the figure IBKR's own order check
+      quotes back when it says no, so taking the lowest costs one dict lookup and
+      removes a whole class of surprise. max(0, …) still blocks a margin account,
+      which reports these negative while borrowing.
+    - BuyingPower is returned for the dashboard record only; it is NOT a cap. It
+      read $8,405 on the run that got rejected.
+    """
     try:
         summary = ib.accountSummary(ACCOUNT)
         by_tag  = {}
         for v in summary:
-            if v.tag in ("TotalCashValue", "NetLiquidation", "BuyingPower"):
+            if v.tag in _CASH_TAGS:
                 # Prefer the base-currency / USD row; accountSummary may repeat tags.
                 if v.tag not in by_tag or v.currency in ("USD", "BASE", ""):
-                    by_tag[v.tag] = float(v.value)
-        return (by_tag.get("TotalCashValue"), by_tag.get("NetLiquidation"),
-                by_tag.get("BuyingPower"))
+                    try:
+                        by_tag[v.tag] = float(v.value)
+                    except (TypeError, ValueError):
+                        continue
+        cash_tags = [by_tag[t] for t in ("TotalCashValue", "SettledCash",
+                                         "EquityWithLoanValue") if t in by_tag]
+        return (min(cash_tags) if cash_tags else None,
+                by_tag.get("NetLiquidation"), by_tag.get("BuyingPower"))
     except Exception as e:
         log.warning(f"⚠️  Could not read account summary: {e}")
         return None, None, None
+
+
+def _settled_by_date(ib: IB) -> tuple:
+    """(raw string, {date: amount}) from IBKR's `SettledCashByDate`, or ("", {}).
+
+    OBSERVATION ONLY — deliberately not wired into the cap yet. On 2026-09-21 the
+    sweep was refused with an Equity-with-Loan-Value of $9,368.63 while every cash
+    tag it could read said $8,405 was free; this is the one figure IBKR publishes
+    with a settlement date attached, so it is very likely the signal that would
+    have seen the constraint in real time. Nothing sampled it that morning, so that
+    is inference, not evidence. Logging it on every sweep is how it gets tested:
+    if on a Monday it reads low for TODAY while TotalCashValue reads high, the cap
+    can move onto it and the estimate in settlement.py becomes the fallback.
+
+    Best-effort — a log line must never disturb a run that is placing orders.
+    """
+    try:
+        for v in ib.accountValues(ACCOUNT):
+            # Not in accountSummary's tag list; only reqAccountUpdates carries it.
+            if v.tag == "SettledCashByDate" and v.value:
+                return v.value, settlement.parse_settled_by_date(v.value)
+    except Exception as e:
+        log.warning(f"⚠️  Could not read SettledCashByDate: {e}")
+    return "", {}
 
 
 def _price(ib: IB, ticker: str):
@@ -196,6 +241,24 @@ def _poll_fill(ib: IB, trade) -> bool:
             return False
         log.info(f"  ⏳ order {st}: filled {fl} after {elapsed}s")
     return False
+
+
+def _reject_reason(trade) -> tuple:
+    """(errorCode, message) of the last error on this order, or (None, None).
+
+    A rejected order and an order that genuinely sat unfilled for 60s are the same
+    `False` out of _poll_fill, but they are completely different events and the
+    2026-09-21 alert ("did not fill — MANUAL CHECK", on an order IBKR refused in
+    0.2s) said neither. The reason is right there in the trade log."""
+    try:
+        for entry in reversed(trade.log or []):
+            code = getattr(entry, "errorCode", 0)
+            if code:
+                msg = (getattr(entry, "message", "") or "").replace("<br>", " ")
+                return code, " ".join(msg.split())
+    except Exception:
+        pass
+    return None, None
 
 
 # ── Buy (Monday, after the option workflow) ────────────────────
@@ -290,7 +353,32 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # net-liq cap is an additional safety for a partial (unfilled) run.
         freed       = context.get("freed_capital", 0.0) or 0.0
         settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
-        cash_cap    = max(0.0, settled_eff - committed_csp) if settled_eff is not None else base
+
+        # ── Unsettled-cash haircut (cash/IRA accounts only) ──
+        # IBKR will not let a cash account BUY STOCK with proceeds still inside T+1
+        # settlement, and no account tag says so: on 2026-09-21 TotalCashValue,
+        # SettledCash, BuyingPower and AvailableFunds all reported $8,405 free while
+        # the order-entry check refused the buy against an ELV of $9,368.63. So the
+        # fund tracks its own recent sales (settlement.py) and subtracts them here.
+        # Two sources, because they settle on different days:
+        #   • the ledger — Friday's call-away and the prior week's park sale, the
+        #     pair that caused the rejection. Both land Monday, mid-run.
+        #   • `freed` — shares this very run just sold, which the ledger cannot
+        #     know about yet. On a DRY preview `freed` was added above to model
+        #     post-sale cash, so adding then subtracting cancels and preview
+        #     still matches a live run exactly.
+        # Margin accounts are exempt: there the margin loan covers the gap and a
+        # haircut would just under-park. Read the toggle LIVE from settings (not an
+        # import snapshot) like dry_run.
+        state = _load_state()
+        if get_settings().get("cash_account", False):
+            unsettled, unsettled_rows = settlement.unsettled(state)
+            unsettled = round(unsettled + freed, 2)
+        else:
+            unsettled, unsettled_rows = 0.0, []
+
+        cash_cap    = max(0.0, settled_eff - committed_csp - unsettled) \
+                      if settled_eff is not None else base
         netliq_cap  = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
         buy_amount  = round(min(base, cash_cap) if all_filled
                             else min(base, cash_cap, netliq_cap), 2)
@@ -300,11 +388,36 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                  f"slots={fills}/{target} "
                  f"{'(all filled → full)' if all_filled else '(partial → 10% cap)'}  "
                  f"→ buy=${buy_amount:,.2f} of {instrument}")
+        if unsettled:
+            log.info(f"  ⏳ unsettled (T+1, not spendable on a cash account): "
+                     f"${unsettled:,.2f} — {settlement.describe(unsettled_rows)}"
+                     + (f", plus ${freed:,.0f} freed by this run's sales" if freed else ""))
+
+        # IBKR's own settlement schedule, logged beside the decision this run
+        # actually made so the two can be compared later. See _settled_by_date:
+        # observation only, it does not move the cap.
+        sbd_raw, sbd = _settled_by_date(ib)
+        sbd_today    = settlement.settled_as_of(sbd)
+        if sbd:
+            schedule = "  ".join(f"{d:%Y-%m-%d}=${a:,.2f}" for d, a in sorted(sbd.items()))
+            log.info(f"  📅 IBKR SettledCashByDate: {schedule}")
+            if sbd_today is not None and total_cash is not None:
+                gap = round(total_cash - sbd_today, 2)
+                log.info(f"     spendable today ${sbd_today:,.2f} vs cash tags "
+                         f"${total_cash:,.2f} → gap ${gap:,.2f}"
+                         + ("  ⚠️  the cash tags are over-stating what can buy stock"
+                            if gap > 1 else "  (agree)"))
 
         caps = {"base": round(base, 2), "remainder": round(remainder, 2),
                 "committed_csp": committed_csp,
                 "settled_cash": round(total_cash, 2) if total_cash is not None else None,
                 "settled_effective": round(cash_cap, 2),
+                "unsettled": unsettled,
+                "unsettled_detail": settlement.describe(unsettled_rows) if unsettled else None,
+                # Persisted so a rejection can be compared against IBKR's own
+                # schedule after the fact, which 2026-09-21 had no way to do.
+                "settled_by_date": sbd_raw or None,
+                "settled_today": round(sbd_today, 2) if sbd_today is not None else None,
                 "buying_power": round(buying_power, 2) if buying_power is not None else None,
                 "netliq_cap": round(netliq_cap, 2), "all_slots_filled": all_filled,
                 "fills": fills, "target": target, "buy_amount": buy_amount}
@@ -312,6 +425,12 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         if buy_amount < MIN_BUY_USD:
             if remainder < MIN_BUY_USD:
                 reason = "no remainder left after this week's CSP deployment"
+            elif cash_cap < MIN_BUY_USD and unsettled:
+                # The 2026-09-21 case. Worth naming precisely: the cash IS in the
+                # account, so "no settled cash" alone reads like something broke.
+                reason = (f"${unsettled:,.0f} of the cash is still in T+1 settlement "
+                          f"({settlement.describe(unsettled_rows)}) and a cash/IRA account "
+                          f"cannot buy stock with unsettled proceeds")
             elif cash_cap < MIN_BUY_USD:
                 reason = f"no settled cash (${(settled_eff or 0):,.0f}) — would require margin"
             else:
@@ -340,7 +459,6 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                             "message": f"No cash swept — {reason}"})
 
         # ── Reconcile: don't double-buy if a prior park never sold ──
-        state = _load_state()
         existing = state.get("cash_park")
         if existing and existing.get("status") == "open" and existing.get("shares"):
             log.warning(f"  ⚠️  Prior {existing.get('instrument')} park still open — not buying again")
@@ -384,8 +502,13 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # the same order style the sell side uses. The sub-1-share remainder (well
         # under one QQQ/SGOV share) just stays as cash for the week.
         if not filled_ok and not float(trade.orderStatus.filled or 0.0):
-            ib.cancelOrder(trade.order)
-            ib.sleep(1)
+            # Only cancel an order that is still live. IBKR had already killed the
+            # 10244 one, and cancelling it anyway logged a misleading Error 10147
+            # ("OrderId 6 that needs to be cancelled is not found") next to the
+            # real failure.
+            if trade.orderStatus.status not in ("Cancelled", "ApiCancelled", "Inactive"):
+                ib.cancelOrder(trade.order)
+                ib.sleep(1)
             _, px = _price(ib, instrument)
             whole = int(buy_amount // px) if px else 0
             if whole >= 1:
@@ -400,6 +523,37 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                           f"< 1 share — cannot fall back")
 
         if not filled_ok:
+            code, reason = _reject_reason(trade)
+            # Error 201 = IBKR refused the order on available funds. On a cash/IRA
+            # account that is overwhelmingly the unsettled-proceeds rule, not a
+            # broken run: the money is in the account, it just isn't spendable
+            # until T+1 completes. The haircut above should now catch this before
+            # an order is ever sent, so reaching here means the haircut
+            # under-counted — say that plainly instead of "did not fill", which
+            # sent a MANUAL CHECK alert for an order IBKR refused in 0.2s.
+            if code == 201:
+                log.error(f"  ⛔ {instrument} buy REJECTED by IBKR (Error 201 — available "
+                          f"funds): {reason}")
+                log.error(f"     Haircut applied was ${unsettled:,.2f}; nothing parked this week.")
+                _discord_alert(
+                    f"🅿️ **YRVI** Cash sweep — **nothing parked**: IBKR refused the "
+                    f"{instrument} buy (${buy_amount:,.0f}) for insufficient available funds.\n\n"
+                    f"On a cash/IRA account, proceeds from a sale cannot buy stock until T+1 "
+                    f"settlement completes — a Friday call-away or park sale is still "
+                    f"unsettled Monday morning. The cash is safe and idle; no action needed.\n"
+                    f"IBKR said: `{reason}`")
+                return _finish({"status": "rejected_unsettled_funds", **caps,
+                                "ibkr_error": code, "ibkr_reason": reason,
+                                "message": f"IBKR refused the {instrument} buy — funds not yet "
+                                           f"settled (T+1). Nothing parked."})
+            if code:
+                log.error(f"  ⛔ {instrument} buy rejected by IBKR (Error {code}): {reason}")
+                _discord_alert(f"❌ **YRVI** Cash sweep: {instrument} BUY (${buy_amount:,.0f}) "
+                               f"rejected by IBKR — MANUAL CHECK.\n`Error {code}: {reason}`")
+                return _finish({"status": "failed_rejected", **caps,
+                                "ibkr_error": code, "ibkr_reason": reason,
+                                "message": f"Failed — IBKR rejected the {instrument} buy "
+                                           f"(Error {code})"})
             log.error(f"  ❌ {instrument} buy did not fill in {MARKET_WAIT_SECS}s")
             _discord_alert(f"❌ **YRVI** Cash sweep: {instrument} BUY (${buy_amount:,.0f}) "
                            f"did not fill — MANUAL CHECK.")
@@ -520,6 +674,11 @@ def sell_park(dry_run: bool = False, client_id: int = None, ib: IB = None) -> di
                    "sold_date": now, "last_checked": now})
         state["cash_park"] = cp
         _record_park_pnl(state, realized)
+        # These proceeds are unsettled until T+1. The sweep sells on the week's LAST
+        # trading day, so on a cash account they are still settling when Monday's buy
+        # wants them — the park was blocking its own next cycle (2026-09-21).
+        settlement.record_sale(state, proceeds, source="park_sale", ticker=instrument,
+                               entry_id=f"park_sale:{cp.get('buy_date') or now}")
         _save_state(state)
 
         log.info(f"  ✅ Cash sweep closed: sold {filled} {instrument} @ ${fill:.2f} "

@@ -106,3 +106,25 @@ def is_last_trading_day_of_week(d: date | None = None) -> bool:
             return False
         nxt += timedelta(days=1)
     return True
+
+
+def is_trading_day(d: date | None = None) -> bool:
+    """True if d is a regular NYSE session (weekday, not a holiday)."""
+    if d is None:
+        d = date.today()
+    return d.weekday() <= 4 and not is_market_holiday(d)
+
+
+def next_trading_day(d: date | None = None) -> date:
+    """The first trading day strictly after d.
+
+    Used by settlement.py to age T+1 sale proceeds: proceeds from a trade on d are
+    not spendable until the session after d has run, so Friday's sale is still
+    unsettled on Monday morning.
+    """
+    if d is None:
+        d = date.today()
+    nxt = d + timedelta(days=1)
+    while not is_trading_day(nxt):
+        nxt += timedelta(days=1)
+    return nxt
