@@ -694,6 +694,8 @@ export default function Dashboard() {
           emoji = ev.status === 'bought' ? '🅿️'
                 : ev.status === 'skipped_no_cash' ? '💤'
                 : ev.status === 'skipped_slots_unfilled' ? '⏸️'
+                // Funds still inside T+1 settlement: idle cash, not a broken run.
+                : ev.status === 'rejected_unsettled_funds' ? '⏳'
                 : ev.status?.startsWith('failed') || ev.status === 'error' ? '⚠️' : '💤'
           line = ev.message || ev.status
         } else {

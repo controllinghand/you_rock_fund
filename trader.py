@@ -10,6 +10,7 @@ from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilte
 import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from capital import dedupe_positions
+import settlement
 
 log = log_setup.get_logger("trader", "trade_log.txt")
 
@@ -493,6 +494,18 @@ def _fetch_available_cash(ib: IB) -> float | None:
     except Exception as e:
         log.warning(f"  ⚠️  Funds gate: could not read available cash ({e}) — gate disabled this run")
     return None
+
+
+def _unsettled_proceeds() -> tuple:
+    """(amount, rows) of recent sale proceeds still inside T+1 settlement.
+
+    Read-only and best-effort — this only ever annotates a log line, so a missing
+    or corrupt state.json must not disturb execution."""
+    try:
+        with open("state.json") as f:
+            return settlement.unsettled(json.load(f))
+    except Exception:
+        return 0.0, []
 
 
 def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str | None:
@@ -1150,6 +1163,28 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     available_cash = _fetch_available_cash(ib) if cash_gate_on else None
     if available_cash is not None:
         log.info(f"  💵 Funds gate ON — ${available_cash:,.0f} cash available to secure new CSPs")
+        # Settlement awareness (v5.2.123). The same unsettled-proceeds condition
+        # that got the cash sweep rejected on 2026-09-21 sits under this ceiling
+        # too: the $17,798 it read that morning included Friday's IREN call-away
+        # and park sale, both still inside T+1.
+        #
+        # It is deliberately NOT subtracted. IBKR applies the unsettled-funds
+        # restriction to BUYING STOCK, not to writing options — the HUT put sold
+        # that same morning against that same cash filled without complaint, and
+        # Error 201 appears exactly once in the box's entire history (the QQQ buy).
+        # Haircutting this gate would have skipped that put and its premium. So
+        # this makes the exposure visible and leaves the ceiling alone; if IBKR
+        # ever does refuse a put on these grounds, the evidence is already logged
+        # and the subtraction is a one-line change.
+        unsettled, unsettled_rows = _unsettled_proceeds()
+        if unsettled:
+            log.info(f"  ⏳ Funds gate note — ${unsettled:,.0f} of that is unsettled T+1 "
+                     f"proceeds ({settlement.describe(unsettled_rows)}). Fine for writing "
+                     f"puts; it is the cash sweep that cannot spend it.")
+            if unsettled > available_cash:
+                log.warning(f"  ⚠️  Funds gate — unsettled proceeds (${unsettled:,.0f}) exceed "
+                            f"the available-cash ceiling (${available_cash:,.0f}). If IBKR "
+                            f"rejects a put with Error 201, this is why.")
 
     results          = []
     filled_count     = 0
