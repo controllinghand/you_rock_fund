@@ -12,8 +12,11 @@ Two entry points, both driven by settings (feature is OFF by default):
   sell_park(dry_run, ...)                               — end of week (Thu/Fri job)
 
 Design guards (see the buy path):
-  • Idle-cash basis = the CSP budget remainder (a live run reads the account AFTER
-    the CSPs execute, a preview subtracts the planned CSP capital).
+  • Idle-cash basis = IBKR BuyingPower read LIVE at sweep time on a cash/IRA
+    account (it is ELV − InitMarginReq, so open put collateral is already out of
+    it); the CSP budget remainder − committed collateral on a margin account.
+    A preview subtracts the planned CSP capital and adds the sales the wheel check
+    only intends to make.
   • Buy amount = min(idle(+premium), spendable cash [, 10% of net-liq]). The
     cash cap means it can NEVER reach into margin. The 10% net-liq cap is a
     SAFETY that only applies when some option slots went unfilled (partial/broken
@@ -329,16 +332,49 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # (sized) capital; on a LIVE run they're already open and counted here.
         total_cash, net_liq, buying_power = _account_summary(ib)
         committed_csp = _open_short_put_capital(ib)
-        if dry_run:
-            committed_csp += (csp_outcome.get("total_capital", 0.0) or 0.0)
+        planned_csp   = (csp_outcome.get("total_capital", 0.0) or 0.0) if dry_run else 0.0
+        committed_csp += planned_csp
 
-        # ── Base = the CSP budget remainder: effective_budget − committed CSP capital.
-        # Bounded by the budget, so it can't over-park from inflated margin buying
-        # power; the budget respects the account type (buying_power for cash,
-        # net_liq−reserved for margin) and net_liq is stable across the stock→cash
-        # conversion, so the preview number matches what a live Monday run parks.
-        remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
-                        - committed_csp)
+        cash_account = bool(get_settings().get("cash_account", False))
+        freed        = context.get("freed_capital", 0.0) or 0.0
+
+        # ── Base = idle cash available to park.
+        #
+        # CASH/IRA account: read it LIVE from BuyingPower at this moment, which is
+        # what the docstring has always claimed and what the code threw away until
+        # v5.2.124. IBKR's BuyingPower on such an account is ELV − InitMarginReq, so
+        # every open put's collateral is ALREADY removed from it. Deriving the
+        # remainder from the run's `effective_budget` instead double-subtracted that
+        # collateral, because for a cash account the budget IS BuyingPower
+        # (monday_runner._compute_effective_budget) and cash_park then subtracted
+        # committed_csp on top:
+        #
+        #   2026-09-21 preview — budget $8,405 (put collateral already out)
+        #                        − committed_csp $9,500 → remainder $0.00
+        #                        while the account held $8,405.15 of genuinely idle cash.
+        #
+        # The scheduled 09:55 run escaped it only by ordering luck: its budget is
+        # snapshotted BEFORE the puts are sold, so subtracting was right there. Any
+        # run with the puts already open — every Run Now, every re-run — parked $0.
+        # Reading BuyingPower at sweep time removes the ordering dependence entirely:
+        # by then every put this run placed is open and counted exactly once, and it
+        # picks up the premium those fills added to cash (worth $107.21 on 9/21).
+        #
+        # A DRY preview has placed nothing and sold nothing, so it models both:
+        # subtract the planned CSP capital, add the proceeds of sales the wheel check
+        # only intends to make.
+        #
+        # MARGIN account: unchanged. There net_liq − reserved does NOT net out put
+        # collateral, so the explicit committed_csp subtraction is still what keeps a
+        # same-week re-run off margin (v5.2.58).
+        if cash_account and buying_power is not None:
+            idle = max(0.0, buying_power) + (freed - planned_csp if dry_run else 0.0)
+            remainder = max(0.0, idle)
+            basis = "live buying_power (cash account)"
+        else:
+            remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
+                            - committed_csp)
+            basis = "effective_budget − committed CSP"
         base = remainder
         if include_prem:
             base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
@@ -351,7 +387,6 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # On a DRY preview add freed proceeds to model POST-sale cash (a stop-loss week
         # is otherwise wrongly zeroed by the pre-sale negative settled cash). The 10%
         # net-liq cap is an additional safety for a partial (unfilled) run.
-        freed       = context.get("freed_capital", 0.0) or 0.0
         settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
 
         # ── Unsettled-cash haircut (cash/IRA accounts only) ──
@@ -371,7 +406,7 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # haircut would just under-park. Read the toggle LIVE from settings (not an
         # import snapshot) like dry_run.
         state = _load_state()
-        if get_settings().get("cash_account", False):
+        if cash_account:
             unsettled, unsettled_rows = settlement.unsettled(state)
             unsettled = round(unsettled + freed, 2)
         else:
@@ -383,7 +418,8 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         buy_amount  = round(min(base, cash_cap) if all_filled
                             else min(base, cash_cap, netliq_cap), 2)
 
-        log.info(f"  🅿️  Cash sweep: remainder=${remainder:,.2f}  committed_csp=${committed_csp:,.2f}  "
+        log.info(f"  🅿️  Cash sweep: remainder=${remainder:,.2f} [{basis}]  "
+                 f"committed_csp=${committed_csp:,.2f}  "
                  f"base=${base:,.2f}  settled(eff)=${cash_cap:,.2f}  10%netliq=${netliq_cap:,.2f}  "
                  f"slots={fills}/{target} "
                  f"{'(all filled → full)' if all_filled else '(partial → 10% cap)'}  "
@@ -409,6 +445,7 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                             if gap > 1 else "  (agree)"))
 
         caps = {"base": round(base, 2), "remainder": round(remainder, 2),
+                "remainder_basis": basis,
                 "committed_csp": committed_csp,
                 "settled_cash": round(total_cash, 2) if total_cash is not None else None,
                 "settled_effective": round(cash_cap, 2),
