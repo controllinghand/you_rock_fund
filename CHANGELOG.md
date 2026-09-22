@@ -1,3 +1,12 @@
+## [5.2.129] — 2026-09-22
+
+### Fixed
+- **The finished-run banner now reports the cash sweep.** On 2026-09-22 a Run Now parked $7,465 in QQQ and the This Week banner said only `Run complete — 0 CSP fill(s), $0 CSP premium`. The sweep is the last step of the Monday sequence and `run_monday` returns its outcome, but `/api/run` never copied it into the run-status payload, so the UI had nothing to show. It now carries a compact `cash_park` summary (status, instrument, the eval's own message) and the banner prints it on a second line — `🅿️ Parked $7,465 in QQQ (10.0 sh @ $746.47)`, or `💤` with the reason when nothing was parked. It matters most on exactly the run that exposed it: an all-wheel week fills no CSPs, so the sweep can be the only thing the run actually did.
+- The banner no longer shows two check marks — the message text carried a leading `✅` and the container renders one as well.
+
+### Notes
+- The Dashboard card and the Discord alert already reported the park correctly; this was only the This Week banner.
+
 ## [5.2.128] — 2026-09-22
 
 ### Fixed
