@@ -24,7 +24,6 @@ from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_WHEEL, ACCOUNT, get_sett
 from screener import get_all_candidates
 from market_calendar import is_market_holiday
 from capital import dedupe_positions
-import settlement
 import discord_poster
 
 STATE_FILE       = "state.json"
@@ -750,15 +749,6 @@ def _set_cc_coverage(h: dict, *, strike, expiry, premium, covered: int, needed: 
 
 # ── Public API ─────────────────────────────────────────────────
 
-def _expiry_to_date(expiry: str):
-    """'20260918' → date(2026, 9, 18). None when unparseable, which makes the
-    settlement ledger fall back to today — conservative, never optimistic."""
-    try:
-        return datetime.strptime(str(expiry), "%Y%m%d").date()
-    except (TypeError, ValueError):
-        return None
-
-
 def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
     """
     Saturday 8AM PST — scan IBKR for stock positions and reconcile
@@ -1067,19 +1057,6 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
                 "stock_pnl":       h.get("_stock_pnl", 0.0),
                 "detected":        datetime.now().isoformat(),
             })
-            # Separately, log the SALE for settlement tracking. The shares went out
-            # at the CC strike on expiry day, and on a cash/IRA account those
-            # proceeds cannot buy stock until T+1 completes — which is why the
-            # Monday cash sweep got Error 201 on 2026-09-21, the first Monday after
-            # a Friday call-away. Keyed on (ticker, expiry) and deduped inside
-            # settlement.record_sale, because this function runs Saturday AND again
-            # at the Monday reconcile. `pending_called_away` cannot carry this: it
-            # is drained by _write_weekly_pnl minutes before the sweep runs.
-            settlement.record_sale(
-                state, float(h.get("shares", 0) or 0) * float(cc_strike or 0.0),
-                source="called_away", ticker=h["ticker"],
-                trade_date=_expiry_to_date(h.get("current_cc_expiry")),
-                entry_id=f"called_away:{h['ticker']}:{h.get('current_cc_expiry')}")
         state["pending_called_away"] = pending
 
     if not persist:

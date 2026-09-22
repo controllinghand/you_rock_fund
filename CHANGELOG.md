@@ -1,3 +1,22 @@
+## [5.2.128] — 2026-09-22
+
+### Fixed
+- **The cash sweep now sizes against margin headroom, and the QQQ buy stops being rejected.** IBKR refused it on 2026-09-21 AND again on 2026-09-22 with `Error 201 — your Equity with Loan Value [9291.09 USD] must exceed the new total Initial Margin of [9500.00 USD]`. Two facts explain it, both read live from the account: **stock carries no loan value in this IRA** (`EquityWithLoanValue` equals `TotalCashValue` to the cent while $17,507.84 of CRWV counts zero), so buying stock lowers equity without adding any back; and **IBKR prices a market order ~5% above last** for the check, requiring post-trade equity to EXCEED the margin the open puts require. The sweep sized at the full $8,405.15 of available funds, which lands equity at exactly the $9,500 requirement — and below it once the buffer applies. The cap is now `min(BuyingPower, spendable − InitMarginReq) / 1.05`, which puts the order one share under the line instead of one over.
+
+### Changed
+- **The v5.2.123 unsettled-cash ledger is removed — that diagnosis was wrong.** It read the first rejection as a T+1 settlement problem and subtracted a ledger of recent sales. On 2026-09-22 the cash was fully settled — `SettledCashByDate` agreed to the cent, gap $0.00 — and the identical order was refused anyway. `settlement.py` keeps only the `SettledCashByDate` parser; `wheel_manager` and `cash_park.sell_park` no longer write a ledger, and `trader.py`'s funds gate drops the annotation built on the same wrong model.
+- `rejected_unsettled_funds` → `rejected_margin_headroom`, and its log and Discord text now name the real cause.
+
+### Notes
+- **The arithmetic reproduces both rejections to within a dollar**, which is what promoted it from theory to diagnosis:
+  - Mon: 11 × $739.01 × 1.05 = $8,535.57 → equity $9,369.58; IBKR said $9,368.63 (off $0.95)
+  - Tue: 11 × $745.72 × 1.05 = $8,613.07 → equity $9,292.08; IBKR said $9,291.09 (off $0.99)
+  Ten shares would have filled on either day. With this change both size to 10 and clear the requirement by ~$575.
+- **`BuyingPower` was the clue all along.** On a cash/IRA account it is exactly `cash − InitMarginReq`, and it falls dollar-for-dollar as stock is bought — the correct ceiling, but an exact one, which is why spending all of it fails. It is now a second cap alongside the explicit arithmetic, lower of the two winning.
+- **This settles the persistent-park question: don't.** Stock contributing zero to equity means cash parked in QQQ is collateral the CSPs cannot use, dollar-for-dollar.
+- **Kept:** the Error 201 classifier (it fired on both days and handed over the exact figure that cracked this) and the `SettledCashByDate` logging (it is what disproved the settlement theory). v5.2.124's double-subtraction fix is unaffected and still correct.
+- Margin accounts are untouched — no buffer, no `InitMarginReq` substitution, still `effective_budget − committed_csp` (the v5.2.58 guard).
+
 ## [5.2.127] — 2026-09-21
 ### Fixed
 - **Windows install: the setup script depended on `python3`, which Git Bash does not ship.** `setup_docker.sh` shelled out to it for the secrets-complete check, both live-credential lookups and the dry-run check; `docker/preflight.sh` did the same in three more places. Every one of them silently returned empty, so a Windows installer was told secrets were missing when they were not, and live-mode setup could not confirm its own credentials. All six call sites now use `grep`/`sed`, which exist everywhere this script runs.
