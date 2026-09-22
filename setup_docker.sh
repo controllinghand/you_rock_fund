@@ -208,10 +208,15 @@ until curl -sf "$SECRETS_URL/health" >/dev/null 2>&1; do
 done
 ok "Secrets container running"
 
+# No python3 here: Git Bash on Windows does not ship one, so every python3
+# lookup in this script silently returned empty and the installer misreported
+# its own state. grep/sed are present on every platform this script supports.
+# Safe under `set -euo pipefail`: the pipeline's failure is caught by `||`, and
+# the chain always ends on an echo.
 secrets_complete() {
     curl -sf "$SECRETS_URL/secrets/status" 2>/dev/null \
-        | python3 -c "import sys,json; d=json.load(sys.stdin); print('true' if d.get('complete') else 'false')" 2>/dev/null \
-        || echo "false"
+        | grep -q '"complete"[[:space:]]*:[[:space:]]*true' \
+        && echo "true" || echo "false"
 }
 
 if [ "$(secrets_complete)" = "true" ]; then
@@ -263,10 +268,14 @@ fi
 # Account credentials are now managed by the secrets container — preflight
 # verifies the required secrets are populated there.
 if [ "$TRADING_MODE" = "live" ]; then
+    # `|| true` is load-bearing under `set -euo pipefail`: without it a curl
+    # failure (secrets container not up yet) propagates through pipefail and
+    # kills the script, so the user gets a bare exit 7 instead of the `fail`
+    # message below that tells them what to fix.
     LIVE_ACCT=$(curl -sf "$SECRETS_URL/secret/account_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
     LIVE_USER=$(curl -sf "$SECRETS_URL/secret/tws_userid_live" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))" 2>/dev/null || echo "")
+        | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
     if [ -z "$LIVE_ACCT" ] || [ -z "$LIVE_USER" ]; then
         fail "Live mode requires account_live and tws_userid_live in the secrets UI ($SECRETS_URL)"
     fi
@@ -302,11 +311,14 @@ if docker compose $ENV_FILE_ARGS up -d --build; then
     # ── dry_run check ──────────────────────────────────────────
     info "Checking dry_run setting..."
     sleep 5
+    # `sed -E`, not a basic-regex `\(true\|false\)`: alternation in a BRE is a
+    # GNU extension and does not parse under the BSD sed on macOS. `|| true`
+    # matters most here — this runs 5s after `docker compose up`, exactly when
+    # the API often has not finished starting, and without it the script would
+    # exit right at this line and skip the Task Scheduler registration below.
     DRY_RUN=$(curl -sf http://127.0.0.1:8000/api/settings 2>/dev/null \
-        | python3 -c \
-          "import sys,json; print(json.load(sys.stdin).get('dry_run','?'))" \
-          2>/dev/null \
-        || echo "?")
+        | sed -E -n 's/.*"dry_run"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' || true)
+    [ -n "$DRY_RUN" ] || DRY_RUN="?"
     if [ "$DRY_RUN" = "False" ] || [ "$DRY_RUN" = "false" ]; then
         ok "dry_run=false — paper trading handles safety; orders go to your paper account"
     elif [ "$DRY_RUN" = "True" ] || [ "$DRY_RUN" = "true" ]; then
@@ -338,7 +350,14 @@ if $IS_WINDOWS; then
         "$PROJ_WIN" "$LOGFILE" > "$BATCH"
     BATCH_WIN=$(cygpath -w "$BATCH")
 
-    if schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
+    # MSYS_NO_PATHCONV=1 is required here: Git Bash's MSYS layer auto-converts
+    # any bare /leading-slash token to a Windows path before exec, which mangles
+    # schtasks.exe's /tn, /sc and /f flags into garbage ("Invalid argument/option
+    # - 'C:/Program Files/Git/create'") and makes registration fail even when
+    # elevated — masked as a permissions error, because stderr is discarded and
+    # the warning below only ever names admin rights. The WSL branch further
+    # down needs no such thing: WSL interop does not do MSYS path conversion.
+    if MSYS_NO_PATHCONV=1 schtasks.exe /create /tn "$TASK_NAME" /tr "\"$BATCH_WIN\"" /sc ONLOGON /f 2>/dev/null; then
         ok "Task Scheduler job '$TASK_NAME' registered — containers auto-start on every login"
         info "  Reboot log: $LOGFILE"
     else
