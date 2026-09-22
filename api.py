@@ -4548,6 +4548,12 @@ def manual_run():
 
             wheel = outcome.get("wheel", {})
             csp   = outcome.get("csp", {})
+            # The cash sweep is the last thing a Monday run does, and until v5.2.129
+            # it was the one outcome the finished-run banner never mentioned: a run
+            # that parked $7,465 in QQQ still reported only "0 CSP fill(s)". Pass a
+            # compact summary — the eval's own message is already human-readable, and
+            # this payload is polled every 5s, so the whole dict does not belong here.
+            park  = outcome.get("cash_park") or {}
             _run_status.update({
                 "executing": False,
                 "result": {
@@ -4555,6 +4561,9 @@ def manual_run():
                     "premium":       csp.get("csp_premium", 0),
                     "cc_premium":    wheel.get("cc_premium", 0),
                     "freed_capital": wheel.get("freed_capital", 0),
+                    "cash_park":     {"status":     park.get("status"),
+                                      "instrument": park.get("instrument"),
+                                      "message":    park.get("message")} if park else None,
                     "completed":     datetime.now().isoformat(),
                 }
             })

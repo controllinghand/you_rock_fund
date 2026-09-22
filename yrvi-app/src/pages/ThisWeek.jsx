@@ -81,11 +81,17 @@ export default function ThisWeek() {
         // Run just finished — show result
         if (wasExecuting && !r.data.executing) {
           if (r.data.result) {
-            const { fills, premium, cc_premium, freed_capital } = r.data.result
-            let text = `✅ Run complete — ${fills} CSP fill(s), $${(premium ?? 0).toLocaleString()} CSP premium`
+            const { fills, premium, cc_premium, freed_capital, cash_park } = r.data.result
+            // No leading emoji — the banner below renders one.
+            let text = `Run complete — ${fills} CSP fill(s), $${(premium ?? 0).toLocaleString()} CSP premium`
             if (cc_premium) text += `, $${cc_premium.toLocaleString()} CC premium`
             if (freed_capital) text += `, $${freed_capital.toLocaleString()} freed`
-            setManualMsg({ ok: true, text })
+            // The sweep runs last and can be the only thing a run actually did —
+            // an all-wheel week fills no CSPs but may still park the idle cash.
+            const parkNote = cash_park?.message
+              ? `${cash_park.status === 'bought' ? '🅿️' : '💤'} ${cash_park.message}`
+              : null
+            setManualMsg({ ok: true, text, note: parkNote })
           } else if (r.data.error) {
             setManualMsg({ ok: false, text: `Run failed: ${r.data.error}` })
           }
@@ -270,7 +276,10 @@ export default function ThisWeek() {
       {/* Manual run feedback */}
       {manualMsg && (
         <div className={`rounded-xl px-4 py-3 text-sm font-medium ${manualMsg.ok ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800' : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800'}`}>
-          {manualMsg.ok ? '✅' : '❌'} {manualMsg.text}
+          <div>{manualMsg.ok ? '✅' : '❌'} {manualMsg.text}</div>
+          {manualMsg.note && (
+            <div className="mt-1 font-normal opacity-90">{manualMsg.note}</div>
+          )}
         </div>
       )}
 
