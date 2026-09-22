@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import axios from 'axios'
 import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, AlertTriangle } from 'lucide-react'
 import PositionCard from '../components/PositionCard.jsx'
+import WheelCard from '../components/WheelCard.jsx'
 import YTDChart from '../components/YTDChart.jsx'
 
 function useCountdown(isoStr) {
@@ -741,65 +742,9 @@ export default function Dashboard() {
             </span>
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {positions.wheel_holdings.filter(h => h.shares > 0).map(h => {
-              const upnl = h.current_price != null
-                ? (h.current_price - h.assigned_strike) * h.shares
-                : null
-              return (
-                <div key={h.ticker} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <div className="text-xl font-bold text-gray-900 dark:text-white">{h.ticker}</div>
-                      <div className="text-gray-500 text-sm">
-                        {h.shares} shares @ ${h.assigned_strike} avg cost
-                        {(h.tranches?.length ?? 0) > 1 && (
-                          <span className="ml-1 text-gray-400 dark:text-gray-600">({h.tranches.length} tranches)</span>
-                        )}
-                        {h.current_price != null && (
-                          <span className="ml-2 text-gray-400 dark:text-gray-600">· now ${h.current_price}</span>
-                        )}
-                      </div>
-                    </div>
-                    <span className={`text-xs px-2.5 py-1 rounded-full border font-medium capitalize ${
-                      h.cc_status === 'open'
-                        ? 'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/40 dark:text-green-400 dark:border-green-800'
-                        : h.cc_status === 'partial'
-                        ? 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-900/40 dark:text-orange-400 dark:border-orange-800'
-                        : h.cc_status === 'pending'
-                        ? 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-400 dark:border-yellow-800'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'
-                    }`}>
-                      CC: {h.cc_status ?? '—'}
-                      {h.cc_status === 'partial' && h.cc_contracts_needed
-                        ? ` ${h.cc_contracts ?? 0}/${h.cc_contracts_needed}` : ''}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-sm">
-                    {[
-                      { label: 'CC Strike',       value: h.current_cc_strike ? `$${h.current_cc_strike}` : '—' },
-                      { label: 'CC Premium',      value: h.current_cc_premium ? `$${h.current_cc_premium.toLocaleString()}` : '—', accent: 'text-green-400' },
-                      { label: 'CC Expiry',       value: h.current_cc_expiry ?? '—' },
-                      {
-                        label: 'Unrealized P&L',
-                        value: upnl != null
-                          ? `${upnl >= 0 ? '+' : ''}$${Math.round(Math.abs(upnl)).toLocaleString()}`
-                          : '—',
-                        accent: upnl == null ? 'text-gray-900 dark:text-white'
-                               : upnl >= 0   ? 'text-green-400'
-                               :               'text-red-400',
-                      },
-                      { label: 'Stop Loss',       value: (h.net_cost ?? h.assigned_strike) ? `$${((h.net_cost ?? h.assigned_strike) * 0.9).toFixed(2)}` : '—', accent: 'text-red-400' },
-                      { label: 'Week #',          value: h.weeks_held ?? 1 },
-                    ].map(({ label, value, accent = 'text-gray-900 dark:text-white' }) => (
-                      <div key={label}>
-                        <div className="text-gray-500 dark:text-gray-600 text-xs mb-0.5">{label}</div>
-                        <div className={`font-semibold ${accent}`}>{value}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
+            {positions.wheel_holdings.filter(h => h.shares > 0).map(h => (
+              <WheelCard key={h.ticker} holding={h} />
+            ))}
           </div>
         </div>
       )}
