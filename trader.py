@@ -1235,53 +1235,8 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 final_iv = pos.get("iv_atm")
             if was_adjusted:
                 old_capital  = pos["capital_used"]
-                contracts    = pos["contracts"]
-                new_capital  = round(contracts * strike * 100, 2)
-
-                # An UPWARD adjustment (stock rose since Saturday's screen) costs
-                # more collateral per contract than the sizer planned for, and
-                # nothing used to re-check it. On 2026-08-17 three adjustments —
-                # AAOI +$7,700, CBRS +$6,000, CRDO +$2,250 — turned a compliant
-                # $224,300 plan into $240,250 deployed, ~$7k past net liq and onto
-                # margin. Trim the lot to what the remaining budget covers instead
-                # of silently deploying more.
-                #
-                # This is a TOTAL-budget check, not a per-position cap: slot #1 is
-                # deliberately uncapped in compound mode (it is the best-scoring
-                # name and is meant to take the remainder), so this only stops the
-                # account from committing more than it actually has.
-                room = _budget - capital_deployed
-                if new_capital > room:
-                    # Named distinctly from the cash gate's `per_contract` /
-                    # `orig_contracts` further down, which are separate locals.
-                    adj_per_contract = strike * 100
-                    max_fit = int(room // adj_per_contract) if adj_per_contract > 0 else 0
-                    if max_fit < 1:
-                        log.warning(
-                            f"  ⛔ {ticker} skipped — adjusted strike ${strike:.2f} needs "
-                            f"${adj_per_contract:,.0f}/contract but only ${room:,.0f} of the "
-                            f"${_budget:,.0f} budget is left")
-                        results.append({
-                            "ticker": ticker, "status": "skipped_budget",
-                            "reason": "adjusted_strike_over_budget",
-                            "adjusted_strike": strike,
-                            "budget_room": round(room, 2),
-                            "needed": round(adj_per_contract, 2),
-                        })
-                        _status(ticker=ticker, stage=None,
-                                result={"ticker": ticker, "status": "skipped_budget"})
-                        continue
-                    log.warning(
-                        f"  ✂️  {ticker} trimmed {contracts} → {max_fit} contracts — "
-                        f"adjusted strike ${strike:.2f} would need ${new_capital:,.0f} but "
-                        f"only ${room:,.0f} of the ${_budget:,.0f} budget is left")
-                    pre_trim_contracts = contracts
-                    contracts   = max_fit
-                    new_capital = round(contracts * adj_per_contract, 2)
-                    pos = {**pos, "budget_trimmed_from": pre_trim_contracts}
-
-                pos = {**pos, "strike": strike, "capital_used": new_capital,
-                       "contracts": contracts}
+                new_capital  = round(pos["contracts"] * strike * 100, 2)
+                pos = {**pos, "strike": strike, "capital_used": new_capital}
                 # Persist the executed strike/capital back into the candidate list
                 # so state.json (and the dashboard) reflect what we actually filled,
                 # not the original screener strike.
@@ -1290,6 +1245,60 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                         all_sized[_i] = pos
                         break
                 log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
+
+            # ── Total-budget check — EVERY put, not just adjusted ones ──
+            # An UPWARD strike adjustment (stock rose since the screen) costs more
+            # collateral per contract than the sizer planned for. On 2026-08-17
+            # three adjustments turned a $224,300 plan into $240,250 deployed, so
+            # the adjusted put was checked against the remaining room.
+            # That wasn't enough: on 2026-09-22 NBIS/ARM/IREN adjusted EARLY while
+            # room was plentiful (+$4,700 total), silently eating the headroom the
+            # sizer had planned for CRCL/MSTR — which weren't adjusted, so they were
+            # never checked, and $196,400 planned became $201,100 against a
+            # $196,422 net liq. Checking every put enforces the real invariant:
+            # cumulative collateral never exceeds the budget. The last put(s) pay
+            # for earlier adjustments by trimming.
+            #
+            # This is a TOTAL-budget check, not a per-position cap: slot #1 is
+            # deliberately uncapped in compound mode (it is the best-scoring name
+            # and is meant to take the remainder), so this only stops the account
+            # from committing more than it actually has.
+            new_capital = round(contracts * strike * 100, 2)
+            room = _budget - capital_deployed
+            if new_capital > room + 1.0:
+                # Named distinctly from the cash gate's `per_contract` /
+                # `orig_contracts` further down, which are separate locals.
+                adj_per_contract = strike * 100
+                max_fit = int(room // adj_per_contract) if adj_per_contract > 0 else 0
+                if max_fit < 1:
+                    log.warning(
+                        f"  ⛔ {ticker} skipped — strike ${strike:.2f} needs "
+                        f"${adj_per_contract:,.0f}/contract but only ${room:,.0f} of the "
+                        f"${_budget:,.0f} budget is left")
+                    results.append({
+                        "ticker": ticker, "status": "skipped_budget",
+                        "reason": ("adjusted_strike_over_budget" if was_adjusted
+                                   else "budget_exhausted_by_earlier_adjustments"),
+                        "adjusted_strike": strike,
+                        "budget_room": round(room, 2),
+                        "needed": round(adj_per_contract, 2),
+                    })
+                    _status(ticker=ticker, stage=None,
+                            result={"ticker": ticker, "status": "skipped_budget"})
+                    continue
+                log.warning(
+                    f"  ✂️  {ticker} trimmed {contracts} → {max_fit} contracts — "
+                    f"strike ${strike:.2f} would need ${new_capital:,.0f} but "
+                    f"only ${room:,.0f} of the ${_budget:,.0f} budget is left")
+                pre_trim_contracts = contracts
+                contracts   = max_fit
+                new_capital = round(contracts * adj_per_contract, 2)
+                pos = {**pos, "strike": strike, "capital_used": new_capital,
+                       "contracts": contracts, "budget_trimmed_from": pre_trim_contracts}
+                for _i, _sp in enumerate(all_sized):
+                    if _sp.get("ticker") == ticker:
+                        all_sized[_i] = pos
+                        break
 
             # ── Cash-secured funds gate ──────────────────────────────────
             # Never attempt a put we can't fully secure. Checked here (after the
