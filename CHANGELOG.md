@@ -1,3 +1,25 @@
+## [5.2.125] — 2026-09-21
+### Added
+- **The wheel card now shows what the CSP card shows.** A covered call was reported with six numbers — strike, premium, expiry, unrealized P&L, stop loss, week — while the put that assigned those same shares got contracts, buffer, entry price, actual yield, entry delta, entry IV and fill-vs-quote. The two halves of one trade now read the same way: same 3×3 stat grid, same fill footer, same capital line (`yrvi-app/src/components/WheelCard.jsx`, alongside `PositionCard.jsx`).
+  - **Contracts** — covered, shown as `6/8` in orange when the position is only partially covered.
+  - **Buffer** — headroom above the stock before the shares are called away, `(CC strike − price) ÷ price`, the same formula the IBKR Holdings table already used for a call.
+  - **Price** — the stock price when the CC was written (the header keeps showing the live price).
+  - **Act. Yield** — the CC's premium per contract against the cost basis of the shares it covers, which is the capital that call is earning on.
+  - **Entry δ / Entry IV** — what the call was written at, not what it is now.
+  - **Fill $X.XX (−0.13 vs quote) · via escalation** — the covered call's version of "vs screener": the fill against the mid the call was quoted at when it was picked.
+  - A **below cost** chip when the CC strike sits under the cost basis, naming the locked-in loss if it is called away — the default path for an underwater holding, previously invisible on the card.
+  - **Week #** moved to the header line beside shares and cost, which is what made room for nine stats in three tidy rows.
+- `stock_price_at_entry`, `ref_mid_at_entry` and `order_type` are now recorded for covered calls in `trade_log.json`, which is where all of the above comes from.
+
+### Fixed
+- **A coverage top-up no longer erases the CC it is topping up.** `_append_trade_log` is keyed on symbol+expiry+strike+right and a top-up writes at the *same* strike and expiry, so the replace booked only the top-up's own contracts and premium: a 2-contract $184 CC topped up by 1 contract at $55 was recorded as 1 contract, $55. That figure feeds `_logged_cc_premium`, which is what the app prefers over IBKR's commission-baked `avgCost`. Top-ups now accumulate (contracts summed, premium summed, per-contract re-averaged) and keep the original entry snapshot.
+- **A covered call's entry buffer was logged with the put formula**, so an out-of-the-money call read as a negative buffer — "ITM at entry" — in the IBKR Holdings table. New records use the call convention; legacy rows are flipped on read (same denominator, so the negation is exact).
+- **A losing wheel holding printed its unrealized loss as `$3,118`**, with only the colour carrying the minus. It now reads `−$3,118`.
+
+### Notes
+- **None of these numbers are stored on the holding.** They are read from `trade_log.json`, keyed on the CC's own strike and expiry, so when the call expires or the name is re-assigned they go blank rather than showing the dead cycle's figures — the failure mode v5.2.116 (#173) fixed for `cc_status` / `weeks_held`.
+- Covered calls already on the books keep their delta, IV, fill and premium (those have been logged for a while); they show "—" for entry price, quote slippage and order type until the next CC is written. An adopted CC that was never logged at all still gets contracts, buffer, price, yield and a fill price backed out of the booked premium.
+
 ## [5.2.124] — 2026-09-21
 ### Fixed
 - **On a cash/IRA account the sweep subtracted the open puts' collateral twice, so it parked nothing.** A dry Run Screener on the live Roth reported `remainder=$0.00` against `committed_csp=$9,500.00` while the account held $8,405.15 of genuinely idle cash. For a cash account `monday_runner._compute_effective_budget` sets the budget to IBKR's `BuyingPower`, which is already `ELV − InitMarginReq` — the put collateral is gone from it before `cash_park` sees it — and `cash_park` then subtracted `committed_csp` on top: `8,405 − 9,500 → 0`. The sweep now derives the remainder from **BuyingPower read live at sweep time**, which is what its own docstring has claimed since v5.2.46 and what the code read and discarded. Margin accounts are untouched: there `net_liq − reserved` does not net out collateral, so the explicit subtraction is still what keeps a same-week re-run off margin (v5.2.58).

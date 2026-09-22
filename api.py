@@ -408,6 +408,87 @@ def load_trade_log() -> list:
     except Exception:
         return []
 
+
+def _cc_trade_log_index(trade_log: list) -> dict:
+    """{(symbol, expiry, strike): record} for short CALLS only, keys normalized
+    so a holding's current_cc_* (which come back from IBKR as str/float) match
+    whatever the writer happened to store."""
+    index = {}
+    for rec in trade_log:
+        if rec.get("right") != "C":
+            continue
+        try:
+            index[(rec.get("symbol"), str(rec.get("expiry")), float(rec.get("strike")))] = rec
+        except (TypeError, ValueError):
+            continue
+    return index
+
+
+def _enrich_wheel_holding(h: dict, cc_index: dict) -> dict:
+    """Attach the open covered call's entry snapshot to a wheel holding, so the
+    wheel card can show what the CSP card shows: contracts, buffer, entry price,
+    yield, entry delta/IV and fill-vs-quote.
+
+    Keyed on the CC's own trade_log record (ticker + expiry + strike), NOT stored
+    on the holding — a holding whose CC expired, rolled or belongs to a new
+    assignment cycle then shows "—" instead of the dead cycle's numbers, which is
+    exactly the bug #173 fixed for cc_status/weeks_held.
+    """
+    strike = h.get("current_cc_strike")
+    expiry = h.get("current_cc_expiry")
+    shares = h.get("shares") or 0
+    # Decisions use net_cost, P&L uses the strike basis (#88) — the CC's yield is
+    # a decision-side number: what the capital in the shares is earning.
+    basis  = h.get("net_cost") or h.get("assigned_strike") or 0.0
+
+    tl = {}
+    if strike is not None and expiry:
+        try:
+            tl = cc_index.get((h.get("ticker"), str(expiry), float(strike))) or {}
+        except (TypeError, ValueError):
+            tl = {}
+
+    entry_price = tl.get("stock_price_at_entry")
+    # Buffer for a call is headroom ABOVE the stock before the shares are called
+    # away — (K − px)/px, matching liveBuffer() in the dashboard. Computed from
+    # prices here rather than read from buffer_pct_at_entry, which was logged in
+    # the put convention before v5.2.125.
+    px = entry_price or h.get("current_price")
+    buffer_pct = None
+    if px and strike is not None:
+        try:
+            buffer_pct = round(((float(strike) - px) / px) * 100, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            buffer_pct = None
+
+    fill_price = tl.get("premium_per_contract")
+    contracts  = h.get("cc_contracts") or tl.get("contracts")
+    premium    = h.get("current_cc_premium") or tl.get("total_premium")
+    # Per-contract premium when no fill was logged (an adopted CC, or one written
+    # before the fill price was recorded): back it out of the booked premium.
+    if fill_price is None and premium and contracts:
+        try:
+            fill_price = round(premium / contracts / 100, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            fill_price = None
+
+    yield_pct = round(fill_price / basis * 100, 4) if (fill_price and basis) else None
+
+    return {
+        **h,
+        "cc_delta_at_entry":       tl.get("delta_at_entry"),
+        "cc_iv_at_entry":          tl.get("iv_at_entry"),
+        "cc_stock_price_at_entry": entry_price,
+        "cc_buffer_pct":           buffer_pct,
+        "cc_fill_price":           fill_price,
+        "cc_ref_mid":              tl.get("ref_mid_at_entry"),
+        "cc_order_type":           tl.get("order_type"),
+        "cc_entry_date":           tl.get("entry_date"),
+        "cc_yield_pct":            yield_pct,
+        "cc_capital_held":         round(shares * basis, 2) if (shares and basis) else 0.0,
+    }
+
+
 def _backfill_trade_log() -> None:
     """One-time backfill of trade_log.json from state.json on first run.
 
@@ -3584,6 +3665,11 @@ def get_positions():
             "buffer_pct_at_entry":   buffer_at_entry,
         })
 
+    cc_index = _cc_trade_log_index(trade_log)
+    wheel_holdings = [
+        _enrich_wheel_holding(h, cc_index) for h in state.get("wheel_holdings", [])
+    ]
+
     settings = load_settings()
     ibkr = _get_ibkr_data(settings)
 
@@ -3592,11 +3678,19 @@ def get_positions():
     for item in portfolio:
         tl_key = (item.get("symbol"), item.get("expiry"), item.get("strike"), item.get("right"))
         tl = tl_index.get(tl_key, {})
+        buf = tl.get("buffer_pct_at_entry")
+        # A CC's buffer was logged with the PUT formula (px − K) before v5.2.125,
+        # so an OTM call reads negative — "ITM at entry" — in the Entry Buffer %
+        # column. Same denominator, so negating a legacy row is exact. New rows
+        # carry stock_price_at_entry and are already in the call convention.
+        if (buf is not None and item.get("right") == "C"
+                and tl.get("stock_price_at_entry") is None):
+            buf = -buf
         enriched_portfolio.append({
             **item,
             "delta_at_entry":       tl.get("delta_at_entry"),
             "iv_at_entry":          tl.get("iv_at_entry"),
-            "buffer_pct_at_entry":  tl.get("buffer_pct_at_entry"),
+            "buffer_pct_at_entry":  buf,
             "premium_per_contract": tl.get("premium_per_contract"),
             "total_premium":        tl.get("total_premium"),
         })
@@ -3604,7 +3698,7 @@ def get_positions():
     return {
         "positions":       enriched,
         "csp_positions":   enriched,
-        "wheel_holdings":  state.get("wheel_holdings", []),
+        "wheel_holdings":  wheel_holdings,
         "weekly_pnl":      state.get("weekly_pnl", {}),
         "run_date":        state.get("run_date"),
         "monday_context":  state.get("monday_context", {}),

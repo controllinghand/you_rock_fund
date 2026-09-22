@@ -57,8 +57,18 @@ log = log_setup.get_logger("wheel", "wheel_log.txt")
 
 # ── State ──────────────────────────────────────────────────────
 
-def _append_trade_log(record: dict) -> None:
-    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right."""
+def _append_trade_log(record: dict, accumulate: bool = False) -> None:
+    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right.
+
+    accumulate=True FOLDS the record into an existing one instead of replacing it:
+    contracts and total_premium are summed, premium_per_contract becomes the
+    share-weighted average, and any entry metadata the new record does not carry
+    (delta, IV, buffer, entry price) is kept from the original. A coverage top-up
+    writes at the SAME strike and expiry as the CC it is topping up, so a plain
+    replace booked only the top-up's own contracts and premium and dropped the
+    original's — under-reporting the position to _logged_cc_premium and to the
+    dashboard.
+    """
     try:
         with open(TRADE_LOG_JSON) as f:
             entries = json.load(f)
@@ -67,12 +77,35 @@ def _append_trade_log(record: dict) -> None:
     key = (record.get("symbol"), record.get("expiry"), record.get("strike"), record.get("right"))
     for i, e in enumerate(entries):
         if (e.get("symbol"), e.get("expiry"), e.get("strike"), e.get("right")) == key:
-            entries[i] = record
+            entries[i] = _merge_trade_log(e, record) if accumulate else record
             break
     else:
         entries.append(record)
     with open(TRADE_LOG_JSON, "w") as f:
         json.dump(entries, f, indent=2)
+
+
+def _merge_trade_log(existing: dict, addition: dict) -> dict:
+    """Fold `addition` into `existing`: sum the size, keep the entry snapshot."""
+    merged = {**existing, **{k: v for k, v in addition.items() if v is not None}}
+    def _num(d, k):
+        try:
+            return float(d.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    contracts = int(_num(existing, "contracts") + _num(addition, "contracts"))
+    premium   = round(_num(existing, "total_premium") + _num(addition, "total_premium"), 2)
+    merged["contracts"]    = contracts
+    merged["total_premium"] = premium
+    if contracts:
+        merged["premium_per_contract"] = round(premium / contracts / 100, 2)
+    # The entry snapshot belongs to the ORIGINAL write — a top-up quoted hours or
+    # days later must not overwrite the delta/IV/price the position was opened at.
+    for k in ("entry_date", "delta_at_entry", "iv_at_entry",
+              "buffer_pct_at_entry", "stock_price_at_entry", "ref_mid_at_entry"):
+        if existing.get(k) is not None:
+            merged[k] = existing[k]
+    return merged
 
 
 def _logged_cc_premium(symbol: str, expiry: str, strike: float):
@@ -1467,9 +1500,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                             "right":                "C",
                                             "entry_date":           datetime.now().isoformat(),
                                             "premium_per_contract": order_result.get("fill_price"),
+                                            "order_type":           order_result.get("order_type"),
                                             "contracts":            filled,
                                             "total_premium":        add_prem,
-                                        })
+                                        }, accumulate=True)
                                     except Exception as tl_err:
                                         log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
                             else:
@@ -1858,8 +1892,14 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 log.info(f"  💰 CC premium: ${prem:,.0f}")
                 # Capture execution metadata for dashboard enrichment
                 fill_price = order_result.get("fill_price")
+                # Buffer in the CALL convention — headroom above the stock before
+                # the shares are called away. Positive = OTM, which is what
+                # liveBuffer() in the dashboard shows for right == "C". This was
+                # logged with the PUT formula (px − K) through v5.2.124, so every
+                # CC recorded before then reads negative while OTM; the API flips
+                # the sign on those legacy rows (they have no stock_price_at_entry).
                 buffer_pct = (
-                    round(((cc_stock_price - cc_strike) / cc_stock_price) * 100, 2)
+                    round(((cc_strike - cc_stock_price) / cc_stock_price) * 100, 2)
                     if cc_stock_price and cc_stock_price > 0 else None
                 )
                 # Gate on orders_dry_run (not the pipeline dry_run) so a live run
@@ -1876,6 +1916,12 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                             "delta_at_entry":       round(cc_delta, 4),
                             "iv_at_entry":          round(cc_iv, 4) if cc_iv is not None else None,
                             "buffer_pct_at_entry":  buffer_pct,
+                            "stock_price_at_entry": cc_stock_price,
+                            # The quoted mid this CC was priced off — the covered
+                            # call's analogue of the screener premium, so the card
+                            # can show fill-vs-quote slippage the way a CSP does.
+                            "ref_mid_at_entry":     ref_mid,
+                            "order_type":           order_result.get("order_type"),
                             "premium_per_contract": fill_price,
                             "contracts":            filled,
                             "total_premium":        prem,
