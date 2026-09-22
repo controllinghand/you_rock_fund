@@ -17,10 +17,24 @@ function fmtExpiry(raw) {
   return isNaN(d) ? s : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
 }
 
+// Tint says whether the covered call is ON, exactly as the CSP card's tint says
+// whether the order filled — NOT whether the position is winning. A below-cost
+// CC is the documented default for an underwater holding (keep the shares, take
+// the premium), so it stays a chip; painting the card red would make intended
+// behaviour look like a malfunction, and would make colour mean one thing here
+// and another on the card directly above it.
+const CARD_TINT = {
+  open:    'border-green-300 bg-green-50 dark:border-green-800/60 dark:bg-green-900/10',
+  partial: 'border-orange-300 bg-orange-50 dark:border-orange-800/60 dark:bg-orange-900/10',
+  pending: 'border-yellow-300 bg-yellow-50 dark:border-yellow-800/60 dark:bg-yellow-900/10',
+  failed:  'border-red-300 bg-red-50 dark:border-red-800/60 dark:bg-red-900/10',
+}
+
 const STATUS_CLASS = {
   open:    'bg-green-100 text-green-700 border-green-300 dark:bg-green-900/40 dark:text-green-400 dark:border-green-800',
   partial: 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-900/40 dark:text-orange-400 dark:border-orange-800',
   pending: 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-900/40 dark:text-yellow-400 dark:border-yellow-800',
+  failed:  'bg-red-100 text-red-700 border-red-300 dark:bg-red-900/50 dark:text-red-400 dark:border-red-800',
 }
 
 export default function WheelCard({ holding: h }) {
@@ -52,6 +66,10 @@ export default function WheelCard({ holding: h }) {
 
   const badgeClass = STATUS_CLASS[h.cc_status]
     || 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'
+  // Anything else (a sold row caught mid-refresh, an unknown status) keeps the
+  // plain card rather than guessing at a colour.
+  const cardTint = CARD_TINT[h.cc_status]
+    || 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800'
 
   const stats = [
     { label: 'CC Strike', value: hasCC ? `$${h.current_cc_strike}` : '—' },
@@ -97,7 +115,7 @@ export default function WheelCard({ holding: h }) {
   ]
 
   return (
-    <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5">
+    <div className={`border rounded-xl p-5 ${cardTint}`}>
       {/* Header */}
       <div className="flex items-start justify-between mb-4">
         <div>

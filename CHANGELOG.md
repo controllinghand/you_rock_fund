@@ -1,3 +1,12 @@
+## [5.2.126] — 2026-09-21
+### Changed
+- **The wheel card is now tinted by whether the covered call is written**, the same way the CSP card is tinted by whether the order filled: green when the CC is open, orange when it is only partially covering the shares, yellow while pending, red when the write failed. A holding whose CC *failed* — uncovered shares, real risk — used to look identical at a glance to a fully covered one; that was the whole reason the CSP card had a tint.
+- The `failed` CC badge is red rather than grey, matching its card.
+
+### Notes
+- **Tint is deliberately not a P&L verdict.** A CC written below the cost basis is the documented default for an underwater holding — keep the shares, take the premium, don't force-sell — so it stays a "below cost" chip beside the ticker and a red Unrealized P&L. Colouring the card red for it would make intended behaviour look like a malfunction, and would make colour mean "execution failed" on a CSP card and "losing money" on the wheel card directly beneath it.
+- A status the card does not recognise (a sold row caught mid-refresh) keeps the plain white/grey treatment rather than guessing at a colour.
+
 ## [5.2.125] — 2026-09-21
 ### Added
 - **The wheel card now shows what the CSP card shows.** A covered call was reported with six numbers — strike, premium, expiry, unrealized P&L, stop loss, week — while the put that assigned those same shares got contracts, buffer, entry price, actual yield, entry delta, entry IV and fill-vs-quote. The two halves of one trade now read the same way: same 3×3 stat grid, same fill footer, same capital line (`yrvi-app/src/components/WheelCard.jsx`, alongside `PositionCard.jsx`).
