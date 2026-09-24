@@ -770,7 +770,7 @@ export default function SettingsPage() {
                 badge always reflects the settings as they actually are — adjust any of
                 them yourself and it becomes Custom.
               </p>
-              <div className="grid gap-2 sm:grid-cols-3">
+              <div className="grid gap-2 sm:grid-cols-2">
                 {trackDefs.filter(t => t.id !== 'YRVI-Custom').map(t => {
                   const on = active?.id === t.id
                   return (

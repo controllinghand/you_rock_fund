@@ -468,6 +468,23 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # Remaining CSP slots = total − wheel holdings − already-open CSPs
     target_fills = max(0, num_positions - active_wheel_count - open_csp_count)
 
+    # Monthly puts (YRVI-CSP-M): new puts only open in the cycle's entry window,
+    # the first Monday after the monthly expiry plus one catch-up Monday. On other
+    # Mondays the open monthlies normally fill every slot already. If one didn't
+    # fill, it stays empty until the next cycle rather than opening a put with only
+    # 1–2 weeks left. A dry run (Run Screener / Saturday preview) still sizes the
+    # plan so the next entry can be previewed.
+    import tenor
+    monthly = tenor.cycle() if tenor.active(settings) == tenor.MONTHLY else None
+    if monthly and not monthly["in_window"] and target_fills > 0:
+        if dry_run:
+            log.info(f"  🌙 Monthly puts — outside the entry window; previewing the "
+                     f"{monthly['next_entry']} entry (expiry {monthly['next_expiry']})")
+        else:
+            log.info(f"  🌙 Monthly puts — {target_fills} open slot(s) wait for the next entry "
+                     f"{monthly['next_entry']} (current cycle expires {monthly['next_expiry']})")
+            target_fills = 0
+
     # Compute the budget up front — even on an all-wheel week — so the cash sweep can
     # always derive remainder = effective_budget − total_capital (zeroing it here made
     # an all-wheel account with real idle cash look empty).
@@ -480,6 +497,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP = {num_positions} cap)")
         result = {
             "positions": [], "raw_targets": [], "filtered_count": 0,
+            "monthly": {k: str(v) for k, v in monthly.items()} if monthly else None,
             "effective_budget": effective_budget, "target_fills": 0, "total_premium": 0,
             "total_capital": 0, "compound_enabled": compound_enabled,
             "cash_account": cash_account, "buying_power": buying_power,
@@ -577,6 +595,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     total_premium = sum(p.get("premium_total", 0) for p in positions)
 
     base = {
+        "monthly":                 {k: str(v) for k, v in monthly.items()} if monthly else None,
         "positions":               positions,
         "raw_targets":             all_targets,
         "filtered_count":          len(all_targets) - len(filtered_targets),

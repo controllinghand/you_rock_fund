@@ -62,6 +62,8 @@ directly — it is a symlink into `/data` and rotation would rename the link.
 ```
 config.py          → All fund parameters, IBKR credentials, API keys
 screener.py        → Fetches CSP candidates from Render API, filters + scores them
+tenor.py           → `option_tenor` (weekly | monthly; monthly only with csp_only_mode = YRVI-CSP-M): monthly expiry, entry window, next entry
+tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M) — DERIVED from settings via pins, never stored
 position_sizer.py  → Allocates capital across up to 5 positions (accepts budget override)
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
 wheel_manager.py   → Assignment detection, screener-based exits, ~0.20-delta covered call execution (prefers nearest strike ≥ cost basis; writes below-cost CC instead of force-selling underwater holdings; keeps holdings through earnings by default)
@@ -247,6 +249,11 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - DEFAULT for underwater holdings: write a ~0.20-delta CC BELOW cost (keep shares + premium) — do NOT force-sell
 - DEFAULT through earnings: keep the holding and write the CC (wheel_cc_ignore_earnings_filter=true);
   earnings filter still applies to NEW CSP entries via the Earnings Window setting
+- MONTHLY puts (YRVI-CSP-M = csp_only_mode + option_tenor "monthly"): the Render screen still ranks (weekly premium floor,
+  0.21-delta and 5% buffer filters dropped; earnings excluded through the monthly expiry, unknown dates fail closed), then the
+  trader RE-QUOTES each candidate on the monthly chain (trader._monthly_start → verify_and_adjust_strike). New puts only open
+  in the entry window (the first trading day after the third Friday plus one catch-up Monday); otherwise open monthlies
+  fill the slots through the normal open-short-put count
 - CSP liquidity gate is spread + OI-NOTIONAL floor (OI × strike × 100 ≥ min_oi_notional, default $1M),
   NOT a flat open-interest count — fairer to high-strike names
 - Freed capital from share sales is added to that week's CSP deployment budget
