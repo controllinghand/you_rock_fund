@@ -91,6 +91,31 @@ TRACKS = [
         # (exactly the state of the dev box on 2026-08-22).
         "pins": {
             "csp_only_mode": True,
+            "option_tenor":  "weekly",
+        },
+    },
+    {
+        "id":    "YRVI-CSP-M",
+        "name":  "CSP Monthly",
+        # 🌙 (U+1F319): Emoji_Presentation=Yes like the others, so no U+FE0F, and a
+        # bold silhouette at the ~16px Discord footer. One moon cycle ≈ one option cycle.
+        "emoji": "🌙",
+        "short": "CSP Only on monthly puts",
+        "description": (
+            "CSP Only, but each put runs a month instead of a week. New ~20-delta "
+            "puts open the Monday after each monthly expiry (third Friday) and "
+            "expire at the next one; a name with earnings before expiry is "
+            "skipped. Assigned shares are sold the next Monday, like CSP Only. "
+            "The strike sits further below the price, so there are far fewer "
+            "assignments, and premium arrives once a month."
+        ),
+        # tenor.active() only honours monthly together with csp_only_mode, so both
+        # are the track's identity. YRVI-CSP pins "weekly", which keeps the two
+        # mutually exclusive. The wheel tracks leave option_tenor unpinned: without
+        # csp_only_mode the setting is inert, so their behavior can't differ.
+        "pins": {
+            "csp_only_mode": True,
+            "option_tenor":  "monthly",
         },
     },
 ]
@@ -133,11 +158,12 @@ def _matches(settings: dict, key: str, want) -> bool:
 def resolve_track(settings: dict) -> dict:
     """Return the track the given settings are actually running.
 
-    Falls back to CUSTOM_TRACK when no track matches. The three named tracks
-    are mutually exclusive by construction — YRVI-26 and YRVI-SL disagree on
-    wheel_stop_loss_enabled, and both require csp_only_mode False where
-    YRVI-CSP requires True — so at most one can ever match and the iteration
-    order carries no hidden meaning.
+    Falls back to CUSTOM_TRACK when no track matches. The named tracks
+    are mutually exclusive by construction. YRVI-26 and YRVI-SL disagree on
+    wheel_stop_loss_enabled, and both require csp_only_mode False where the
+    two CSP tracks require True; YRVI-CSP and YRVI-CSP-M disagree on
+    option_tenor. So at most one can ever match and the iteration order
+    carries no hidden meaning.
     """
     settings = settings or {}
     for track in TRACKS:

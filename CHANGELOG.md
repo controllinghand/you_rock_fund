@@ -1,3 +1,24 @@
+## [5.2.131] — 2026-09-24
+
+### Added
+- **New strategy track: 🌙 YRVI-CSP-M "CSP Monthly".** It's CSP Only on monthly puts. New ~20-delta puts open the Monday after each monthly expiry (third Friday, or Thursday when that Friday is a holiday) and expire at the NEXT one, ~4–5 weeks later. Assigned shares are still sold the next Monday. Pick it in Settings → Strategy Track; the existing **YRVI-CSP stays the weekly track**, so nothing changes on a box until someone selects it.
+- One new setting, `option_tenor` (`"weekly"` default | `"monthly"`), in `tenor.py`. Monthly is honoured only together with `csp_only_mode`, the combination that was backtested. Monthly with the wheel would also need monthly covered calls, so without CSP-only the setting is inert.
+
+### How monthly works
+- **Screen:** it's the same Render screener and Best Target ranking, with no Render change needed; everything is query parameters the endpoint already accepts. The weekly premium floor is dropped (`min_target_premium_pct=0`), and so are the local 0.21-delta and 5% buffer filters, because all three describe the weekly put, which is never traded here.
+- **Earnings:** a name with a report anywhere from 3 days ago through the monthly expiry is skipped, and an unknown date fails closed. The earnings window becomes `earnings_days_hide` = days to expiry, plus `earnings_recent_hide=3`.
+- **Strike:** the screener's strike is the weekly 20-delta. The trader re-quotes each candidate as it reaches it (`trader._monthly_start`). It estimates the monthly 20-delta from ATM IV and days to expiry, snaps up to a strike listed for the monthly expiry, and hands off to `verify_and_adjust_strike`, which settles the exact strike on live delta (0.15–0.21), open interest and the 1% yield bar exactly as for weeklies. Contracts are re-sized to the capital the sizer planned, and the every-put budget check still trims.
+- **Entry timing:** new puts open only in the entry window, the entry Monday plus one catch-up Monday (for a missed or partially failed entry). On other Mondays the open monthlies already fill the slots via the existing open-short-put count. An unfilled slot waits for the next cycle rather than opening a put with 1–2 weeks left. Dry runs (Run Screener, the Saturday preview) still size the plan outside the window, so the next entry can be previewed.
+- **Discord:** the Saturday plan adds a 🌙 Monthly puts line. It says whether Monday is an entry day and makes clear that the listed strikes and premiums are the weekly screen, not the monthly puts.
+
+### Why
+- A 2017–2026 backtest in the private greer_project repo (`docs/THETADATA_RANKING_POC.md`) compared the current screen's names on monthly vs weekly puts. Monthly CSP-only did far better, with no losing year and far fewer assignments. The figures stay there: they're derived from licensed ThetaData data, and this repo is public. The first box to run it is the dev box (the CSP-only arm), starting with the October 19 entry.
+
+### Known limitations
+- The Run Screener / Saturday preview shows each candidate's WEEKLY strike and premium; the monthly strike is only chosen at execution. Validate a real monthly selection with the Dry Run setting on and Run Now during market hours.
+- Premium arrives once a month, so three weekly posts in four show no new CSP premium.
+- The greer_project nightly earnings refresh only covers names paying ≥1%/wk. A few monthly candidates may be refused for a stale date (fail closed), which shrinks the pool but adds no risk.
+
 ## [5.2.129] — 2026-09-22
 
 ### Fixed

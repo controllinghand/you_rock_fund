@@ -478,6 +478,26 @@ def post_weekly_plan(positions: list, wheel_plan: list = None,
         {"name": "Blended Yield",               "value": f"{combined_yield:.2f}%",     "inline": True},
     ]
 
+    # Monthly puts (YRVI-CSP-M): the lines above are the WEEKLY screen's strikes and
+    # premiums. The monthly strike for each name is only chosen at execution, on its
+    # own chain, so say so rather than let the weekly numbers read as the plan.
+    try:
+        import tenor
+        from config import get_settings
+        if tenor.active(get_settings()) == tenor.MONTHLY:
+            c = tenor.cycle((now + timedelta(days=days_to_monday)).date())
+            if c["in_window"]:
+                note = (f"Monday is an entry day. The candidates above show the weekly screen; each "
+                        f"one's ~20-delta put for the **{c['next_expiry']:%b %d}** monthly expiry "
+                        f"is chosen at execution.")
+            else:
+                note = (f"No new puts Monday. Open puts expire **{c['next_expiry']:%b %d}**, and the "
+                        f"next entry is **{c['next_entry']:%b %d}**. Candidates above preview the "
+                        f"next cycle's screen.")
+            fields.append({"name": "🌙 Monthly puts", "value": note, "inline": False})
+    except Exception:
+        pass
+
     fields.append({"name": "​", "value": "Results posted Monday after execution ✅",
                    "inline": False})
 

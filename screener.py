@@ -2,6 +2,7 @@ import requests
 from datetime import datetime, timezone
 from config import RENDER_URL as URL, RENDER_SECRET as SECRET
 from app_identity import request_headers
+import tenor
 
 # Anonymous per-box identity (install id + version + paper/live) sent on every
 # screener-API call so the Render service can attribute traffic and count
@@ -19,6 +20,23 @@ PARAMS = {
     "earnings_recent_hide": 0,
     "hide_red": True
 }
+
+
+def _entry_params(settings: dict | None = None) -> tuple[dict, dict | None]:
+    """Render query params for NEW CSP entries, plus the monthly cycle (None when weekly).
+
+    Monthly (YRVI-CSP-M) keeps the weekly screen's ranking inputs (IV floor, market
+    cap, Best Target) but drops the weekly-only premium floor. The trader re-quotes
+    each name on its MONTHLY chain and applies the 1% bar to that put. The earnings
+    window stretches to the monthly expiry, and names that reported in the last 3
+    days are hidden too. Retention (get_all_candidates) keeps plain PARAMS: a
+    CSP-only box sells its holdings on Monday regardless of the screen.
+    """
+    if tenor.active(settings) != tenor.MONTHLY:
+        return PARAMS, None
+    cyc = tenor.cycle()
+    return {**PARAMS, "min_target_premium_pct": 0,
+            "earnings_days_hide": cyc["dte"] + 1, "earnings_recent_hide": 3}, cyc
 
 # ── Render cold-start warm-up ─────────────────────────────────
 # The ledger-sync service runs on Render's free tier, which spins the instance
@@ -62,15 +80,21 @@ MIN_BUFFER_PRIORITY = 0.10
 MIN_DAYS_TO_EXPIRY  = 3   # Mon→Fri = 3 UTC calendar days; 4 fails Monday execution
 EARNINGS_SAFE_DAYS  = 7
 
-def _earnings_safe(r: dict) -> tuple[bool, dict]:
+def _earnings_safe(r: dict, horizon: int | None = None) -> tuple[bool, dict]:
     """
     Returns (is_safe, row). Earnings filtering is handled server-side via
     earnings_days_hide param; treat missing/unknown values as safe.
     Past earnings (days < 0) are safe. Within EARNINGS_SAFE_DAYS is not.
+
+    horizon (monthly puts): the put's days to expiry. A report anywhere from 3 days
+    ago through expiry is unsafe, and an UNKNOWN date fails closed: a month-long
+    put can't be kept clear of a report nobody has on the calendar.
     """
     dte_e = r.get("days_to_earnings")
     if dte_e is None or dte_e == "?":
-        return True, r
+        return horizon is None, r
+    if horizon is not None:
+        return not (-3 <= dte_e <= horizon), r
     if 0 <= dte_e < EARNINGS_SAFE_DAYS:
         return False, r
     return True, r
@@ -100,7 +124,13 @@ def get_top_targets(n=5, always_include: set = None):
     under-fill week (illiquid / skipped names crowding the top ranks)."""
     print(f"\n📡 Fetching CSP targets from Render API...")
     _warm_up()
-    response = requests.get(URL, params=PARAMS, headers=HEADERS, timeout=60)
+    from config import get_settings
+    settings = get_settings()
+    params, monthly = _entry_params(settings)
+    if monthly:
+        print(f"🌙 Monthly puts: next expiry {monthly['next_expiry']} ({monthly['dte']} days) — "
+              f"strikes are re-quoted on the monthly chain at execution")
+    response = requests.get(URL, params=params, headers=HEADERS, timeout=60)
     response.raise_for_status()
 
     data = response.json()
@@ -110,8 +140,7 @@ def get_top_targets(n=5, always_include: set = None):
     # ── Filter 0: user-excluded tickers ───────────────────────
     # Read live (not the import-time config constant) so dashboard edits apply
     # on the next run with no restart. Excluded names never get a new CSP.
-    from config import get_settings
-    excluded = {t.strip().upper() for t in get_settings().get("excluded_tickers", []) if t and t.strip()}
+    excluded = {t.strip().upper() for t in settings.get("excluded_tickers", []) if t and t.strip()}
     if excluded:
         before = len(rows)
         rows = [r for r in rows if r.get("ticker", "").upper() not in excluded]
@@ -133,23 +162,24 @@ def get_top_targets(n=5, always_include: set = None):
     rows = [r for r in rows if days_to_expiry(r) >= MIN_DAYS_TO_EXPIRY]
     print(f"📅 {len(rows)} passed expiry filter (removed {before - len(rows)} expiring too soon)")
 
-    # ── Filter 3: delta ≤ 0.21 ────────────────────────────────
-    before = len(rows)
-    rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= MAX_DELTA]
-    print(f"📐 {len(rows)} passed delta filter (removed {before - len(rows)})")
-
-    # ── Filter 4: buffer ≥ 5% ─────────────────────────────────
-    before = len(rows)
+    # ── Filters 3–4: weekly strike delta ≤ 0.21 and buffer ≥ 5% ─────
+    # Both describe the WEEKLY put. Monthly re-picks the strike on its own chain,
+    # so they'd only drop names for a strike that will never be traded.
     for r in rows:
         r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
-    rows = [r for r in rows if r["_buffer_pct"] >= MIN_BUFFER_PCT]
-    print(f"🛡️  {len(rows)} passed buffer filter (removed {before - len(rows)})")
+    if not monthly:
+        before = len(rows)
+        rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= MAX_DELTA]
+        print(f"📐 {len(rows)} passed delta filter (removed {before - len(rows)})")
+        before = len(rows)
+        rows = [r for r in rows if r["_buffer_pct"] >= MIN_BUFFER_PCT]
+        print(f"🛡️  {len(rows)} passed buffer filter (removed {before - len(rows)})")
 
     # ── Filter 5: earnings safety (fallback lookup for None/"?") ──
     before = len(rows)
     safe_rows = []
     for r in rows:
-        is_safe, r = _earnings_safe(r)
+        is_safe, r = _earnings_safe(r, horizon=monthly["dte"] if monthly else None)
         if is_safe:
             safe_rows.append(r)
         else:

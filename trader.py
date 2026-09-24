@@ -10,6 +10,7 @@ from ib_insync import IB, Option, Stock, LimitOrder, MarketOrder, ExecutionFilte
 import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from capital import dedupe_positions
+import tenor
 
 log = log_setup.get_logger("trader", "trade_log.txt")
 
@@ -686,6 +687,50 @@ def verify_and_adjust_strike(
     return result
 
 
+def _monthly_start(ib: IB, ticker: str, expiry: "date", iv_atm: float | None) -> tuple | None:
+    """Starting point for a MONTHLY put (YRVI-CSP-M): (strike, bid) or None.
+
+    The screener's strike is the WEEKLY 20-delta. A monthly 20-delta sits much
+    further below the price, and verify_and_adjust_strike only walks ~10 strikes
+    down from its start. So estimate the monthly 20-delta strike from ATM IV and
+    days to expiry, K ≈ S·exp(−0.84·σ√T), and snap it UP to a strike actually
+    listed for the monthly expiry. verify_and_adjust_strike then settles the
+    exact strike against live delta (0.15–0.21), open interest and the 1% yield
+    bar, the same way it does for weeklies.
+    """
+    import math
+    exp = expiry.strftime("%Y%m%d")
+    try:
+        stk = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
+        if not stk:
+            return None
+        chains = ib.reqSecDefOptParams(ticker, "", "STK", stk[0].conId)
+        ib.sleep(1)
+    except Exception as e:
+        if _is_connection_error(ib, e):
+            raise GatewayUnavailable(f"{ticker} monthly chain lookup: {e}") from e
+        log.warning(f"  ⚠️  {ticker} — monthly chain lookup failed: {e}")
+        return None
+    strikes = sorted({s for ch in chains if exp in (ch.expirations or []) for s in ch.strikes})
+    if not strikes:
+        log.info(f"  🌙 {ticker} — no {exp} monthly expiry listed")
+        return None
+    price = _get_stock_price(ib, ticker)
+    if not price:
+        return None
+    sigma = iv_atm if iv_atm and 0.05 < iv_atm < 5 else 0.5
+    t = max((expiry - datetime.now().date()).days, 1) / 365
+    est = price * math.exp(-0.84 * sigma * math.sqrt(t))
+    at_or_above = [s for s in strikes if est <= s <= price]
+    start = at_or_above[0] if at_or_above else max((s for s in strikes if s <= price), default=None)
+    if start is None:
+        return None
+    probe = _probe_strike(ib, Option(ticker, exp, start, "P", "SMART", currency="USD"))
+    log.info(f"  🌙 {ticker} — monthly {exp}: price ${price:.2f}, IV {sigma:.2f} → start ${start:.2f} "
+             f"(est ${est:.2f}){f', bid ${probe.bid:.2f}' if probe.bid else ''}")
+    return start, probe.bid
+
+
 def get_market_data(ib: IB, contract, screener_premium: float,
                     dry_run: bool = False) -> dict | None:
     """
@@ -1200,6 +1245,12 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     slot       = 0
     reconnects = 0
     attempted_contracts: dict = {}   # ticker → final contract worked this run
+    # Monthly puts (YRVI-CSP-M): each candidate is re-quoted on the monthly chain
+    # when its turn comes. Doing it lazily keeps the IBKR chain work to the names
+    # actually attempted, not the whole fallback pool.
+    monthly = tenor.cycle() if tenor.active(get_settings()) == tenor.MONTHLY else None
+    if monthly:
+        log.info(f"  🌙 Monthly puts — expiry {monthly['next_expiry']} ({monthly['dte']} days)")
 
     while filled_count < _target:
         pos = next_candidate()
@@ -1220,9 +1271,34 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
         _status(ticker=ticker, stage="qualifying")
 
         try:
+            screener_delta = pos.get("delta", 0.0)
+            if monthly:
+                start = _monthly_start(ib, ticker, monthly["next_expiry"], pos.get("iv_atm"))
+                if start is None:
+                    results.append({"ticker": ticker, "status": "skipped_monthly_chain"})
+                    _status(ticker=ticker, stage=None,
+                            result={"ticker": ticker, "status": "skipped_monthly_chain"})
+                    continue
+                m_strike, m_bid = start
+                # Keep the capital the sizer planned for this slot; the monthly strike
+                # is lower, so the same dollars buy more contracts. The every-put
+                # budget check below still trims if the total would overrun.
+                contracts = max(1, int(pos["capital_used"] // (m_strike * 100)))
+                strike, expiry = m_strike, tenor.screener_expiry_str(monthly["next_expiry"])
+                premium = m_bid or 0.0
+                pos = {**pos, "strike": strike, "expiry": expiry, "contracts": contracts,
+                       "capital_used": round(contracts * strike * 100, 2), "premium": premium,
+                       "premium_total": round(contracts * premium * 100, 2), "tenor": tenor.MONTHLY}
+                for _i, _sp in enumerate(all_sized):
+                    if _sp.get("ticker") == ticker:
+                        all_sized[_i] = pos
+                        break
+                # No live delta must never pass a guessed strike: an out-of-range
+                # fallback delta makes verify scan and require real greeks instead.
+                screener_delta = -1.0
             # Verify delta at execution time — auto-adjust if stock moved since Saturday
             delta_result = verify_and_adjust_strike(
-                ib, ticker, strike, expiry, screener_delta=pos.get("delta", 0.0)
+                ib, ticker, strike, expiry, screener_delta=screener_delta
             )
             if delta_result is None:
                 log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {MAX_DELTA}, trying next")
