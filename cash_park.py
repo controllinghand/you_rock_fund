@@ -61,6 +61,12 @@ NET_LIQ_CAP_PCT  = 0.10
 # checks margin, so an order sized at exactly the available funds fails the check.
 # Derived from two live rejections that reproduce to within $1 — see the buy path.
 MKT_ORDER_BUFFER = 1.05
+# MARGIN accounts: put collateral + wheel stock + the park may use at most this
+# share of net liq. Without it the sweep parked exactly 100% (2026-09-28, dev box:
+# $177,350 collateral + $14,696 QQQ vs $192,435 net liq), so the new puts' first
+# adverse mark move put the capital-deployed gauge at 101%. Cash accounts have their
+# own margin-headroom sizing below and don't use this.
+MARGIN_SWEEP_CEILING = 0.98
 
 log = log_setup.get_logger("cash_park", "cash_park_log.txt")
 
@@ -382,9 +388,13 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
             remainder = max(0.0, idle)
             basis = "live buying_power (cash account)"
         else:
+            # Leave (1 − MARGIN_SWEEP_CEILING) of live net liq unparked, so collateral +
+            # stock + park tops out at ~98% instead of exactly 100%.
+            headroom  = (1 - MARGIN_SWEEP_CEILING) * net_liq if net_liq and net_liq > 0 else 0.0
             remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
-                            - committed_csp)
-            basis = "effective_budget − committed CSP"
+                            - committed_csp - headroom)
+            basis = (f"effective_budget − committed CSP − {1 - MARGIN_SWEEP_CEILING:.0%} "
+                     f"net-liq headroom ${headroom:,.0f}")
         base = remainder
         if include_prem:
             base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \

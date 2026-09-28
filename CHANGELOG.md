@@ -1,3 +1,12 @@
+## [5.2.134] — 2026-09-28
+
+### Changed
+- **On margin accounts, the cash sweep now leaves 2% of net liq unparked** (`MARGIN_SWEEP_CEILING = 0.98`). It used to park everything left after the put collateral, taking collateral + stock + park to exactly 100% of net liq. On 2026-09-28 (dev box) that meant $177,350 of collateral + $14,696 of QQQ against $192,435 net liq. The new puts' first adverse mark move (−$1.7k) then showed the capital-deployed gauge at **101%**. With the headroom the same run parks $11,236 and sits at 98.0% at entry and 98.9% after the move.
+- Cash accounts are unchanged; their margin-headroom sizing (v5.2.128) already applies.
+
+### Notes
+- The 101% was never real borrowing: the account held ~$182.7k of cash against $177.35k of put collateral. The gauge counts collateral at full strike against net liq, which already subtracts the open puts' current value.
+
 ## [5.2.133] — 2026-09-28
 
 ### Fixed
