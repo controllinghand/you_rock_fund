@@ -1,3 +1,13 @@
+## [5.2.133] — 2026-09-28
+
+### Fixed
+- **A dry-run Run Now inflated the week's premium, YTD total and chart.** Dry-run CSP fills were written to `trade_log.json` with no marker, and that file is the durable record the weekly premium, the YTD tracker, the Weekly Premium chart and Discord are all summed from. On 2026-09-28 the CSP-M dry run (7:41 AM PT) followed by the real run reported **$9,113** for the week instead of the real **$5,348**, with GRAB, MRNA, NBIS and an ALAB $305 put that never traded. Dry-run fills are no longer written to `trade_log.json` (`_append_trade_log` drops them). The weekly sum also skips any row flagged `dry_run`.
+- **A later real run carried the dry run's fills forward.** `_merge_week_executions` treated `dry_run` as a fill when carrying this week's earlier executions, so the real run kept GRAB/MRNA/NBIS in the week's trades (and GRAB kept a "CSP: Dry Run" card). Only real fills (`filled`, `partial_fill`) are carried now; a dry run's own results still show normally.
+
+### Notes
+- This predates the monthly work. It needs a dry-run Run Now and a real run in the same week, which first happened with the CSP-M test.
+- The dev box's affected week was corrected by hand (backups in `/data/backup_dryrun_cleanup_20260928/`). Other boxes weren't affected unless they ran a dry-run Run Now and a real run in the same week.
+
 ## [5.2.132] — 2026-09-28
 
 ### Fixed (from the first CSP-M dry run on the dev box)

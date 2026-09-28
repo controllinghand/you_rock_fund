@@ -66,6 +66,8 @@ def _week_premium_from_trade_log(week_monday: str):
             ed = date.fromisoformat(str(e.get("entry_date", ""))[:10])
         except (TypeError, ValueError):
             continue
+        if e.get("dry_run"):
+            continue        # never real premium (the writer skips these too)
         if wk_start <= ed <= wk_end:
             prem = e.get("total_premium") or 0.0
             if e.get("right") == "P":
