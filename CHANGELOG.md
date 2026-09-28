@@ -4,9 +4,11 @@
 - **A monthly put could land on a ~0-delta strike.** GRAB, a $3 stock with $0.50 strike steps, had no strike near 20 delta on the Oct 16 monthly: $3.00 was 0.34 and $2.50 was 0.03. The scan settled on **$1.50 at delta 0.000**, because strikes with no open-interest or bid tick pass the pre-check. Monthly puts now require a real delta of at least `MONTHLY_MIN_DELTA` (0.10) after the scan, otherwise the name is skipped and the next candidate tried. In a live run GRAB would have been skipped anyway (no market data at $1.50), but the dry run reported a fill priced off the $3.00 strike's bid.
 - **Monthly names were dropped when the estimated start strike wasn't listed for that expiry.** `reqSecDefOptParams` returns the union of strikes across all expiries. SMMT $9.50 and BE $227.50 were in that list but don't trade on the Oct 16 monthly, so the delta check's qualify failed and both names were skipped. `_monthly_start` now batch-qualifies the nearest few strikes and starts from the first one that actually exists, at or above the estimate (SMMT → $10.00, BE → $230.00).
 
+### Changed
+- **Monthly puts use a $250k open-interest notional floor** (`MONTHLY_MIN_OI_NOTIONAL`); weekly keeps `min_oi_notional`, default $1M. A monthly 20-delta strike sits well below the price, where far fewer contracts are open. On the dry run the $1M floor rejected six of eleven monthly names, HUT, TEM, CRDO, IONQ, SMCI ($956k) and ASTS, several with 8–9% spreads. The spread gates are unchanged, and the backtest that justified CSP-M had no OI floor at all. User decision 2026-09-28.
+
 ### Notes
 - The same dry run confirmed the rest of the monthly path: DOCN, ALAB, MRNA, NBIS (and HUT, TEM, CRDO, IONQ, SMCI, ASTS before the liquidity gate) all re-quoted to Oct 16 strikes at 17–20 delta paying 1.7–2.3% of strike.
-- Six names were skipped by the open-interest notional floor ($1M). Monthly 20-delta strikes sit further below the price, where fewer contracts are open; the backtest had no such floor. That's unchanged here and left as a separate decision.
 
 ## [5.2.131] — 2026-09-24
 

@@ -23,6 +23,7 @@ MIN_OI_FLOOR        = 10         # fallback default — absolute min contracts; 
 MAX_DELTA           = 0.21  # hard ceiling — never sell a CSP with abs(delta) above this
 MIN_DELTA           = 0.15  # floor — if live delta drops below this, scan upward for a better strike
 MONTHLY_MIN_DELTA   = 0.10  # monthly puts: never accept a scan result below this (no ~0-delta strikes)
+MONTHLY_MIN_OI_NOTIONAL = 250_000  # monthly puts: OI-notional floor (weekly keeps min_oi_notional, default $1M)
 MID_WAIT_SECS       = 120
 BID_WAIT_SECS       = 120
 MARKET_WAIT_SECS    = 60    # total polling window for market orders
@@ -497,6 +498,17 @@ def _fetch_available_cash(ib: IB) -> float | None:
     return None
 
 
+def _min_oi_notional(s: dict) -> float:
+    """OI-notional liquidity floor. Monthly puts (YRVI-CSP-M) use MONTHLY_MIN_OI_NOTIONAL
+    ($250k): a monthly 20-delta strike sits well below the price, where far fewer
+    contracts are open than at a weekly 20-delta. On 2026-09-28 the $1M floor rejected six
+    of eleven monthly names (SMCI at $956k) with tight 8–9% spreads. The spread gates
+    still apply unchanged, so fillability is still checked."""
+    if tenor.active(s) == tenor.MONTHLY:
+        return MONTHLY_MIN_OI_NOTIONAL
+    return s.get("min_oi_notional", MIN_OI_NOTIONAL)
+
+
 def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str | None:
     """Is this strike worth writing? Returns None if yes, else a short reason.
 
@@ -521,7 +533,7 @@ def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str
         if oi < s.get("min_oi_floor", MIN_OI_FLOOR):
             return f"OI {oi:.0f} below floor"
         notional = oi * strike * 100
-        if notional < s.get("min_oi_notional", MIN_OI_NOTIONAL):
+        if notional < _min_oi_notional(s):
             return f"OI {oi:.0f} = ${notional:,.0f} notional"
     if bid is not None:
         yld = bid / strike if strike > 0 else 0
@@ -870,7 +882,7 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
     oi              = mkt["open_interest"]
     strike          = mkt.get("strike", 0)
     oi_notional     = oi * strike * 100
-    min_oi_notional = s.get("min_oi_notional", MIN_OI_NOTIONAL)
+    min_oi_notional = _min_oi_notional(s)
     min_oi_floor    = s.get("min_oi_floor",    MIN_OI_FLOOR)
     if oi < min_oi_floor or oi_notional < min_oi_notional:
         log.warning(f"⚠️  {ticker} open interest too thin: OI {oi:.0f} "
