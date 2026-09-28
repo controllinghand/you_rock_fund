@@ -22,6 +22,8 @@ MIN_OI_NOTIONAL     = 1_000_000  # fallback default — min open-interest notion
 MIN_OI_FLOOR        = 10         # fallback default — absolute min contracts; rejects totally-dead strikes that math past the notional floor
 MAX_DELTA           = 0.21  # hard ceiling — never sell a CSP with abs(delta) above this
 MIN_DELTA           = 0.15  # floor — if live delta drops below this, scan upward for a better strike
+MONTHLY_MIN_DELTA   = 0.10  # monthly puts: never accept a scan result below this (no ~0-delta strikes)
+MONTHLY_MIN_OI_NOTIONAL = 250_000  # monthly puts: OI-notional floor (weekly keeps min_oi_notional, default $1M)
 MID_WAIT_SECS       = 120
 BID_WAIT_SECS       = 120
 MARKET_WAIT_SECS    = 60    # total polling window for market orders
@@ -496,6 +498,17 @@ def _fetch_available_cash(ib: IB) -> float | None:
     return None
 
 
+def _min_oi_notional(s: dict) -> float:
+    """OI-notional liquidity floor. Monthly puts (YRVI-CSP-M) use MONTHLY_MIN_OI_NOTIONAL
+    ($250k): a monthly 20-delta strike sits well below the price, where far fewer
+    contracts are open than at a weekly 20-delta. On 2026-09-28 the $1M floor rejected six
+    of eleven monthly names (SMCI at $956k) with tight 8–9% spreads. The spread gates
+    still apply unchanged, so fillability is still checked."""
+    if tenor.active(s) == tenor.MONTHLY:
+        return MONTHLY_MIN_OI_NOTIONAL
+    return s.get("min_oi_notional", MIN_OI_NOTIONAL)
+
+
 def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str | None:
     """Is this strike worth writing? Returns None if yes, else a short reason.
 
@@ -520,7 +533,7 @@ def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str
         if oi < s.get("min_oi_floor", MIN_OI_FLOOR):
             return f"OI {oi:.0f} below floor"
         notional = oi * strike * 100
-        if notional < s.get("min_oi_notional", MIN_OI_NOTIONAL):
+        if notional < _min_oi_notional(s):
             return f"OI {oi:.0f} = ${notional:,.0f} notional"
     if bid is not None:
         yld = bid / strike if strike > 0 else 0
@@ -721,10 +734,22 @@ def _monthly_start(ib: IB, ticker: str, expiry: "date", iv_atm: float | None) ->
     sigma = iv_atm if iv_atm and 0.05 < iv_atm < 5 else 0.5
     t = max((expiry - datetime.now().date()).days, 1) / 365
     est = price * math.exp(-0.84 * sigma * math.sqrt(t))
-    at_or_above = [s for s in strikes if est <= s <= price]
-    start = at_or_above[0] if at_or_above else max((s for s in strikes if s <= price), default=None)
-    if start is None:
+    # reqSecDefOptParams lists the UNION of strikes across every expiry, so a strike can be
+    # in that list yet not trade on this one (2026-09-28: SMMT $9.50 and BE $227.50 failed
+    # to qualify on the Oct 16 monthly, and both names were dropped). Qualify the nearest
+    # few in one batch and start from the first real one at or above the estimate.
+    near = sorted((s for s in strikes if s <= price), key=lambda s: (s < est, abs(s - est)))[:8]
+    try:
+        qualified = ib.qualifyContracts(*[Option(ticker, exp, s, "P", "SMART", currency="USD") for s in near])
+    except Exception as e:
+        if _is_connection_error(ib, e):
+            raise GatewayUnavailable(f"{ticker} monthly strike qualify: {e}") from e
+        qualified = []
+    real = sorted(o.strike for o in qualified if getattr(o, "conId", 0))
+    if not real:
+        log.info(f"  🌙 {ticker} — no qualifying {exp} put near ${est:.2f}")
         return None
+    start = next((s for s in real if s >= est), real[-1])
     probe = _probe_strike(ib, Option(ticker, exp, start, "P", "SMART", currency="USD"))
     log.info(f"  🌙 {ticker} — monthly {exp}: price ${price:.2f}, IV {sigma:.2f} → start ${start:.2f} "
              f"(est ${est:.2f}){f', bid ${probe.bid:.2f}' if probe.bid else ''}")
@@ -857,7 +882,7 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
     oi              = mkt["open_interest"]
     strike          = mkt.get("strike", 0)
     oi_notional     = oi * strike * 100
-    min_oi_notional = s.get("min_oi_notional", MIN_OI_NOTIONAL)
+    min_oi_notional = _min_oi_notional(s)
     min_oi_floor    = s.get("min_oi_floor",    MIN_OI_FLOOR)
     if oi < min_oi_floor or oi_notional < min_oi_notional:
         log.warning(f"⚠️  {ticker} open interest too thin: OI {oi:.0f} "
@@ -1306,6 +1331,17 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 continue
 
             contract, strike, orig_delta, final_delta, final_iv, was_adjusted = delta_result
+            # Monthly: the scan can end on a strike with NO usable delta near 20. On
+            # 2026-09-28 GRAB ($3 stock, $0.50 strike steps) went from $3.00 at 0.34 to
+            # $2.50 at 0.03, and the scan settled on $1.50 at 0.000 (strikes with no
+            # OI/bid tick pass the liquidity pre-check). A ~0-delta put is not the
+            # strategy, so require a real delta of at least MONTHLY_MIN_DELTA.
+            if monthly and (final_delta is None or abs(final_delta) < MONTHLY_MIN_DELTA):
+                log.info(f"  🌙 {ticker} — no monthly strike near 20-delta (best ${strike:.2f} at "
+                         f"delta {final_delta if final_delta is not None else 'n/a'}) — trying next")
+                results.append({"ticker": ticker, "status": "skipped_delta"})
+                _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_delta"})
+                continue
             # Fall back to the screener's ATM IV if live greeks didn't carry one.
             if final_iv is None:
                 final_iv = pos.get("iv_atm")
