@@ -266,7 +266,8 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Cash sweep (opt-in, default OFF) parks the week's undeployed remainder in QQQ (default) or SGOV
   after the Monday option workflow, then sells it on the week's last trading day (Fri, or Thu when
   Fri is a holiday). Buy = min(remainder [+ this week's premium if enabled], settled cash, 10% net-liq)
-  — the settled-cash cap means it NEVER uses margin. Skipped (with a Discord alert) if any option slot
+  — the settled-cash cap means it NEVER uses margin. On MARGIN accounts collateral + stock + park is also
+  held to 98% of net liq (MARGIN_SWEEP_CEILING), so normal option mark moves don't tip the deployed gauge over 100%. Skipped (with a Discord alert) if any option slot
   went unfilled that week, so a broken Monday run isn't masked by parking idle cash. Fractional via cashQty.
 - All operational alerts are persisted in-app (/data/alerts.json) AND sent to Discord via the single
   _send_discord_alert chokepoint in api.py; the dashboard bell reads GET /api/alerts (per-box, standalone)
