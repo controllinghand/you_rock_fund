@@ -264,7 +264,16 @@ def _reconcile_results_against_broker(ib: IB, results: list, attempted: dict) ->
 
 
 def _append_trade_log(record: dict) -> None:
-    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right."""
+    """Upsert one execution record into trade_log.json, keyed on symbol+expiry+strike+right.
+
+    Dry-run fills are NEVER written. trade_log.json is the durable record that the
+    weekly premium, the YTD tracker and the charts are summed from, and nothing
+    downstream can tell a simulated row from a real one. On 2026-09-28 a dry-run Run
+    Now followed by the real run inflated that week from $5,348 to $9,113 with
+    puts (GRAB, MRNA, NBIS) that never traded. Dry runs stay in state.json / Discord.
+    """
+    if record.pop("dry_run", False):
+        return
     try:
         with open(TRADE_LOG_JSON) as f:
             entries = json.load(f)
@@ -313,6 +322,10 @@ def _merge_week_executions(existing: dict, new_results: list, new_positions: lis
     Returns (executions, positions, filled_count, total_premium).
     """
     _FILLED = ("filled", "partial_fill", "dry_run")
+    # Only REAL fills are carried forward. A dry run earlier in the week opened
+    # nothing at IBKR, so carrying its "dry_run" rows into a later real run reported
+    # puts that don't exist (2026-09-28: GRAB/MRNA/NBIS after the CSP-M dry run).
+    _CARRY = ("filled", "partial_fill")
 
     by_ticker: dict = {}
     order: list = []
@@ -325,7 +338,7 @@ def _merge_week_executions(existing: dict, new_results: list, new_positions: lis
 
     if _same_week(existing.get("run_date")):
         for e in existing.get("executions", []):
-            if e.get("status") in _FILLED:
+            if e.get("status") in _CARRY:
                 _put(e)   # carry this week's already-open fills first
 
     for e in new_results:
@@ -1556,8 +1569,10 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                     "premium_per_contract": fill_price,
                     "contracts":            filled_qty,
                     "total_premium":        result.get("premium_collected"),
+                    "dry_run":              result["status"] == "dry_run",
                 })
-                log.info(f"  📝 trade_log.json: {ticker} recorded")
+                log.info(f"  📝 trade_log.json: {ticker} "
+                         f"{'NOT recorded (dry run)' if result['status'] == 'dry_run' else 'recorded'}")
             except Exception as tl_err:
                 log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
         else:
