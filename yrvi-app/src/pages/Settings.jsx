@@ -634,7 +634,7 @@ export default function SettingsPage() {
     wheel_cover_all_shares: true,
     wheel_allow_add_to_position: false,
     wheel_stop_loss_enabled: true, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
-    max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
+    trader_max_delta: 0.22, max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
     min_oi_notional: 1000000, min_oi_order_multiple: 5, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
@@ -903,9 +903,12 @@ export default function SettingsPage() {
 
       {/* Screener Filters */}
       <Section title="Screener Filters" emoji="📐">
-        <SliderRow label="Max Delta"      value={settings.max_delta}            min={0.10} max={0.30} step={0.01} format={v => v.toFixed(2)}                onChange={v => set('max_delta', v)} />
-        <SliderRow label="Min Buffer %"   value={settings.min_buffer_pct}       min={0.03} max={0.20} step={0.01} format={v => `${(v * 100).toFixed(0)}%`} onChange={v => set('min_buffer_pct', v)} />
-        <SliderRow label="Earnings Window" value={settings.earnings_filter_days} min={0}    max={30}              format={v => `${v} days`}                  onChange={v => set('earnings_filter_days', v)} />
+        <SliderRow label="Max Delta"      value={settings.max_delta ?? 0.21}            min={0.10} max={0.30} step={0.01} format={v => v.toFixed(2)}                onChange={v => set('max_delta', v)}
+          description="Screener: only pick puts whose 20-delta strike is at or under this. The live re-check at order time is Trader Max Delta (Liquidity Filters)." />
+        <SliderRow label="Min Buffer %"   value={settings.min_buffer_pct ?? 0.05}       min={0.03} max={0.20} step={0.01} format={v => `${(v * 100).toFixed(0)}%`} onChange={v => set('min_buffer_pct', v)}
+          description="Screener: strike must sit at least this far below the stock price" />
+        <SliderRow label="Earnings Window" value={settings.earnings_filter_days ?? 7} min={0}    max={30}              format={v => `${v} days`}                  onChange={v => set('earnings_filter_days', v)}
+          description="Screener: skip new puts on names reporting within this many days (0 = off). Weekly puts only — monthly always clears its whole expiry." />
         <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
           <TickerExcludeInput value={settings.excluded_tickers ?? []} onChange={v => set('excluded_tickers', v)} />
         </div>
@@ -1003,6 +1006,14 @@ export default function SettingsPage() {
 
       {/* Liquidity Filters */}
       <Section title="Liquidity Filters" emoji="💧">
+        <SliderRow
+          label="Trader Max Delta"
+          value={settings.trader_max_delta ?? 0.22}
+          min={0.15} max={0.30} step={0.01}
+          format={v => v.toFixed(2)}
+          onChange={v => set('trader_max_delta', v)}
+          description="At order time the live IBKR delta must be at or under this; above it the trader scans lower strikes. Kept a notch above the screener's Max Delta to allow for Monday-morning drift."
+        />
         <SliderRow
           label="Max Spread %"
           value={settings.max_spread_pct ?? 0.20}

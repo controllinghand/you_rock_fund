@@ -3918,6 +3918,7 @@ class SettingsUpdate(BaseModel):
     excluded_tickers:                  Optional[list[str]] = None
     compound_enabled:                  Optional[bool]  = None
     cash_account:                      Optional[bool]  = None
+    trader_max_delta:         Optional[float] = None
     max_spread_pct:           Optional[float] = None
     min_bid_yield_pct:        Optional[float] = None
     max_spread_hard_cap:      Optional[float] = None

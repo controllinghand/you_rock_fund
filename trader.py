@@ -21,7 +21,7 @@ MAX_SPREAD_HARD_CAP = 0.50  # fallback default — spread above this is always s
 MIN_OI_NOTIONAL     = 1_000_000  # fallback default — min open-interest notional (OI × strike × 100); settings.json overrides
 MIN_OI_FLOOR        = 10         # fallback default — absolute min contracts; rejects totally-dead strikes that math past the notional floor
 MIN_OI_ORDER_MULTIPLE = 5        # fallback default — OI ≥ N× the contracts being sold also passes the OI gate (0 = off)
-MAX_DELTA           = 0.21  # hard ceiling — never sell a CSP with abs(delta) above this
+MAX_DELTA           = 0.22  # fallback default — trader_max_delta: never sell a CSP with abs(live delta) above this
 MIN_DELTA           = 0.15  # floor — if live delta drops below this, scan upward for a better strike
 MONTHLY_MIN_DELTA   = 0.10  # monthly puts: never accept a scan result below this (no ~0-delta strikes)
 MONTHLY_MIN_OI_NOTIONAL = 250_000  # monthly puts: OI-notional floor (weekly keeps min_oi_notional, default $1M)
@@ -523,6 +523,18 @@ def _min_oi_notional(s: dict) -> float:
     return s.get("min_oi_notional", MIN_OI_NOTIONAL)
 
 
+def _max_delta() -> float:
+    """Execution-time delta ceiling (Settings → Liquidity Filters → Trader Max Delta).
+
+    Separate from the screener's Max Delta (0.21), which picks candidates from
+    Render's hourly deltas. This one re-checks the LIVE IBKR delta at order time
+    and allows a little Monday-morning drift: on 2026-09-28 SMMT's $12.50 put
+    screened at 0.21 and read 0.211 live, and a hard-coded 0.21 sent the scan
+    down into strikes with no open interest.
+    """
+    return float(get_settings().get("trader_max_delta", MAX_DELTA))
+
+
 def _oi_shortfall(oi: float, strike: float, contracts: int | None, s: dict) -> str | None:
     """The OI gate, shared by the strike scan and check_liquidity. None = pass.
 
@@ -588,16 +600,19 @@ def verify_and_adjust_strike(
     """
     Check live delta for screener_strike at execution time and adjust if needed.
 
-    - If abs(delta) > MAX_DELTA (stock fell since Saturday): scan downward for nearest
-      strike with delta ≤ MAX_DELTA.
+    - If abs(delta) > max delta (stock fell since Saturday): scan downward for nearest
+      strike with delta ≤ max delta.
     - If abs(delta) < MIN_DELTA (stock rose since Saturday): scan upward for highest
-      strike still within delta ≤ MAX_DELTA (maximises premium within the safe zone).
+      strike still within delta ≤ max delta (maximises premium within the safe zone).
+
+    Max delta is _max_delta() (the trader_max_delta setting), read once per call.
 
     Returns (qualified_contract, final_strike, orig_delta, final_delta, final_iv,
     was_adjusted) or None if qualification fails or no valid strike is found.
     final_iv is the chosen contract's implied vol at execution (may be None).
     """
     expiry = parse_expiry(expiry_str)
+    max_delta = _max_delta()
 
     # Qualify and delta-check the screener strike
     c = Option(ticker, expiry, screener_strike, "P", "SMART", currency="USD")
@@ -623,7 +638,7 @@ def verify_and_adjust_strike(
 
     orig_delta = live_delta
 
-    if MIN_DELTA <= abs(live_delta) <= MAX_DELTA:
+    if MIN_DELTA <= abs(live_delta) <= max_delta:
         log.info(f"  ✅ {ticker} delta OK: {live_delta:.3f} at ${screener_strike:.2f}")
         return c, screener_strike, orig_delta, live_delta, live_iv, False
 
@@ -682,7 +697,7 @@ def verify_and_adjust_strike(
                     raise GatewayUnavailable(f"{ticker} chain scan at ${alt_strike:.2f}: {e}") from e
                 continue
             alt = _probe_strike(ib, alt_c)
-            if alt.delta is None or abs(alt.delta) > MAX_DELTA:
+            if alt.delta is None or abs(alt.delta) > max_delta:
                 continue
             candidate = (alt_c, alt_strike, orig_delta, alt.delta, alt.iv, True)
             shortfall = _strike_shortfall(alt.oi, alt.bid, alt_strike, contracts)
@@ -702,9 +717,9 @@ def verify_and_adjust_strike(
                         f"liquidity gate decides")
         return delta_only
 
-    if abs(live_delta) > MAX_DELTA:
-        # Stock fell — scan downward for first strike with delta ≤ MAX_DELTA
-        log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} > {MAX_DELTA} "
+    if abs(live_delta) > max_delta:
+        # Stock fell — scan downward for first strike with delta ≤ max_delta
+        log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} > {max_delta} "
                     f"— scanning chain downward")
         below = []
         for ch in chains:
@@ -715,7 +730,7 @@ def verify_and_adjust_strike(
             return None
         result = _scan_strikes(sorted(set(below), reverse=True)[:10], "⬇️ ")
         if result is None:
-            log.error(f"  ❌ {ticker} — no valid strike found with delta ≤ {MAX_DELTA} — skipping")
+            log.error(f"  ❌ {ticker} — no valid strike found with delta ≤ {max_delta} — skipping")
         return result
 
     # abs(live_delta) < MIN_DELTA — stock rose, delta too low
@@ -1395,7 +1410,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 contracts=contracts,
             )
             if delta_result is None:
-                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {MAX_DELTA}, trying next")
+                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {_max_delta()}, trying next")
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 continue
 

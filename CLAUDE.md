@@ -258,6 +258,10 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   NOT a flat open-interest count — fairer to high-strike names. OR OI ≥ min_oi_order_multiple × the contracts
   being sold (default 5×, 0 = off) — so cheap names aren't held to a $300 stock's dollar floor. One rule
   (`trader._oi_shortfall`) serves both the strike scan and check_liquidity
+- TWO delta caps: Settings → Screener Filters → Max Delta (`max_delta`, 0.21) filters Render candidates;
+  Liquidity Filters → Trader Max Delta (`trader_max_delta`, 0.22) re-checks LIVE IBKR delta at order time
+  (`trader._max_delta`). Screener Max Delta / Min Buffer % / Earnings Window are live settings via
+  `screener._filters` (they were dead before v5.2.135)
 - EVERY put must pay min_bid_yield_pct (default 1%) of strike at the bid, whatever the spread (v5.2.135). Below
   it, a FOK limit at mid is tried only if mid clears it — never the bid, never market
 - Freed capital from share sales is added to that week's CSP deployment budget
