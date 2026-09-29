@@ -1,3 +1,11 @@
+## [5.2.136] — 2026-09-29
+
+### Removed
+- **The "Min Position" slider** (`min_position_size`). It saved to `settings.json`, but nothing read it: `position_sizer.py` has no minimum beyond one contract. Found by auditing every key in `settings_default.json` after v5.2.135 turned up three dead Screener Filters sliders. It is removed from Settings, Help, the README, the defaults file and the API model. A value already saved on a box is left in `settings.json` and ignored, as before.
+
+### Docs
+- Help and the README describe the v5.2.135 behavior: Max Delta is the screener cap, Trader Max Delta is new, Min Bid Yield applies to every put, the Earnings Window 0 = off, and there are rows for Min OI Notional and the OI order-size rule.
+
 ## [5.2.135] — 2026-09-29
 
 ### Fixed
