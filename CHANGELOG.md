@@ -1,3 +1,22 @@
+## [5.2.135] — 2026-09-29
+
+### Fixed
+- **A put could be written below the 1% minimum premium.** `min_bid_yield_pct` was only checked when the spread was wider than `max_spread_pct`. On 2026-09-28 (live box) no IONQ strike cleared delta, OI and yield, so the scan fell back to $42.50 at a **0.78%** bid yield. Its 19.4% spread was just under the 20% threshold, so nothing checked the yield, and it filled. Now every put must pay the minimum at the bid. If only the mid clears it, one fill-or-kill limit at mid is tried. Otherwise the put is skipped as `low_yield` and the next candidate is tried.
+- **The limit-only path no longer falls back to a fill-or-kill at the bid.** That path only runs when the bid pays less than the minimum, so a fill there wrote exactly the put the gate was refusing. This applies to wide spreads too.
+
+### Added
+- **"…or OI ≥ N× Order Size"** (`min_oi_order_multiple`, default **5×**, 0 = off) in Settings → Liquidity Filters. A strike now passes the open-interest check if it clears the notional floor **or** has at least N× the contracts being sold open. The $1M notional floor is ~40 contracts at a $250 strike but ~830 at $12. On 2026-09-28 the live box's #1 pick, **SMMT** (12 contracts, 4%+ premium), was skipped with 81 open at $12. The strike scan and the final gate share one rule (`_oi_shortfall`), so they can't disagree.
+- The Min Bid Yield % slider's description now says what it does: the minimum premium on every put.
+- **"Trader Max Delta"** (`trader_max_delta`, default **0.22**) in Settings → Liquidity Filters. The live IBKR delta at order time is now checked against this instead of a hard-coded 0.21. The screener's Max Delta (0.21) still picks candidates; this allows a notch of Monday-morning drift. On 2026-09-28 SMMT's $12.50 put screened at 0.21 and read **0.211** live, which sent the scan into lower strikes with no open interest.
+
+### Fixed (settings that did nothing)
+- **Settings → Screener Filters (Max Delta, Min Buffer %, Earnings Window) were never read.** They were saved to `settings.json`, but `screener.py` always used its constants (0.21 / 5% / 7 days). They now drive the screen: the delta and buffer filters, the client-side earnings check, and the `earnings_days_hide` sent to Render, for both new entries and `get_all_candidates`.
+
+### Notes
+- **A box where someone moved one of those three sliders will start using that value after this update.** YRVI live and the dev box both hold the defaults (0.21 / 0.05 / 7), so nothing changes there. Friend boxes can't be checked remotely.
+- New settings take their default from `settings_default.json` on every box after the update. No migration is needed. A box that saved `min_oi_notional` keeps its value; the order-size rule is layered on top.
+- Monthly puts keep their $250k notional floor. The order multiple applies there too.
+
 ## [5.2.134] — 2026-09-28
 
 ### Changed

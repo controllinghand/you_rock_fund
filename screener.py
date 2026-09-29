@@ -33,7 +33,7 @@ def _entry_params(settings: dict | None = None) -> tuple[dict, dict | None]:
     CSP-only box sells its holdings on Monday regardless of the screen.
     """
     if tenor.active(settings) != tenor.MONTHLY:
-        return PARAMS, None
+        return {**PARAMS, "earnings_days_hide": _filters(settings)[2]}, None
     cyc = tenor.cycle()
     return {**PARAMS, "min_target_premium_pct": 0,
             "earnings_days_hide": cyc["dte"] + 1, "earnings_recent_hide": 3}, cyc
@@ -80,11 +80,27 @@ MIN_BUFFER_PRIORITY = 0.10
 MIN_DAYS_TO_EXPIRY  = 3   # Mon→Fri = 3 UTC calendar days; 4 fails Monday execution
 EARNINGS_SAFE_DAYS  = 7
 
-def _earnings_safe(r: dict, horizon: int | None = None) -> tuple[bool, dict]:
+
+def _filters(settings: dict | None = None) -> tuple[float, float, int]:
+    """(max_delta, min_buffer_pct, earnings_window_days) from Settings → Screener
+    Filters, with the constants above as fallbacks. Until v5.2.135 those three
+    sliders were saved to settings.json but never read — the screen always used
+    the constants."""
+    if settings is None:
+        from config import get_settings
+        settings = get_settings()
+    return (float(settings.get("max_delta", MAX_DELTA)),
+            float(settings.get("min_buffer_pct", MIN_BUFFER_PCT)),
+            int(settings.get("earnings_filter_days", EARNINGS_SAFE_DAYS)))
+
+
+def _earnings_safe(r: dict, horizon: int | None = None,
+                   window: int = EARNINGS_SAFE_DAYS) -> tuple[bool, dict]:
     """
     Returns (is_safe, row). Earnings filtering is handled server-side via
     earnings_days_hide param; treat missing/unknown values as safe.
-    Past earnings (days < 0) are safe. Within EARNINGS_SAFE_DAYS is not.
+    Past earnings (days < 0) are safe. Within `window` days (the Earnings Window
+    setting; 0 = off) is not.
 
     horizon (monthly puts): the put's days to expiry. A report anywhere from 3 days
     ago through expiry is unsafe, and an UNKNOWN date fails closed: a month-long
@@ -95,7 +111,7 @@ def _earnings_safe(r: dict, horizon: int | None = None) -> tuple[bool, dict]:
         return horizon is None, r
     if horizon is not None:
         return not (-3 <= dte_e <= horizon), r
-    if 0 <= dte_e < EARNINGS_SAFE_DAYS:
+    if 0 <= dte_e < window:
         return False, r
     return True, r
 
@@ -126,6 +142,7 @@ def get_top_targets(n=5, always_include: set = None):
     _warm_up()
     from config import get_settings
     settings = get_settings()
+    max_delta, min_buffer, earnings_window = _filters(settings)
     params, monthly = _entry_params(settings)
     if monthly:
         print(f"🌙 Monthly puts: next expiry {monthly['next_expiry']} ({monthly['dte']} days) — "
@@ -162,24 +179,25 @@ def get_top_targets(n=5, always_include: set = None):
     rows = [r for r in rows if days_to_expiry(r) >= MIN_DAYS_TO_EXPIRY]
     print(f"📅 {len(rows)} passed expiry filter (removed {before - len(rows)} expiring too soon)")
 
-    # ── Filters 3–4: weekly strike delta ≤ 0.21 and buffer ≥ 5% ─────
+    # ── Filters 3–4: weekly strike delta ≤ Max Delta and buffer ≥ Min Buffer ─────
     # Both describe the WEEKLY put. Monthly re-picks the strike on its own chain,
     # so they'd only drop names for a strike that will never be traded.
     for r in rows:
         r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
     if not monthly:
         before = len(rows)
-        rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= MAX_DELTA]
-        print(f"📐 {len(rows)} passed delta filter (removed {before - len(rows)})")
+        rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= max_delta]
+        print(f"📐 {len(rows)} passed delta filter ≤ {max_delta:.2f} (removed {before - len(rows)})")
         before = len(rows)
-        rows = [r for r in rows if r["_buffer_pct"] >= MIN_BUFFER_PCT]
+        rows = [r for r in rows if r["_buffer_pct"] >= min_buffer]
         print(f"🛡️  {len(rows)} passed buffer filter (removed {before - len(rows)})")
 
     # ── Filter 5: earnings safety (fallback lookup for None/"?") ──
     before = len(rows)
     safe_rows = []
     for r in rows:
-        is_safe, r = _earnings_safe(r, horizon=monthly["dte"] if monthly else None)
+        is_safe, r = _earnings_safe(r, horizon=monthly["dte"] if monthly else None,
+                                    window=earnings_window)
         if is_safe:
             safe_rows.append(r)
         else:
@@ -261,8 +279,9 @@ def get_all_candidates(ignore_earnings_filter=False, market_cap_min=None,
     0.21) or buffer miss. Used by wheel_manager/risk_manager for held-position checks;
     mirrors the market_cap_min retention override above.
     """
+    max_delta, min_buffer, earnings_window = _filters()
     try:
-        params = dict(PARAMS)
+        params = {**PARAMS, "earnings_days_hide": earnings_window}
         if ignore_earnings_filter:
             params["earnings_days_hide"] = 0
         if market_cap_min is not None:
@@ -290,15 +309,15 @@ def get_all_candidates(ignore_earnings_filter=False, market_cap_min=None,
 
     # Entry-only strike-selection filters: skipped in retention mode (see docstring).
     if not retention:
-        rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= MAX_DELTA]
+        rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= max_delta]
         for r in rows:
             r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
-        rows = [r for r in rows if r["_buffer_pct"] >= MIN_BUFFER_PCT]
+        rows = [r for r in rows if r["_buffer_pct"] >= min_buffer]
 
     if not ignore_earnings_filter:
         safe_rows = []
         for r in rows:
-            is_safe, r = _earnings_safe(r)
+            is_safe, r = _earnings_safe(r, window=earnings_window)
             if is_safe:
                 safe_rows.append(r)
         rows = safe_rows

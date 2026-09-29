@@ -3918,12 +3918,14 @@ class SettingsUpdate(BaseModel):
     excluded_tickers:                  Optional[list[str]] = None
     compound_enabled:                  Optional[bool]  = None
     cash_account:                      Optional[bool]  = None
+    trader_max_delta:         Optional[float] = None
     max_spread_pct:           Optional[float] = None
     min_bid_yield_pct:        Optional[float] = None
     max_spread_hard_cap:      Optional[float] = None
     min_oi_notional:          Optional[float] = None
     min_oi_floor:             Optional[int]   = None
-    dry_run:                  Optional[bool]  = None
+    min_oi_order_multiple:    Optional[float] = None
+    dry_run:                 Optional[bool]  = None
     ibkr_port:                Optional[int]   = None
     discord_webhook_enabled:       Optional[bool]  = None
     trading_mode:                  Optional[str]   = None

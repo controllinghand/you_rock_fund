@@ -20,7 +20,8 @@ MIN_BID_YIELD_PCT   = 0.01  # fallback default — bid yield threshold to procee
 MAX_SPREAD_HARD_CAP = 0.50  # fallback default — spread above this is always skipped
 MIN_OI_NOTIONAL     = 1_000_000  # fallback default — min open-interest notional (OI × strike × 100); settings.json overrides
 MIN_OI_FLOOR        = 10         # fallback default — absolute min contracts; rejects totally-dead strikes that math past the notional floor
-MAX_DELTA           = 0.21  # hard ceiling — never sell a CSP with abs(delta) above this
+MIN_OI_ORDER_MULTIPLE = 5        # fallback default — OI ≥ N× the contracts being sold also passes the OI gate (0 = off)
+MAX_DELTA           = 0.22  # fallback default — trader_max_delta: never sell a CSP with abs(live delta) above this
 MIN_DELTA           = 0.15  # floor — if live delta drops below this, scan upward for a better strike
 MONTHLY_MIN_DELTA   = 0.10  # monthly puts: never accept a scan result below this (no ~0-delta strikes)
 MONTHLY_MIN_OI_NOTIONAL = 250_000  # monthly puts: OI-notional floor (weekly keeps min_oi_notional, default $1M)
@@ -522,11 +523,50 @@ def _min_oi_notional(s: dict) -> float:
     return s.get("min_oi_notional", MIN_OI_NOTIONAL)
 
 
-def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str | None:
+def _max_delta() -> float:
+    """Execution-time delta ceiling (Settings → Liquidity Filters → Trader Max Delta).
+
+    Separate from the screener's Max Delta (0.21), which picks candidates from
+    Render's hourly deltas. This one re-checks the LIVE IBKR delta at order time
+    and allows a little Monday-morning drift: on 2026-09-28 SMMT's $12.50 put
+    screened at 0.21 and read 0.211 live, and a hard-coded 0.21 sent the scan
+    down into strikes with no open interest.
+    """
+    return float(get_settings().get("trader_max_delta", MAX_DELTA))
+
+
+def _oi_shortfall(oi: float, strike: float, contracts: int | None, s: dict) -> str | None:
+    """The OI gate, shared by the strike scan and check_liquidity. None = pass.
+
+    Passes when OI clears the absolute floor AND either the notional floor
+    (OI × strike × 100) or min_oi_order_multiple × the contracts being sold.
+
+    The order multiple exists because a notional floor swings unfair the other
+    way on cheap names: $1M is ~40 contracts at a $250 strike but ~830 at $12.
+    On 2026-09-28 the live box's #1 pick, SMMT (12 contracts), was skipped with
+    81 open at $12 — an order a sixth of the open interest — and IONQ was
+    written at 0.78% instead.
+    """
+    if oi < s.get("min_oi_floor", MIN_OI_FLOOR):
+        return f"OI {oi:.0f} below floor"
+    notional = oi * strike * 100
+    if notional >= _min_oi_notional(s):
+        return None
+    multiple = float(s.get("min_oi_order_multiple", MIN_OI_ORDER_MULTIPLE) or 0)
+    if multiple > 0 and contracts and oi >= multiple * contracts:
+        return None
+    reason = f"OI {oi:.0f} = ${notional:,.0f} notional"
+    if multiple > 0 and contracts:
+        reason += f", < {multiple:g}× {contracts} contracts"
+    return reason
+
+
+def _strike_shortfall(oi: float | None, bid: float | None, strike: float,
+                      contracts: int | None = None) -> str | None:
     """Is this strike worth writing? Returns None if yes, else a short reason.
 
     Two tests, both mirroring thresholds the rest of the system already uses:
-      - OI notional (OI × strike × 100) against min_oi_notional / min_oi_floor,
+      - open interest via _oi_shortfall (notional floor or order multiple),
         the same gate check_liquidity applies at the end of the funnel
       - bid yield (bid / strike) against min_bid_yield_pct — the fund's 1% bar
 
@@ -543,11 +583,9 @@ def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str
     """
     s = get_settings()
     if oi is not None:
-        if oi < s.get("min_oi_floor", MIN_OI_FLOOR):
-            return f"OI {oi:.0f} below floor"
-        notional = oi * strike * 100
-        if notional < _min_oi_notional(s):
-            return f"OI {oi:.0f} = ${notional:,.0f} notional"
+        oi_short = _oi_shortfall(oi, strike, contracts, s)
+        if oi_short:
+            return oi_short
     if bid is not None:
         yld = bid / strike if strike > 0 else 0
         if yld < s.get("min_bid_yield_pct", MIN_BID_YIELD_PCT):
@@ -557,21 +595,24 @@ def _strike_shortfall(oi: float | None, bid: float | None, strike: float) -> str
 
 def verify_and_adjust_strike(
         ib: IB, ticker: str, screener_strike: float,
-        expiry_str: str, screener_delta: float,
+        expiry_str: str, screener_delta: float, contracts: int | None = None,
 ) -> tuple | None:
     """
     Check live delta for screener_strike at execution time and adjust if needed.
 
-    - If abs(delta) > MAX_DELTA (stock fell since Saturday): scan downward for nearest
-      strike with delta ≤ MAX_DELTA.
+    - If abs(delta) > max delta (stock fell since Saturday): scan downward for nearest
+      strike with delta ≤ max delta.
     - If abs(delta) < MIN_DELTA (stock rose since Saturday): scan upward for highest
-      strike still within delta ≤ MAX_DELTA (maximises premium within the safe zone).
+      strike still within delta ≤ max delta (maximises premium within the safe zone).
+
+    Max delta is _max_delta() (the trader_max_delta setting), read once per call.
 
     Returns (qualified_contract, final_strike, orig_delta, final_delta, final_iv,
     was_adjusted) or None if qualification fails or no valid strike is found.
     final_iv is the chosen contract's implied vol at execution (may be None).
     """
     expiry = parse_expiry(expiry_str)
+    max_delta = _max_delta()
 
     # Qualify and delta-check the screener strike
     c = Option(ticker, expiry, screener_strike, "P", "SMART", currency="USD")
@@ -597,7 +638,7 @@ def verify_and_adjust_strike(
 
     orig_delta = live_delta
 
-    if MIN_DELTA <= abs(live_delta) <= MAX_DELTA:
+    if MIN_DELTA <= abs(live_delta) <= max_delta:
         log.info(f"  ✅ {ticker} delta OK: {live_delta:.3f} at ${screener_strike:.2f}")
         return c, screener_strike, orig_delta, live_delta, live_iv, False
 
@@ -656,10 +697,10 @@ def verify_and_adjust_strike(
                     raise GatewayUnavailable(f"{ticker} chain scan at ${alt_strike:.2f}: {e}") from e
                 continue
             alt = _probe_strike(ib, alt_c)
-            if alt.delta is None or abs(alt.delta) > MAX_DELTA:
+            if alt.delta is None or abs(alt.delta) > max_delta:
                 continue
             candidate = (alt_c, alt_strike, orig_delta, alt.delta, alt.iv, True)
-            shortfall = _strike_shortfall(alt.oi, alt.bid, alt_strike)
+            shortfall = _strike_shortfall(alt.oi, alt.bid, alt_strike, contracts)
             if shortfall is None:
                 log.warning(f"  {label} {ticker} strike adjusted ${screener_strike:.2f} → "
                             f"${alt_strike:.2f} (delta {orig_delta:.3f} → {alt.delta:.3f}"
@@ -676,9 +717,9 @@ def verify_and_adjust_strike(
                         f"liquidity gate decides")
         return delta_only
 
-    if abs(live_delta) > MAX_DELTA:
-        # Stock fell — scan downward for first strike with delta ≤ MAX_DELTA
-        log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} > {MAX_DELTA} "
+    if abs(live_delta) > max_delta:
+        # Stock fell — scan downward for first strike with delta ≤ max_delta
+        log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} > {max_delta} "
                     f"— scanning chain downward")
         below = []
         for ch in chains:
@@ -689,7 +730,7 @@ def verify_and_adjust_strike(
             return None
         result = _scan_strikes(sorted(set(below), reverse=True)[:10], "⬇️ ")
         if result is None:
-            log.error(f"  ❌ {ticker} — no valid strike found with delta ≤ {MAX_DELTA} — skipping")
+            log.error(f"  ❌ {ticker} — no valid strike found with delta ≤ {max_delta} — skipping")
         return result
 
     # abs(live_delta) < MIN_DELTA — stock rose, delta too low
@@ -834,15 +875,23 @@ def get_market_data(ib: IB, contract, screener_premium: float,
     }
 
 
-def check_liquidity(mkt: dict, ticker: str) -> dict | None:
+def check_liquidity(mkt: dict, ticker: str, contracts: int | None = None) -> dict | None:
     """Returns None if liquidity is OK, else a skip-info dict with reason details.
 
     Wide-spread handling (spread > max_spread_pct):
       - bid_yield ≥ min_bid_yield_pct → proceed using bid as the limit price
       - else if spread > max_spread_hard_cap → skip as spread_illiquid
-      - else if mid_yield ≥ min_bid_yield_pct → try_limit_only (FOK mid → FOK bid,
+      - else if mid_yield ≥ min_bid_yield_pct → try_limit_only (FOK at mid,
         no market fallback; see place_order_with_escalation)
       - else → skip as spread_low_yield
+
+    Normal spreads get the same yield floor: bid_yield below min_bid_yield_pct
+    goes limit-only at mid when mid qualifies, else skips as low_yield. Until
+    v5.2.135 a normal spread skipped the yield test entirely, so on 2026-09-28
+    the scan's delta-only fallback wrote IONQ at 0.78% (19.4% spread, 0.6 pt
+    under the wide threshold).
+
+    Open interest goes through _oi_shortfall (notional floor or order multiple).
 
     Thresholds hot-reload from settings.json on every call; the module-level
     constants are fallbacks if a setting is missing.
@@ -875,7 +924,7 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
         elif mid_yield >= min_bid_yield:
             log.info(f"⚠️  {ticker} bid yield {bid_yield*100:.2f}% < {min_bid_yield*100:.2f}% "
                      f"but mid yield {mid_yield*100:.2f}% qualifies — trying limit only")
-            # FOK mid → FOK bid; no market fallback (see place_order_with_escalation)
+            # FOK at mid; no market fallback (see place_order_with_escalation)
             mkt["try_limit_only"]       = True
             mkt["max_spread_pct"]       = max_spread
             mkt["min_bid_yield_pct"]    = min_bid_yield
@@ -887,22 +936,41 @@ def check_liquidity(mkt: dict, ticker: str) -> dict | None:
                     "spread_pct": spread_pct, "bid_yield": bid_yield, "mid_yield": mid_yield,
                     "max_spread_pct": max_spread, "min_bid_yield_pct": min_bid_yield,
                     "max_spread_hard_cap": hard_cap}
+    elif bid_yield < min_bid_yield:
+        if mid_yield >= min_bid_yield:
+            log.info(f"⚠️  {ticker} bid yield {bid_yield*100:.2f}% < {min_bid_yield*100:.2f}% "
+                     f"but mid yield {mid_yield*100:.2f}% qualifies — trying limit only")
+            mkt["try_limit_only"]       = True
+            mkt["max_spread_pct"]       = max_spread
+            mkt["min_bid_yield_pct"]    = min_bid_yield
+            mkt["max_spread_hard_cap"]  = hard_cap
+        else:
+            log.warning(f"⚠️  {ticker} premium too low: bid yield {bid_yield*100:.2f}% "
+                        f"and mid yield {mid_yield*100:.2f}% < {min_bid_yield*100:.2f}% — skipping")
+            return {"reason": "low_yield",
+                    "spread_pct": spread_pct, "bid_yield": bid_yield, "mid_yield": mid_yield,
+                    "max_spread_pct": max_spread, "min_bid_yield_pct": min_bid_yield,
+                    "max_spread_hard_cap": hard_cap}
 
-    # Open-interest gate: use notional (OI × strike × 100), not a flat contract
-    # count. A flat count penalises high-strike underlyings — the same dollar
-    # liquidity shows fewer contracts on a $300 name than a $30 one. The notional
-    # floor is price-neutral; a tiny absolute floor still kills dead strikes.
+    # Open-interest gate: notional (OI × strike × 100) or an order multiple —
+    # see _oi_shortfall. A tiny absolute floor still kills dead strikes.
     oi              = mkt["open_interest"]
     strike          = mkt.get("strike", 0)
     oi_notional     = oi * strike * 100
     min_oi_notional = _min_oi_notional(s)
     min_oi_floor    = s.get("min_oi_floor",    MIN_OI_FLOOR)
-    if oi < min_oi_floor or oi_notional < min_oi_notional:
-        log.warning(f"⚠️  {ticker} open interest too thin: OI {oi:.0f} "
-                    f"(${oi_notional:,.0f} notional) < ${min_oi_notional:,.0f} floor — skipping")
+    oi_multiple     = float(s.get("min_oi_order_multiple", MIN_OI_ORDER_MULTIPLE) or 0)
+    oi_short        = _oi_shortfall(oi, strike, contracts, s)
+    if oi_short:
+        log.warning(f"⚠️  {ticker} open interest too thin: {oi_short} "
+                    f"(floor ${min_oi_notional:,.0f}) — skipping")
         return {"reason": "oi",
                 "open_interest": oi, "oi_notional": oi_notional,
-                "min_oi_notional": min_oi_notional, "min_oi_floor": min_oi_floor}
+                "min_oi_notional": min_oi_notional, "min_oi_floor": min_oi_floor,
+                "min_oi_order_multiple": oi_multiple, "contracts": contracts}
+    if oi_notional < min_oi_notional:
+        log.info(f"  {ticker} OI {oi:.0f} (${oi_notional:,.0f} notional) under the "
+                 f"${min_oi_notional:,.0f} floor but ≥ {oi_multiple:g}× {contracts} contracts — proceeding")
     return None
 
 
@@ -1099,13 +1167,15 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
         return False
 
     if mkt.get("try_limit_only"):
-        # Limit-only path: FOK at mid, then FOK at bid. No market fallback.
+        # Limit-only path: FOK at mid. No bid leg — this path only exists because
+        # the bid pays less than min_bid_yield_pct, so filling there would write
+        # exactly the sub-minimum put the gate is refusing. No market fallback.
         if try_limit_fok(mkt["mid"], "limit_mid"): return result
-        if try_limit_fok(mkt["bid"], "limit_bid"): return result
         log.warning(f"  ⚠️  {ticker} — limit-only path failed (mid yield qualified but no fill) — skipping")
+        wide = (mkt.get("spread_pct") or 0) > (mkt.get("max_spread_pct") or MAX_SPREAD_PCT)
         result.update({
             "status":              "skipped_liquidity",
-            "reason":              "spread_low_yield_unfilled",
+            "reason":              "spread_low_yield_unfilled" if wide else "low_yield_unfilled",
             "spread_pct":          mkt.get("spread_pct"),
             "bid_yield":           mkt.get("bid_yield"),
             "mid_yield":           mkt.get("mid_yield"),
@@ -1336,10 +1406,11 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 screener_delta = -1.0
             # Verify delta at execution time — auto-adjust if stock moved since Saturday
             delta_result = verify_and_adjust_strike(
-                ib, ticker, strike, expiry, screener_delta=screener_delta
+                ib, ticker, strike, expiry, screener_delta=screener_delta,
+                contracts=contracts,
             )
             if delta_result is None:
-                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {MAX_DELTA}, trying next")
+                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {_max_delta()}, trying next")
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 continue
 
@@ -1465,7 +1536,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "failed_market_data"})
                 continue
 
-            skip_info = check_liquidity(mkt, ticker)
+            skip_info = check_liquidity(mkt, ticker, contracts)
             if skip_info:
                 log.info(f"  🔄 {ticker} — failed liquidity, trying next candidate")
                 results.append({"ticker": ticker, "status": "skipped_liquidity", **skip_info})
