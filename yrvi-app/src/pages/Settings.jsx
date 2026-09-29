@@ -635,7 +635,7 @@ export default function SettingsPage() {
     wheel_allow_add_to_position: false,
     wheel_stop_loss_enabled: true, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
     max_spread_pct: 0.20, min_bid_yield_pct: 0.01, max_spread_hard_cap: 0.50,
-    min_oi_notional: 1000000, excluded_tickers: [],
+    min_oi_notional: 1000000, min_oi_order_multiple: 5, excluded_tickers: [],
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
     auto_update_enabled: false, show_verse_of_the_day: true,
@@ -1017,7 +1017,7 @@ export default function SettingsPage() {
           min={0.005} max={0.03} step={0.0025}
           format={v => `${(v * 100).toFixed(2)}%`}
           onChange={v => set('min_bid_yield_pct', v)}
-          description="Override spread filter if bid yield meets this threshold"
+          description="Minimum premium on every put (bid ÷ strike). Below it, a limit at mid is tried only if mid clears it; otherwise the put is skipped. Also lets a wide spread proceed at the bid."
         />
         <SliderRow
           label="Max Spread Hard Cap %"
@@ -1033,7 +1033,17 @@ export default function SettingsPage() {
           min={250000} max={5000000} step={250000}
           format={v => `$${(v / 1e6).toFixed(2)}M`}
           onChange={v => set('min_oi_notional', v)}
-          description="Skip if open-interest notional (OI × strike × 100) is below this — price-neutral liquidity floor, fairer to high-strike names than a flat contract count"
+          description="Skip if open-interest notional (OI × strike × 100) is below this — unless the order-size rule below passes"
+        />
+        <SliderRow
+          label="…or OI ≥ N× Order Size"
+          value={settings.min_oi_order_multiple ?? 5}
+          min={0} max={20} step={1}
+          format={v => (v > 0 ? `${v}×` : 'Off')}
+          onChange={v => set('min_oi_order_multiple', v)}
+          description={(settings.min_oi_order_multiple ?? 5) > 0
+            ? `Also pass when open interest is at least ${settings.min_oi_order_multiple ?? 5}× the contracts being sold — so cheap names aren't held to the same dollar floor as $300 stocks`
+            : 'Off — only the notional floor applies'}
         />
       </Section>
 

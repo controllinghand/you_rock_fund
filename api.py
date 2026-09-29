@@ -3923,7 +3923,8 @@ class SettingsUpdate(BaseModel):
     max_spread_hard_cap:      Optional[float] = None
     min_oi_notional:          Optional[float] = None
     min_oi_floor:             Optional[int]   = None
-    dry_run:                  Optional[bool]  = None
+    min_oi_order_multiple:    Optional[float] = None
+    dry_run:                 Optional[bool]  = None
     ibkr_port:                Optional[int]   = None
     discord_webhook_enabled:       Optional[bool]  = None
     trading_mode:                  Optional[str]   = None

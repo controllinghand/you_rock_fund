@@ -22,6 +22,7 @@
   "max_spread_hard_cap": 0.50,
   "min_oi_notional": 1000000,
   "min_oi_floor": 10,
+  "min_oi_order_multiple": 5,
   "dry_run": false,
   "ibkr_port": 4002,
   "ibkr_connect_deadline_sec": 1800,

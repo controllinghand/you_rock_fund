@@ -229,6 +229,12 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
                         label = f"skipped — open interest too thin (OI {oi:.0f})"
                     else:
                         label = "skipped — open interest too thin"
+                elif reason == "low_yield":
+                    by = ex.get("bid_yield")
+                    label = ("skipped — premium below minimum"
+                             + (f" ({by*100:.2f}% bid yield)" if by is not None else ""))
+                elif reason == "low_yield_unfilled":
+                    label = "skipped — premium below minimum, limit at mid unfilled"
                 elif ex.get("spread_pct") is not None:
                     if reason == "spread_illiquid":
                         label = f"skipped — spread too wide (illiquid) ({ex['spread_pct']*100:.1f}%)"
@@ -270,11 +276,18 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
             footnotes.append(
                 "* Spread too wide, limit unfilled = mid yield qualified but no fill at limit price"
             )
+        if "low_yield" in reasons or "low_yield_unfilled" in reasons:
+            footnotes.append(
+                f"* Premium below minimum = bid yield < {min_bid_yield*100:.2f}% of strike "
+                f"(a limit at mid is tried when mid clears it)"
+            )
         if "oi" in reasons:
             sample_oi       = next((ex for ex in skip_exs if ex.get("min_oi_notional") is not None), {})
             min_oi_notional = sample_oi.get("min_oi_notional", 1_000_000)
+            oi_multiple     = sample_oi.get("min_oi_order_multiple") or 0
             footnotes.append(
-                f"* Open interest too thin = OI × strike × 100 < ${min_oi_notional:,.0f} notional (price-neutral liquidity floor)"
+                f"* Open interest too thin = OI × strike × 100 < ${min_oi_notional:,.0f} notional"
+                + (f" AND OI < {oi_multiple:g}× the contracts being sold" if oi_multiple else "")
             )
     if "skipped_contract_size" in statuses:
         footnotes.append(f"* Contract too large = single contract exceeds ${MAX_PER_POSITION:,.0f} max position size")
