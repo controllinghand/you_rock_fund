@@ -626,7 +626,7 @@ export default function SettingsPage() {
   }, [unsaved, setDirty])
 
   const DEFAULTS = {
-    fund_budget: 250000, goal_pct: 0.24, num_positions: 5, min_position_size: 10000,
+    fund_budget: 250000, goal_pct: 0.24, num_positions: 5,
     max_position_size: 70000, max_delta: 0.21, min_buffer_pct: 0.05,
     earnings_filter_days: 7, wheel_cc_ignore_earnings_filter: true,
     wheel_retention_market_cap_min: 5000000000,
@@ -849,7 +849,6 @@ export default function SettingsPage() {
           </div>
         )}
         <SliderRow label="# Positions"  value={settings.num_positions}    min={1}      max={10}                  format={v => `${v} positions`}           onChange={v => set('num_positions', v)} />
-        <SliderRow label="Min Position" value={settings.min_position_size} min={5000}  max={100000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('min_position_size', v)} />
         <SliderRow label="Max Position" value={settings.max_position_size} min={10000} max={200000}  step={5000}  format={v => `$${v.toLocaleString()}`} onChange={v => set('max_position_size', v)} />
         {settings.compound_enabled !== false && (
           <p className="mt-1 text-xs text-amber-500 dark:text-amber-400">Max Position ignored in compound mode — each slot is sized by net balance ÷ # positions.</p>

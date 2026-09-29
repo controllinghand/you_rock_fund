@@ -121,7 +121,6 @@ const SETTINGS_GROUPS = [
     items: [
       { label: 'Initial Fund Budget', default: '$250,000', range: '$10K – $2M',   description: 'Starting capital for CSP deployment. When Compound Weekly is off, this is always the deployment base.' },
       { label: '# Positions',         default: '5',        range: '1 – 10',        description: 'Target number of CSP positions to fill each Monday.' },
-      { label: 'Min Position',        default: '$10,000',  range: '$5K – $100K',   description: 'Minimum capital allocated to any single CSP position.' },
       { label: 'Max Position',        default: '$90,000',  range: '$10K – $200K',  description: 'Maximum capital for any single position. The last position absorbs remaining budget up to this cap.' },
       { label: 'Compound Weekly',     default: 'On',       range: 'On / Off',      description: 'When on, uses your IBKR net liquidation as the Monday deployment budget so the fund grows as premiums accumulate. When off, always deploys the fixed initial budget.' },
     ],
@@ -129,9 +128,9 @@ const SETTINGS_GROUPS = [
   {
     title: 'Screener Filters',
     items: [
-      { label: 'Max Delta',                          default: '0.21',  range: '0.10 – 0.30', description: 'Maximum absolute delta for CSPs sold. Higher = more aggressive strike selection and more premium, but more assignment risk.' },
+      { label: 'Max Delta',                          default: '0.21',  range: '0.10 – 0.30', description: 'Screener: only pick puts whose 20-delta strike is at or under this. Higher = more aggressive strikes and more premium, but more assignment risk. The live re-check at order time is Trader Max Delta.' },
       { label: 'Min Buffer %',                       default: '5%',    range: '3% – 20%',    description: 'The strike must be at least this far below the current stock price. Higher = more downside cushion.' },
-      { label: 'Earnings Filter',                    default: '7 days', range: '0 – 30 days', description: 'Skip tickers with earnings within this many days. Protects against earnings-driven moves.' },
+      { label: 'Earnings Filter',                    default: '7 days', range: '0 – 30 days', description: 'Skip new weekly puts on tickers reporting within this many days (0 = off). Monthly puts always clear their whole expiry.' },
       { label: 'Ignore Earnings Filter for Wheel CCs', default: 'Off', range: 'On / Off',    description: 'When on, covered calls are still sold on held positions even during earnings weeks. Has no effect on new CSP entries.' },
       { label: 'Stop Loss on Wheel Holdings',        default: 'Off',   range: 'On / Off',    description: 'When on, a holding is sold on Monday if its price has fallen more than the Stop Loss % below its assigned strike. The screener exit (dropping off the IV screener) is the primary exit — this is an optional additional layer.' },
       { label: 'Stop Loss %',                        default: '10%',   range: '0% – 50%',    description: 'How far below the assigned strike triggers a stop loss sale. Only applies when Stop Loss on Wheel Holdings is enabled.' },
@@ -140,9 +139,12 @@ const SETTINGS_GROUPS = [
   {
     title: 'Liquidity Filters',
     items: [
+      { label: 'Trader Max Delta',     default: '0.22', range: '0.15 – 0.30', description: 'At order time the live IBKR delta must be at or under this; above it the trader scans lower strikes. A notch above the screener Max Delta to allow for Monday-morning drift.' },
       { label: 'Max Spread %',         default: '20%', range: '5% – 50%',    description: 'Skip a CSP if the bid/ask spread exceeds this percentage of the mid price. Protects against poor fills on illiquid options.' },
-      { label: 'Min Bid Yield %',      default: '1%',  range: '0.5% – 3%',   description: 'Override the spread filter if the bid yield meets this threshold — useful when wide spreads are justified by high premium.' },
+      { label: 'Min Bid Yield %',      default: '1%',  range: '0.5% – 3%',   description: 'Minimum premium on every put (bid ÷ strike). Below it, a limit at mid is tried only if mid clears it; otherwise the put is skipped. Also lets a wide spread proceed at the bid.' },
       { label: 'Max Spread Hard Cap %', default: '50%', range: '25% – 100%', description: 'Always skip regardless of yield if spread exceeds this. An absolute ceiling that cannot be overridden by bid yield.' },
+      { label: 'Min OI Notional',      default: '$1.0M', range: '$0.25M – $5.0M', description: 'Skip if open interest × strike × 100 is below this, unless the order-size rule below passes. Monthly puts use $250k.' },
+      { label: '…or OI ≥ N× Order Size', default: '5×', range: 'Off – 20×',  description: 'Also pass when open interest is at least N× the contracts being sold, so cheap names are not held to the dollar floor of a $300 stock.' },
     ],
   },
   {

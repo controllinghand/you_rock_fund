@@ -1,7 +1,6 @@
 {
   "fund_budget": 250000,
   "num_positions": 5,
-  "min_position_size": 10000,
   "max_position_size": 70000,
   "max_delta": 0.21,
   "min_buffer_pct": 0.05,

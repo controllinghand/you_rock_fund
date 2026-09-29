@@ -430,7 +430,6 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 |---------|---------|-------|-------------|
 | Initial Fund Budget | $250,000 | $10K – $2M | Starting capital for CSP deployment. When Compound Weekly is off, this is always the deployment base. |
 | # Positions | 5 | 1 – 10 | Target number of CSP positions to fill each Monday. |
-| Min Position | $10,000 | $5K – $100K | Minimum capital allocated to any single CSP position. |
 | Max Position | $70,000 | $10K – $200K | Maximum capital for any single position. The last position absorbs remaining budget up to this cap. |
 | Compound Weekly | On | On / Off | When on, uses IBKR net liquidation as the Monday deployment budget so the fund grows as premiums accumulate. Falls back to Initial Fund Budget if IBKR is unreachable. |
 
@@ -438,9 +437,9 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
-| Max Delta | 0.21 | 0.10 – 0.30 | Maximum absolute delta for CSPs sold. Higher = more aggressive strikes and more premium, but more assignment risk. |
+| Max Delta | 0.21 | 0.10 – 0.30 | Screener: only pick puts whose 20-delta strike is at or under this. Higher = more aggressive strikes and more premium, but more assignment risk. The live re-check at order time is Trader Max Delta. |
 | Min Buffer % | 5% | 3% – 20% | The strike must be at least this far below the current stock price. Higher = more downside cushion. |
-| Earnings Window | 7 days | 0 – 30 days | Skip new CSP entries on tickers with earnings within this many days. Protects against earnings-driven gap moves. |
+| Earnings Window | 7 days | 0 – 30 days | Skip new weekly CSP entries on tickers with earnings within this many days (0 = off). Monthly puts always clear their whole expiry. |
 | Ignore Earnings for Wheel CCs | **On** | On / Off | On (default): held positions are kept through earnings and the covered call is still written. Off: shares are sold before earnings to dodge the gap. No effect on new CSP entries. |
 | Wheel Retention Mkt Cap | $5.0B | $1.0B – $10.0B | Keep wheeling a held name down to this market cap, even if below the 10B entry floor — sell only if it falls further. New CSP entries still use the 10B entry floor. |
 | Sell Shares Instead of Below-Cost CC | Off | On / Off | Off (default): an underwater holding with no covered call at/above cost writes a ~20-delta call below cost (keeps shares + premium). On: force-sell those shares at market instead (the old behavior). |
@@ -451,10 +450,12 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
+| Trader Max Delta | 0.22 | 0.15 – 0.30 | At order time the live IBKR delta must be at or under this; above it the trader scans lower strikes. A notch above the screener Max Delta to allow for Monday-morning drift. |
 | Max Spread % | 20% | 5% – 50% | Skip a CSP if the bid/ask spread exceeds this percentage of the mid price. Protects against poor fills on illiquid options. |
-| Min Bid Yield % | 1% | 0.5% – 3% | Override the spread filter if the bid yield meets this threshold — useful when wide spreads are justified by high premium. |
+| Min Bid Yield % | 1% | 0.5% – 3% | Minimum premium on every put (bid ÷ strike). Below it, a FOK limit at mid is tried only if mid clears it; otherwise the put is skipped. Also lets a wide spread proceed at the bid. |
 | Max Spread Hard Cap % | 50% | 25% – 100% | Always skip regardless of yield if spread exceeds this. An absolute ceiling that cannot be overridden by bid yield. |
 | Min OI Notional | $1.0M | $0.25M – $5.0M | Skip if the option's open-interest notional (open interest × strike × 100) is below this. A price-neutral liquidity floor that replaced the old flat "open interest ≥ 100" count, which unfairly penalized high-strike names (the same dollar liquidity shows fewer contracts on a $300 stock than a $30 one). A small absolute floor (10 contracts) still rejects totally-dead strikes. |
+| …or OI ≥ N× Order Size | 5× | Off – 20× | Also pass the open-interest check when OI is at least N× the contracts being sold, so cheap names aren't held to a $300 stock's dollar floor. |
 
 ### Execution
 

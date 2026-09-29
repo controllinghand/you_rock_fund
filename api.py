@@ -3901,7 +3901,6 @@ class SettingsUpdate(BaseModel):
     fund_budget:              Optional[float] = None
     goal_pct:                 Optional[float] = None
     num_positions:            Optional[int]   = None
-    min_position_size:        Optional[float] = None
     max_position_size:        Optional[float] = None
     max_delta:                Optional[float] = None
     min_buffer_pct:           Optional[float] = None
