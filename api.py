@@ -1927,6 +1927,14 @@ def _run_gateway_log_monitor() -> None:
             started_at = container.attrs["State"]["StartedAt"]
 
             login_attempts = 0
+            # IBC logs "Login attempt: N" for its own automatic re-logins too —
+            # after an unanswered IB Key push, and after IBKR's "too many failed
+            # login attempts, wait 55 seconds" throttle. Those are not password
+            # failures, so they don't count toward the repeated-failure check.
+            # On 2026-10-02 (live) four timed-out pushes latched "failed" at
+            # attempt 4, and the badge stayed red after the login completed.
+            auto_relogin = False
+            repeat_alerted = False
 
             # The stream opens with tail=100, so the first lines are replayed
             # history. Alerting on those would re-page for a 2FA push that was
@@ -1965,15 +1973,25 @@ def _run_gateway_log_monitor() -> None:
                     terminal = True
                     break
 
-                if "login attempt" in ll:
-                    login_attempts += 1
-                    if login_attempts > 3:
+                if ("re-login after second factor authentication timeout" in ll
+                        or "too many failed login attempts" in ll):
+                    auto_relogin = True
+
+                # "login attempt:" with the colon — IBKR's throttle line says
+                # "too many failed login attempts" and must not count as one.
+                if "login attempt:" in ll:
+                    if auto_relogin:
+                        auto_relogin = False
+                    else:
+                        login_attempts += 1
+                    # Not terminal: keep tailing so a later "Login has completed"
+                    # can still set the status back to ok.
+                    if login_attempts > 3 and not repeat_alerted:
+                        repeat_alerted = True
                         _set_status("failed", line)
                         _send_discord_alert(
                             "⚠️ IB Gateway repeated login failures — possible wrong password."
                         )
-                        terminal = True
-                        break
 
                 # ── The IB Key push: the only moment tapping the phone helps ──
                 # Deliberately NOT gated by _in_auto_restart_window(). The daily
@@ -2015,6 +2033,7 @@ def _run_gateway_log_monitor() -> None:
 
                 if "login has completed" in ll or "logged in" in ll:
                     login_attempts = 0
+                    repeat_alerted = False
                     _set_status("ok", line)
                     # A successful login confirms the token is established. After a
                     # 2FA approval the "autorestart file found" line only appears on
