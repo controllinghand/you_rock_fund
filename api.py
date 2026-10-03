@@ -2113,12 +2113,54 @@ def _apply_stop_loss_default_migration() -> None:
         print(f"[api/migration] stop-loss default migration failed (retries next start): {e}")
 
 
+CSP_M_VIX_MIGRATION_MARKER = (
+    Path("/data/migration_csp_m_vix_applied") if CONTAINERIZED
+    else BASE_DIR / "migration_csp_m_vix_applied"
+)
+
+
+def _apply_csp_m_vix_migration() -> None:
+    """One-time: turn the VIX stress rule on for boxes already on YRVI-CSP-M (v5.2.139).
+
+    v5.2.139 made `vix_stress_enabled` part of the YRVI-CSP-M track. A box that was
+    on CSP-M before the update has it off (default), so without this it would show
+    Custom. Only a box running csp_only_mode + monthly is touched; every other box
+    is a silent no-op. Marker-gated, so a user who turns it back off stays off.
+    """
+    if CSP_M_VIX_MIGRATION_MARKER.exists():
+        return
+    try:
+        raw = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+        if (raw.get("csp_only_mode") is True and raw.get("option_tenor") == "monthly"
+                and raw.get("vix_stress_enabled") is not True):
+            raw["vix_stress_enabled"] = True
+            save_settings(raw)
+            level = float(raw.get("vix_stress_level", 20))
+            delta = float(raw.get("vix_stress_delta", 0.10))
+            _send_discord_alert(
+                f"🌡️ **YRVI-CSP-M** now includes the **VIX stress rule**, so it was turned on "
+                f"for this box. When the VIX is above {level:g} at the Monday entry, new "
+                f"monthly puts target {delta:.2f} delta instead of ~0.20. In the 2017–2026 "
+                f"backtest it cut the worst drawdown from −25% to −17% at about the same "
+                f"return.\nTo turn it off: **Settings → Strategy Track** (the badge then "
+                f"shows Custom)."
+            )
+            print("[api/migration] CSP-M VIX rule: enabled")
+        else:
+            print("[api/migration] CSP-M VIX rule: no change needed")
+        CSP_M_VIX_MIGRATION_MARKER.touch()
+    except Exception as e:
+        print(f"[api/migration] CSP-M VIX migration failed (retries next start): {e}")
+
+
 @app.on_event("startup")
 async def _startup() -> None:
-    # One-time settings migration (marker-gated); off the event loop so a first-boot
+    # One-time settings migrations (marker-gated); off the event loop so a first-boot
     # Discord post never delays readiness.
     threading.Thread(target=_apply_stop_loss_default_migration, daemon=True,
                      name="yrvi-migration-stoploss").start()
+    threading.Thread(target=_apply_csp_m_vix_migration, daemon=True,
+                     name="yrvi-migration-csp-m-vix").start()
     t = threading.Thread(target=_run_watchdog, daemon=True, name="yrvi-watchdog")
     t.start()
     print("[api] Health watchdog started")
