@@ -1,3 +1,8 @@
+## [5.2.137] — 2026-10-02
+
+### Fixed
+- **"Gateway · login failed" stayed red after a successful login.** The gateway log monitor counted every `Login attempt: N` line, including IBC's own automatic re-logins after an unanswered IB Key push. After 4 it latched `failed` as a wrong-password loop and stopped reading the log until the container restarted. On 2026-10-02 (live box) four pushes timed out, the status latched at attempt 4 (22:47), and it stayed red after the login completed at 23:16 with the API connected. Re-logins that follow a 2FA timeout or IBKR's "too many failed login attempts, wait 55 seconds" throttle no longer count. The repeated-failure check also no longer stops the monitor, so a later `Login has completed` sets the status back to ok. The throttle line itself was also being counted as an attempt (it contains "login attempts"); the match is now `login attempt:`.
+
 ## [5.2.136] — 2026-09-29
 
 ### Removed
