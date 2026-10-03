@@ -107,15 +107,21 @@ TRACKS = [
             "expire at the next one; a name with earnings before expiry is "
             "skipped. Assigned shares are sold the next Monday, like CSP Only. "
             "The strike sits further below the price, so there are far fewer "
-            "assignments, and premium arrives once a month."
+            "assignments, and premium arrives once a month. When the VIX is above "
+            "20 at the entry, new puts drop to ~0.10 delta (the VIX stress rule)."
         ),
         # tenor.active() only honours monthly together with csp_only_mode, so both
         # are the track's identity. YRVI-CSP pins "weekly", which keeps the two
         # mutually exclusive. The wheel tracks leave option_tenor unpinned: without
         # csp_only_mode the setting is inert, so their behavior can't differ.
+        # The VIX stress rule is part of the track (v5.2.139): it was backtested
+        # with it (max DD −25% → −17%), and it does nothing on the weekly tracks,
+        # so pinning it here keeps it off every other track's settings page. Its
+        # level/delta are NOT pinned — tuning them stays YRVI-CSP-M.
         "pins": {
-            "csp_only_mode": True,
-            "option_tenor":  "monthly",
+            "csp_only_mode":      True,
+            "option_tenor":       "monthly",
+            "vix_stress_enabled": True,
         },
     },
 ]

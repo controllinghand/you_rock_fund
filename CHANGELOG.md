@@ -1,3 +1,12 @@
+## [5.2.139] — 2026-10-03
+
+### Changed
+- **The VIX stress rule is now part of the YRVI-CSP-M track.** Picking CSP Monthly turns it on, and its controls (on/off, VIX Level, Stress Delta) moved from their own Settings section to just under the Strategy Track cards. They only appear on monthly CSP-only settings, because the rule does nothing on the weekly tracks. Turning it off on CSP-M makes the box Custom, like changing any other track setting. The level and delta can be tuned without leaving the track.
+- The YRVI-CSP-M track description mentions the rule.
+
+### Migration
+- A box already on YRVI-CSP-M gets the rule turned on once at api startup, with a bell + Discord notice saying how to turn it off (marker `/data/migration_csp_m_vix_applied`). Boxes on any other track are untouched. Without this they would show Custom after the update.
+
 ## [5.2.138] — 2026-10-03
 
 ### Added

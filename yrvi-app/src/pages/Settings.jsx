@@ -812,6 +812,42 @@ export default function SettingsPage() {
             </div>
           )
         })()}
+        {/* VIX stress rule — part of YRVI-CSP-M (pinned in tracks.py), so it is shown
+            only on monthly CSP-only settings. It stays visible when switched off, so
+            a box that turned it off (now Custom) can turn it back on. */}
+        {settings.csp_only_mode && settings.option_tenor === 'monthly' && (
+          <div className="rounded-lg border border-purple-200 dark:border-purple-900/60 bg-purple-50/40 dark:bg-purple-900/10 p-3 space-y-3">
+            <Toggle
+              label="🌡️ VIX Stress Rule"
+              sub="Part of YRVI-CSP-M. When the live VIX is above the level below at the Monday entry, new monthly puts target the stress delta instead of ~0.20. Every put must still pay the Min Bid Yield. If the VIX can't be read, the run trades normally. Turning it off makes this box Custom."
+              checked={!!settings.vix_stress_enabled}
+              onChange={v => set('vix_stress_enabled', v)}
+            />
+            {settings.vix_stress_enabled && (
+              <>
+                <SliderRow
+                  label="VIX Level"
+                  value={settings.vix_stress_level ?? 20}
+                  min={15} max={35} step={1}
+                  format={v => v.toFixed(0)}
+                  onChange={v => set('vix_stress_level', v)}
+                  description={`Stressed when the live VIX is above ${(settings.vix_stress_level ?? 20).toFixed(0)} at the Monday run`}
+                />
+                <SliderRow
+                  label="Stress Delta"
+                  value={settings.vix_stress_delta ?? 0.10}
+                  min={0.05} max={0.15} step={0.01}
+                  format={v => v.toFixed(2)}
+                  onChange={v => set('vix_stress_delta', v)}
+                  description="Target put delta while stressed (normal is ~0.20)"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-600">
+                  Backtest 2017–2026 (VIX 20, 0.10 delta): worst drawdown −25% → −17% at about the same return. Most of that came from one entry (Feb 24, 2020), so it reads the live VIX on the run day.
+                </p>
+              </>
+            )}
+          </div>
+        )}
         <SliderRow label="Initial Fund Budget"  value={settings.fund_budget}      min={10000}  max={2000000} step={10000} format={v => `$${v.toLocaleString()}`} onChange={v => set('fund_budget', v)} />
         <SliderRow
           label="Annual Goal %"
@@ -896,44 +932,6 @@ export default function SettingsPage() {
             />
             <p className="text-xs text-gray-500 dark:text-gray-600">
               Parks idle settled cash only (never margin). When all option slots are filled it uses the full idle amount; a 10% net-liq safety cap applies only if some slots went unfilled that week.
-            </p>
-          </>
-        )}
-      </Section>
-
-      {/* VIX stress rule — monthly puts (YRVI-CSP-M) only */}
-      <Section title="VIX Stress Rule" emoji="🌡️">
-        <Toggle
-          label="Sell further-out monthly puts when the VIX is high"
-          sub="When the VIX is above the level below at the Monday entry, new monthly puts target the stress delta instead of ~0.20. Every put must still pay the Min Bid Yield. If the VIX can't be read, the run trades normally."
-          checked={!!settings.vix_stress_enabled}
-          onChange={v => set('vix_stress_enabled', v)}
-        />
-        {!(settings.csp_only_mode && settings.option_tenor === 'monthly') && (
-          <p className="text-xs text-amber-600 dark:text-amber-500">
-            Only applies on the YRVI-CSP-M (monthly puts) track — this box trades weekly, so it has no effect here.
-          </p>
-        )}
-        {settings.vix_stress_enabled && (
-          <>
-            <SliderRow
-              label="VIX Level"
-              value={settings.vix_stress_level ?? 20}
-              min={15} max={35} step={1}
-              format={v => v.toFixed(0)}
-              onChange={v => set('vix_stress_level', v)}
-              description={`Stressed when the live VIX is above ${(settings.vix_stress_level ?? 20).toFixed(0)} at the Monday run`}
-            />
-            <SliderRow
-              label="Stress Delta"
-              value={settings.vix_stress_delta ?? 0.10}
-              min={0.05} max={0.15} step={0.01}
-              format={v => v.toFixed(2)}
-              onChange={v => set('vix_stress_delta', v)}
-              description="Target put delta while stressed (normal is ~0.20)"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-600">
-              Backtest 2017–2026 (VIX 20, 0.10 delta): worst drawdown −25% → −17% at about the same return. Most of that came from one entry (Feb 24, 2020), so it reads the live VIX on the run day.
             </p>
           </>
         )}
