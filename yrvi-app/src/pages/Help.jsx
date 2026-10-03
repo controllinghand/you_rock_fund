@@ -137,6 +137,14 @@ const SETTINGS_GROUPS = [
     ],
   },
   {
+    title: 'VIX Stress Rule (YRVI-CSP-M only)',
+    items: [
+      { label: 'Sell further-out monthly puts when the VIX is high', default: 'Off', range: 'On / Off', description: 'Monthly puts only. When the live VIX is above the VIX Level at the Monday run, new puts target the Stress Delta instead of ~0.20. Every put must still pay the Min Bid Yield. If the VIX can\'t be read (IBKR, then Yahoo), the run trades normally. Backtest 2017–2026: worst drawdown −25% → −17% at about the same return.' },
+      { label: 'VIX Level',    default: '20',   range: '15 – 35',     description: 'Stressed when the live VIX is above this at the Monday run. It reads the live VIX, not Friday\'s close: in the backtest, Friday\'s close missed the Feb 24, 2020 entry, which carried most of the benefit.' },
+      { label: 'Stress Delta', default: '0.10', range: '0.05 – 0.15', description: 'Target put delta while stressed. The trader accepts about 0.07–0.12 at 0.10.' },
+    ],
+  },
+  {
     title: 'Liquidity Filters',
     items: [
       { label: 'Trader Max Delta',     default: '0.22', range: '0.15 – 0.30', description: 'At order time the live IBKR delta must be at or under this; above it the trader scans lower strikes. A notch above the screener Max Delta to allow for Monday-morning drift.' },

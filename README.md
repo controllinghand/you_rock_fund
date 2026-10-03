@@ -446,6 +446,14 @@ All settings are managed from the dashboard **Settings** page and hot-reload on 
 | Stop Loss on Wheel Holdings | Off | On / Off | When on, a holding is sold on Monday if its price has fallen more than the Stop Loss % below its assigned strike. The screener exit is the primary exit — this is an optional additional layer. |
 | Stop Loss % | 10% | 0% – 50% | How far below the assigned strike triggers a stop loss sale. Only active when Stop Loss on Wheel Holdings is enabled. |
 
+### VIX Stress Rule (YRVI-CSP-M only)
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| Sell further-out monthly puts when the VIX is high | Off | On / Off | Monthly puts only. When the live VIX is above the VIX Level at the Monday run, new puts target the Stress Delta instead of ~0.20. Every put must still pay the Min Bid Yield. If the VIX can't be read (IBKR, then Yahoo), the run trades normally. Backtest 2017–2026 (VIX 20, 0.10 delta): worst drawdown −25% → −17% at about the same return. |
+| VIX Level | 20 | 15 – 35 | Stressed when the live VIX is above this at the Monday run. Reads the live VIX, not Friday's close, which missed the Feb 24, 2020 entry in the backtest. |
+| Stress Delta | 0.10 | 0.05 – 0.15 | Target put delta while stressed (the trader accepts about 0.07–0.12 at 0.10). |
+
 ### Liquidity Filters
 
 | Setting | Default | Range | Description |

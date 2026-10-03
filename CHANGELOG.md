@@ -1,3 +1,9 @@
+## [5.2.138] — 2026-10-03
+
+### Added
+- **VIX stress rule for monthly puts (YRVI-CSP-M)**, in a new Settings → VIX Stress Rule section. Default **off**. When it's on and the live VIX is above the **VIX Level** (default 20) at the Monday run, new monthly puts target the **Stress Delta** (default 0.10) instead of ~0.20, so strikes sit further below the price. The trader accepts about 0.07–0.12 delta in that case. The 1% Min Bid Yield still applies to every put. The VIX is read once per run from IBKR (delayed `last`; the dev box's paper account returns it), falling back to Yahoo. If neither answers, the run trades the normal delta and logs that. The VIX reading and target delta are logged in `trade_log.txt` (🌡️) and saved on each monthly position.
+- Backtest (greer_project `feat/ranking-poc`, `thetadata_vix_pause_test.py`, 2017 – Aug 2026, 5 slots): max drawdown −25.1% → −17.2%, return +12.7% → +12.6% a year, and with 1% a month withdrawn the ending capital went from $99k to $105k. Most of the drawdown benefit is one entry, Mon 2020-02-24 (VIX 17 at Friday's close, ~25 by Monday). That's why the rule reads the live VIX and never uses the prior session's close (IBKR's `close` field). Pausing new puts instead tested worse. On weekly tracks a 0.10-delta put rarely pays 1% a week, so the rule only applies to monthly puts.
+
 ## [5.2.137] — 2026-10-02
 
 ### Fixed
