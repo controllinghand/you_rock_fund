@@ -3929,6 +3929,9 @@ class SettingsUpdate(BaseModel):
     wheel_sell_when_cc_below_assigned: Optional[bool]  = None
     csp_only_mode:                     Optional[bool]  = None
     option_tenor:                      Optional[Literal["weekly", "monthly"]] = None
+    vix_stress_enabled:                Optional[bool]  = None
+    vix_stress_level:                  Optional[float] = None
+    vix_stress_delta:                  Optional[float] = None
     wheel_cover_all_shares:            Optional[bool]  = None
     wheel_allow_add_to_position:       Optional[bool]  = None
     wheel_stop_loss_enabled:           Optional[bool]  = None

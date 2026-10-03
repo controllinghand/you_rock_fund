@@ -11,6 +11,7 @@ import log_setup
 from config import IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, ACCOUNT, NUM_POSITIONS, TOTAL_FUND_BUDGET, MAX_PER_POSITION, DRY_RUN, get_settings, ACCOUNT_TYPE, connect_with_retry, connect_deadline_sec
 from capital import dedupe_positions
 import tenor
+import vix
 
 log = log_setup.get_logger("trader", "trade_log.txt")
 
@@ -596,6 +597,7 @@ def _strike_shortfall(oi: float | None, bid: float | None, strike: float,
 def verify_and_adjust_strike(
         ib: IB, ticker: str, screener_strike: float,
         expiry_str: str, screener_delta: float, contracts: int | None = None,
+        min_delta: float | None = None, max_delta: float | None = None,
 ) -> tuple | None:
     """
     Check live delta for screener_strike at execution time and adjust if needed.
@@ -606,13 +608,16 @@ def verify_and_adjust_strike(
       strike still within delta ≤ max delta (maximises premium within the safe zone).
 
     Max delta is _max_delta() (the trader_max_delta setting), read once per call.
+    min_delta / max_delta override the window — the VIX stress rule (vix.py) passes
+    a lower one (~0.07–0.12) for monthly puts when the VIX is high.
 
     Returns (qualified_contract, final_strike, orig_delta, final_delta, final_iv,
     was_adjusted) or None if qualification fails or no valid strike is found.
     final_iv is the chosen contract's implied vol at execution (may be None).
     """
     expiry = parse_expiry(expiry_str)
-    max_delta = _max_delta()
+    max_delta = max_delta if max_delta is not None else _max_delta()
+    min_delta = min_delta if min_delta is not None else MIN_DELTA
 
     # Qualify and delta-check the screener strike
     c = Option(ticker, expiry, screener_strike, "P", "SMART", currency="USD")
@@ -638,7 +643,7 @@ def verify_and_adjust_strike(
 
     orig_delta = live_delta
 
-    if MIN_DELTA <= abs(live_delta) <= max_delta:
+    if min_delta <= abs(live_delta) <= max_delta:
         log.info(f"  ✅ {ticker} delta OK: {live_delta:.3f} at ${screener_strike:.2f}")
         return c, screener_strike, orig_delta, live_delta, live_iv, False
 
@@ -733,10 +738,10 @@ def verify_and_adjust_strike(
             log.error(f"  ❌ {ticker} — no valid strike found with delta ≤ {max_delta} — skipping")
         return result
 
-    # abs(live_delta) < MIN_DELTA — stock rose, delta too low
+    # abs(live_delta) < min_delta — stock rose, delta too low
     # Scan upward: take 15 closest strikes above screener, scan from highest to lowest
     # to find the highest strike still within the delta cap (maximises premium)
-    log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} < {MIN_DELTA} "
+    log.warning(f"  ⚠️  {ticker} ${screener_strike:.2f} delta {live_delta:.3f} < {min_delta} "
                 f"— scanning chain upward for better delta")
     above = []
     for ch in chains:
@@ -754,18 +759,22 @@ def verify_and_adjust_strike(
     return result
 
 
-def _monthly_start(ib: IB, ticker: str, expiry: "date", iv_atm: float | None) -> tuple | None:
+def _monthly_start(ib: IB, ticker: str, expiry: "date", iv_atm: float | None,
+                   target_delta: float = 0.20) -> tuple | None:
     """Starting point for a MONTHLY put (YRVI-CSP-M): (strike, bid) or None.
 
     The screener's strike is the WEEKLY 20-delta. A monthly 20-delta sits much
     further below the price, and verify_and_adjust_strike only walks ~10 strikes
-    down from its start. So estimate the monthly 20-delta strike from ATM IV and
-    days to expiry, K ≈ S·exp(−0.84·σ√T), and snap it UP to a strike actually
+    down from its start. So estimate the monthly target-delta strike from ATM IV and
+    days to expiry, K ≈ S·exp(−z·σ√T) with z = N⁻¹(1 − delta) (0.84 at 0.20,
+    1.28 at the VIX stress rule's 0.10), and snap it UP to a strike actually
     listed for the monthly expiry. verify_and_adjust_strike then settles the
     exact strike against live delta (0.15–0.21), open interest and the 1% yield
     bar, the same way it does for weeklies.
     """
     import math
+    from statistics import NormalDist
+    z = NormalDist().inv_cdf(1 - target_delta)
     exp = expiry.strftime("%Y%m%d")
     try:
         stk = ib.qualifyContracts(Stock(ticker, "SMART", "USD"))
@@ -787,7 +796,7 @@ def _monthly_start(ib: IB, ticker: str, expiry: "date", iv_atm: float | None) ->
         return None
     sigma = iv_atm if iv_atm and 0.05 < iv_atm < 5 else 0.5
     t = max((expiry - datetime.now().date()).days, 1) / 365
-    est = price * math.exp(-0.84 * sigma * math.sqrt(t))
+    est = price * math.exp(-z * sigma * math.sqrt(t))
     # reqSecDefOptParams lists the UNION of strikes across every expiry, so a strike can be
     # in that list yet not trade on this one (2026-09-28: SMMT $9.50 and BE $227.50 failed
     # to qualify on the Oct 16 monthly, and both names were dropped). Qualify the nearest
@@ -1359,6 +1368,11 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     monthly = tenor.cycle() if tenor.active(get_settings()) == tenor.MONTHLY else None
     if monthly:
         log.info(f"  🌙 Monthly puts — expiry {monthly['next_expiry']} ({monthly['dte']} days)")
+    # VIX stress rule (monthly only, default off): read the live VIX once per run.
+    stress = vix.stress_rule(ib, get_settings()) if monthly else None
+    stressed = bool(stress and stress["stressed"])
+    put_target = stress["target"] if stressed else 0.20
+    monthly_floor = stress["min_delta"] if stressed else MONTHLY_MIN_DELTA
 
     while filled_count < _target:
         pos = next_candidate()
@@ -1381,7 +1395,8 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
         try:
             screener_delta = pos.get("delta", 0.0)
             if monthly:
-                start = _monthly_start(ib, ticker, monthly["next_expiry"], pos.get("iv_atm"))
+                start = _monthly_start(ib, ticker, monthly["next_expiry"], pos.get("iv_atm"),
+                                       target_delta=put_target)
                 if start is None:
                     results.append({"ticker": ticker, "status": "skipped_monthly_chain"})
                     _status(ticker=ticker, stage=None,
@@ -1396,7 +1411,9 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 premium = m_bid or 0.0
                 pos = {**pos, "strike": strike, "expiry": expiry, "contracts": contracts,
                        "capital_used": round(contracts * strike * 100, 2), "premium": premium,
-                       "premium_total": round(contracts * premium * 100, 2), "tenor": tenor.MONTHLY}
+                       "premium_total": round(contracts * premium * 100, 2), "tenor": tenor.MONTHLY,
+                       **({"vix": stress["vix"], "vix_stressed": stressed, "target_delta": put_target}
+                          if stress else {})}
                 for _i, _sp in enumerate(all_sized):
                     if _sp.get("ticker") == ticker:
                         all_sized[_i] = pos
@@ -1408,9 +1425,12 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             delta_result = verify_and_adjust_strike(
                 ib, ticker, strike, expiry, screener_delta=screener_delta,
                 contracts=contracts,
+                min_delta=stress["min_delta"] if stressed else None,
+                max_delta=stress["max_delta"] if stressed else None,
             )
             if delta_result is None:
-                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {_max_delta()}, trying next")
+                cap = stress["max_delta"] if stressed else _max_delta()
+                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {cap}, trying next")
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 continue
 
@@ -1420,8 +1440,8 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
             # $2.50 at 0.03, and the scan settled on $1.50 at 0.000 (strikes with no
             # OI/bid tick pass the liquidity pre-check). A ~0-delta put is not the
             # strategy, so require a real delta of at least MONTHLY_MIN_DELTA.
-            if monthly and (final_delta is None or abs(final_delta) < MONTHLY_MIN_DELTA):
-                log.info(f"  🌙 {ticker} — no monthly strike near 20-delta (best ${strike:.2f} at "
+            if monthly and (final_delta is None or abs(final_delta) < monthly_floor):
+                log.info(f"  🌙 {ticker} — no monthly strike near {put_target:.2f}-delta (best ${strike:.2f} at "
                          f"delta {final_delta if final_delta is not None else 'n/a'}) — trying next")
                 results.append({"ticker": ticker, "status": "skipped_delta"})
                 _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_delta"})
