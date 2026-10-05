@@ -142,8 +142,11 @@ def _finalize_ytd(weeks_map: dict[str, dict]) -> dict:
     """Build a complete ytd_tracker dict from a week_start → week dict map."""
     weeks = sorted(weeks_map.values(), key=lambda w: w["week_start"])
     total = round(sum(w.get("premium_collected", w.get("realized", 0)) for w in weeks), 2)
-    best  = max(weeks, key=lambda w: w.get("premium_collected", w.get("realized", 0))) if weeks else None
-    worst = min(weeks, key=lambda w: w.get("premium_collected", w.get("realized", 0))) if weeks else None
+    # Hold weeks ($0 by design while monthly puts carry) don't rank — same rule
+    # as discord_poster.ytd_best_worst. All-hold falls back to every week.
+    ranked = [w for w in weeks if not w.get("hold")] or weeks
+    best  = max(ranked, key=lambda w: w.get("premium_collected", w.get("realized", 0))) if ranked else None
+    worst = min(ranked, key=lambda w: w.get("premium_collected", w.get("realized", 0))) if ranked else None
     return {
         "weeks":         weeks,
         "total_premium": total,

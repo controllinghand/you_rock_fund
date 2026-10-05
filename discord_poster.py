@@ -84,8 +84,23 @@ def _save_ytd(ytd: dict):
         json.dump(ytd, f, indent=2)
 
 
+def ytd_best_worst(weeks: list) -> tuple:
+    """(best, worst) week by premium, ignoring hold weeks.
+
+    A hold week is a Monday where nothing was sold because the open puts are
+    still carrying (the monthly track between entries). It collected $0 by
+    design, so ranking it would make every hold week the "worst week". Falls
+    back to all weeks if every week is a hold, so the fields never go empty."""
+    ranked = [w for w in weeks if not w.get("hold")] or list(weeks)
+    if not ranked:
+        return None, None
+    by_premium = sorted(ranked, key=lambda w: w.get("premium_collected", w.get("realized", 0)))
+    return by_premium[-1], by_premium[0]
+
+
 def _update_ytd(week_start: str, premium_collected: float, shares_sold_pnl: float,
-                fund_budget: float, called_away_pnl: float = 0.0) -> dict:
+                fund_budget: float, called_away_pnl: float = 0.0,
+                hold: bool = False) -> dict:
     ytd = _load_ytd()
     entry = {
         "week_start":        week_start,
@@ -99,6 +114,8 @@ def _update_ytd(week_start: str, premium_collected: float, shares_sold_pnl: floa
         "total_realized":    round(premium_collected + shares_sold_pnl + called_away_pnl, 2),
         "yield_pct":         round(premium_collected / fund_budget * 100, 3) if fund_budget else 0,
     }
+    if hold:
+        entry["hold"] = True
     existing_idx = next((i for i, w in enumerate(ytd["weeks"]) if w["week_start"] == week_start), None)
     if existing_idx is not None:
         ytd["weeks"][existing_idx] = entry
@@ -108,9 +125,7 @@ def _update_ytd(week_start: str, premium_collected: float, shares_sold_pnl: floa
         sum(w.get("premium_collected", w.get("realized", 0)) for w in ytd["weeks"]), 2
     )
     ytd["weeks_traded"]  = len(ytd["weeks"])
-    by_premium        = sorted(ytd["weeks"], key=lambda w: w.get("premium_collected", w.get("realized", 0)))
-    ytd["worst_week"]  = by_premium[0]
-    ytd["best_week"]   = by_premium[-1]
+    ytd["best_week"], ytd["worst_week"] = ytd_best_worst(ytd["weeks"])
     _save_ytd(ytd)
     return ytd
 
@@ -647,8 +662,13 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
     # capital, so the yield reflects reality and matches the dashboard.
     denom = fund_budget or net_liq or capital or 0
     yield_pct = premium_collected / denom * 100 if denom else 0
+    # Hold week: nothing sold or realized, but puts are open and carrying — the
+    # monthly track between entry windows. $0 is the plan, not a bad week, so it
+    # is tagged instead of painted red, and kept out of best/worst.
+    hold_week = (not premium_collected and not total_realized
+                 and bool((deployed or {}).get("csp_count")))
     ytd       = _update_ytd(week_start, premium_collected, shares_sold_pnl, denom,
-                            called_away_pnl=called_away_pnl)
+                            called_away_pnl=called_away_pnl, hold=hold_week)
 
     avg_yield    = (ytd["total_premium"] / ytd["weeks_traded"] / denom * 100) \
                    if ytd["weeks_traded"] and denom else 0
@@ -785,10 +805,17 @@ def post_weekly_results(state: dict, fund_budget: float = 250_000,
             )
         fields.append({"name": "🔄 Wheel Holdings", "value": "\n".join(lines), "inline": False})
 
+    if hold_week:
+        title = (f"⏸️ YRVI Week of {week_start} — hold week "
+                 f"({(deployed or {}).get('csp_count', 0)} puts carrying)")
+        color = COLOR_BLUE
+    else:
+        title = (f"{_yield_emoji(yield_pct)} YRVI Week of {week_start} — "
+                 f"${total_realized:,.0f} realized ({yield_pct:.2f}%)")
+        color = _yield_color(yield_pct)
     _post({"embeds": [{
-        "title":     f"{_yield_emoji(yield_pct)} YRVI Week of {week_start} — "
-                     f"${total_realized:,.0f} realized ({yield_pct:.2f}%)",
-        "color":     _yield_color(yield_pct),
+        "title":     title,
+        "color":     color,
         "fields":    fields,
         "footer":    {"text": _footer(" · Manual run" if manual else "")},
         "timestamp": datetime.now(timezone.utc).isoformat(),

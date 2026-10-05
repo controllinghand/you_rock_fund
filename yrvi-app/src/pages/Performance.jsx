@@ -6,6 +6,7 @@ import {
 } from 'recharts'
 import { TrendingUp, Award, AlertTriangle, Target } from 'lucide-react'
 import { useThemeContext } from '../ThemeProvider.jsx'
+import GoalGap from '../components/GoalGap.jsx'
 
 function fmtDate(s) {
   if (!s) return ''
@@ -164,12 +165,12 @@ export default function Performance() {
           <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-3">
             <div
               className="bg-gradient-to-r from-blue-600 to-green-500 h-3 rounded-full transition-all duration-700"
-              style={{ width: `${progress_pct}%` }}
+              style={{ width: `${Math.min(100, progress_pct)}%` }}
             />
           </div>
           <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
             <span>{progress_pct.toFixed(1)}%</span>
-            <span>${(annual_target - total_premium).toLocaleString()} to go</span>
+            <GoalGap remaining={annual_target - total_premium} />
           </div>
         </div>
 
@@ -194,9 +195,7 @@ export default function Performance() {
                 {growthPctVal != null && ` (${growthUp ? '+' : '−'}${Math.abs(growthPctVal).toFixed(1)}%)`}
                 {' '}vs ${capital.toLocaleString()} capital
               </span>
-              <span className="text-gray-500 dark:text-gray-600">
-                ${Math.round(account_target - net_liq).toLocaleString()} to go
-              </span>
+              <GoalGap remaining={account_target - net_liq} />
             </div>
           </div>
         )}

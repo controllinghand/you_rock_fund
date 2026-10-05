@@ -5,6 +5,7 @@ import { Clock, DollarSign, TrendingUp, RefreshCw, Loader2, AlertTriangle } from
 import PositionCard from '../components/PositionCard.jsx'
 import WheelCard from '../components/WheelCard.jsx'
 import YTDChart from '../components/YTDChart.jsx'
+import GoalGap from '../components/GoalGap.jsx'
 
 function useCountdown(isoStr) {
   const [label, setLabel] = useState('')
@@ -256,7 +257,10 @@ export default function Dashboard() {
   const pnl         = positions?.weekly_pnl ?? {}
   const ytdTotal    = performance?.total_premium ?? 0
   const ytdTarget   = performance?.annual_target ?? 100_000
-  const progressPct = Math.min(100, (ytdTotal / ytdTarget) * 100)
+  // Real % for the label (106.7% once the goal is passed, matching Discord);
+  // the bar width alone is capped at 100.
+  const progressRaw = ytdTarget ? (ytdTotal / ytdTarget) * 100 : 0
+  const progressPct = Math.min(100, progressRaw)
 
   // Account-value (wealth) goal — capital + premium goal, vs live Net Liq
   const capital       = performance?.capital ?? 0
@@ -618,7 +622,7 @@ export default function Dashboard() {
         <StatCard
           label="YTD Premium"
           value={`$${ytdTotal.toLocaleString()}`}
-          sub={`${progressPct.toFixed(1)}% of $${ytdTarget.toLocaleString()} goal`}
+          sub={`${progressRaw.toFixed(1)}% of $${ytdTarget.toLocaleString()} goal`}
         />
       </div>
 
@@ -641,8 +645,8 @@ export default function Dashboard() {
             />
           </div>
           <div className="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-600">
-            <span>{progressPct.toFixed(1)}%</span>
-            <span>${(ytdTarget - ytdTotal).toLocaleString()} to go</span>
+            <span>{progressRaw.toFixed(1)}%</span>
+            <GoalGap remaining={ytdTarget - ytdTotal} />
           </div>
         </div>
 
@@ -667,9 +671,7 @@ export default function Dashboard() {
                 {netGrowthPct != null && ` (${growthUp ? '+' : '−'}${Math.abs(netGrowthPct).toFixed(1)}%)`}
                 {' '}vs ${capital.toLocaleString()} capital
               </span>
-              <span className="text-gray-500 dark:text-gray-600">
-                ${Math.round(accountTarget - netLiq).toLocaleString()} to go
-              </span>
+              <GoalGap remaining={accountTarget - netLiq} />
             </div>
           </div>
         )}
