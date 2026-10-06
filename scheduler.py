@@ -53,6 +53,45 @@ def _write_heartbeat():
         pass
 
 
+# Live Monday-run progress feed, served by /api/run-status. Only the run itself
+# flips it back to executing:false, so a scheduler killed mid-run (an Update
+# clicked during the buy window, a crash, a host reboot) leaves it saying
+# "Working on X" forever — see _clear_stale_run_progress.
+RUN_PROGRESS_FILE = "/data/run_progress.json"
+
+
+def _clear_stale_run_progress() -> None:
+    """At scheduler boot, no run can be in progress in THIS process, so a feed
+    still saying executing:true is a run that died with the previous process.
+    Clear it (the dashboard otherwise shows the dead run indefinitely) and say
+    so on Discord — the run stopped partway and the remaining slots need a
+    Run Now. Best-effort; never blocks startup."""
+    try:
+        with open(RUN_PROGRESS_FILE) as f:
+            prog = json.load(f)
+    except Exception:
+        return
+    if not prog.get("executing"):
+        return
+    where = prog.get("current_ticker") or prog.get("current_phase") or "unknown step"
+    stage = prog.get("current_stage")
+    try:
+        with open(RUN_PROGRESS_FILE, "w") as f:
+            json.dump({**prog, "executing": False, "interrupted": True,
+                       "interrupted_cleared": datetime.now(PST).isoformat()}, f)
+    except Exception:
+        pass
+    log.warning(f"⚠️  Previous Monday run was interrupted at {where}"
+                f"{f' ({stage})' if stage else ''} — cleared the stale progress feed")
+    _discord_alert(
+        f"⚠️ **YRVI** The scheduler restarted while the Monday run was still going "
+        f"(stopped at **{where}**{f' — {stage}' if stage else ''}). The run did not "
+        f"finish. Check IBKR for open orders, then use **Run Now** during market "
+        f"hours to fill the remaining slots — it reconciles first, so existing "
+        f"positions are counted."
+    )
+
+
 def _discord_alert(message: str) -> None:
     """Send a plain-text Discord alert. No-ops when webhook is not configured."""
     try:
@@ -477,7 +516,7 @@ def run_pipeline():
     # only covered the CSP phase, so the multi-minute CC-selling phase showed
     # nothing. /api/run-status serves this file. Best-effort — never breaks the run.
     import json as _json
-    _progress_file  = "/data/run_progress.json"
+    _progress_file  = RUN_PROGRESS_FILE
     _ticker_results = []
     _phase          = {"name": "reconcile"}   # run_monday renames it at each boundary
 
@@ -819,6 +858,7 @@ def main():
     )
 
     _write_heartbeat()
+    _clear_stale_run_progress()
     log.info("\n" + "=" * 65)
     log.info("🗓️  YOU ROCK FUND SCHEDULER — Running")
     log.info(f"   Current time : {datetime.now(PST).strftime('%A %Y-%m-%d %H:%M %Z')}")
