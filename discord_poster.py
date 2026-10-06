@@ -833,11 +833,13 @@ def post_preview(positions: list, budget: float):
     for i, p in enumerate(positions[:5], 1):
         prem       = p.get("premium_total", 0)
         est_total += prem
+        per_ct     = p.get("premium", 0) * 100
         bz         = " ✅" if p.get("buyzone") else ""
         lines.append(
             f"{i}. **{p['ticker']}** ${p['strike']:.0f} put · "
             f"{p['contracts']}x · exp {p.get('expiry', '?')} · "
-            f"~${prem:,.0f} prem ({p.get('yield_pct', 0):.2f}%){bz}"
+            f"~${prem:,.0f} prem (${per_ct:,.0f}/contract · "
+            f"{p.get('yield_pct', 0):.2f}%){bz}"
         )
 
     _post({"embeds": [{
