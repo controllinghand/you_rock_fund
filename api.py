@@ -4386,6 +4386,17 @@ def version_upgrade():
         return {"success": False,
                 "output": f"Already up to date ({current}) — no upgrade needed"}
 
+    # The upgrade rebuilds and restarts every container, the scheduler included —
+    # mid-run that kills the trading sequence partway (an order half-placed, the
+    # remaining slots never filled). Refuse until the run finishes. Covers the
+    # dashboard Update button and the scheduler's auto-update, which both land here.
+    running = _run_in_progress()
+    if running:
+        return {"success": False,
+                "output": (f"Upgrade blocked — {running} is in progress. Updating "
+                           f"restarts the containers and would kill it partway "
+                           f"through. Try again once the run finishes.")}
+
     output_parts: list[str] = []
 
     # /host_repo is the live host filesystem (bind-mounted in docker-compose.yml).
@@ -4555,6 +4566,40 @@ _run_status: dict = {
 }
 
 
+# A scheduled run rewrites /data/run_progress.json at every phase and ticker, and
+# no single step goes this long without an update (the longest is a gateway retry:
+# ~4 min). A feed still "executing" past this is a run whose process died — the
+# scheduler clears that at boot, but this also covers the window before it reboots
+# (and boxes still on a pre-v5.2.141 scheduler).
+_RUN_PROGRESS_STALE_SEC = 60 * 60
+
+
+def _scheduled_run_progress() -> dict | None:
+    """The scheduler's live progress feed, or None when no scheduled run is live."""
+    progress_file = Path("/data/run_progress.json")
+    try:
+        if not progress_file.exists():
+            return None
+        if time.time() - progress_file.stat().st_mtime > _RUN_PROGRESS_STALE_SEC:
+            return None
+        sched = json.loads(progress_file.read_text())
+        return sched if sched.get("executing") else None
+    except Exception:
+        return None
+
+
+def _run_in_progress() -> str | None:
+    """Describe the trading run in progress (manual or scheduled), else None."""
+    if _run_status.get("executing"):
+        where = _run_status.get("current_ticker")
+        return f"a manual run{f' (working on {where})' if where else ''}"
+    sched = _scheduled_run_progress()
+    if sched:
+        where = sched.get("current_ticker") or sched.get("current_phase")
+        return f"the scheduled Monday run{f' (working on {where})' if where else ''}"
+    return None
+
+
 @app.get("/api/run-status")
 def get_run_status():
     """Poll this to check if a manual or scheduled run is in progress or just completed."""
@@ -4562,14 +4607,9 @@ def get_run_status():
     if _run_status.get("executing"):
         return _run_status
     # Check if scheduler wrote a progress file (scheduled run)
-    progress_file = Path("/data/run_progress.json")
-    try:
-        if progress_file.exists():
-            sched = json.loads(progress_file.read_text())
-            if sched.get("executing"):
-                return {**_run_status, **sched, "source": "scheduler"}
-    except Exception:
-        pass
+    sched = _scheduled_run_progress()
+    if sched:
+        return {**_run_status, **sched, "source": "scheduler"}
     return _run_status
 
 

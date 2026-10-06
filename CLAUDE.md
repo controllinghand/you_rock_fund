@@ -277,6 +277,10 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   — the settled-cash cap means it NEVER uses margin. On MARGIN accounts collateral + stock + park is also
   held to 98% of net liq (MARGIN_SWEEP_CEILING), so normal option mark moves don't tip the deployed gauge over 100%. Skipped (with a Discord alert) if any option slot
   went unfilled that week, so a broken Monday run isn't masked by parking idle cash. Fractional via cashQty.
+- Updates are REFUSED while a trading run is live (manual Run Now or the scheduled Monday run's
+  /data/run_progress.json) — the rebuild restarts the scheduler and would kill the run partway (v5.2.141).
+  That feed only clears itself when the run ends, so the scheduler clears a leftover executing:true at
+  boot (with a Discord "run interrupted — Run Now" alert), and /api/run-status ignores a feed idle > 60 min
 - All operational alerts are persisted in-app (/data/alerts.json) AND sent to Discord via the single
   _send_discord_alert chokepoint in api.py; the dashboard bell reads GET /api/alerts (per-box, standalone)
 
