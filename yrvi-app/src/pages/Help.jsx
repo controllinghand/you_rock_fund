@@ -151,8 +151,8 @@ const SETTINGS_GROUPS = [
       { label: 'Max Spread %',         default: '20%', range: '5% – 50%',    description: 'Skip a CSP if the bid/ask spread exceeds this percentage of the mid price. Protects against poor fills on illiquid options.' },
       { label: 'Min Bid Yield %',      default: '1%',  range: '0.5% – 3%',   description: 'Minimum premium on every put (bid ÷ strike). Below it, a limit at mid is tried only if mid clears it; otherwise the put is skipped. Also lets a wide spread proceed at the bid.' },
       { label: 'Max Spread Hard Cap %', default: '50%', range: '25% – 100%', description: 'Always skip regardless of yield if spread exceeds this. An absolute ceiling that cannot be overridden by bid yield.' },
-      { label: 'Min OI Notional',      default: '$1.0M', range: '$0.25M – $5.0M', description: 'Skip if open interest × strike × 100 is below this, unless the order-size rule below passes. Monthly puts use $250k.' },
-      { label: '…or OI ≥ N× Order Size', default: '5×', range: 'Off – 20×',  description: 'Also pass when open interest is at least N× the contracts being sold, so cheap names are not held to the dollar floor of a $300 stock.' },
+      { label: 'Open Interest Check: Test 1 (Dollar size)', default: '$1.0M', range: '$0.25M – $5.0M', description: 'An option is traded if it passes either Test 1 or Test 2, and skipped only if it fails both. Test 1 passes if at least this much of the option is already open in the market (open contracts × strike × 100 shares). Monthly puts (YRVI-CSP-M) always use $250k.' },
+      { label: 'Open Interest Check: Test 2 (Contracts vs. your order)', default: '5×', range: 'Off – 20×',  description: 'Passes if there are at least this many times as many open contracts as you are selling (e.g. 5× and selling 10 → needs 50+ open). Cheaper stocks often can\'t reach the dollar size in Test 1, so this gives them a fair way to pass. Off = Test 1 only. Options with fewer than 10 open contracts are always skipped.' },
     ],
   },
   {

@@ -94,6 +94,65 @@ function restartHitsExecWindow(restartVal, execVal) {
   return start <= end ? (r >= start && r <= end) : (r >= start || r <= end)
 }
 
+// The open-interest gate (trader._oi_shortfall): a strike passes if EITHER test
+// passes, so the two sliders are shown as one group with an OR between them.
+function OiLiquidityCheck({ settings, set }) {
+  const fmtM = v => `$${(v / 1e6).toFixed(2)}M`
+  const notional = settings.min_oi_notional ?? 1000000
+  const multiple = settings.min_oi_order_multiple ?? 5
+  const floor = settings.min_oi_floor ?? 10
+  // Monthly puts (YRVI-CSP-M) use a fixed $250k floor — see trader._min_oi_notional
+  const monthly = settings.csp_only_mode && settings.option_tenor === 'monthly'
+  const activeNotional = monthly ? 250000 : notional
+  return (
+    <div className="border border-gray-200 dark:border-gray-800 rounded-lg p-3 space-y-3">
+      <div>
+        <div className="text-gray-700 dark:text-gray-300 text-sm font-medium">Open Interest Check</div>
+        <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed">
+          An option is traded if it passes <span className="font-medium text-gray-600 dark:text-gray-400">either</span> test
+          below. It's skipped only if it fails <span className="font-medium text-gray-600 dark:text-gray-400">both</span>.
+        </div>
+      </div>
+      <SliderRow
+        label="Test 1: Dollar size"
+        value={notional}
+        min={250000} max={5000000} step={250000}
+        format={fmtM}
+        onChange={v => set('min_oi_notional', v)}
+        description={<>
+          Passes if at least {fmtM(notional)} worth of this option is already open in the market
+          (open contracts × strike × 100 shares).
+          {monthly && <> On monthly puts (YRVI-CSP-M) this is fixed at {fmtM(250000)}, so the slider has no effect.</>}
+        </>}
+      />
+      <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 dark:text-gray-600">
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-800" />
+        OR
+        <div className="flex-1 border-t border-gray-200 dark:border-gray-800" />
+      </div>
+      <SliderRow
+        label="Test 2: Contracts vs. your order"
+        value={multiple}
+        min={0} max={20} step={1}
+        format={v => (v > 0 ? `${v}×` : 'Off')}
+        onChange={v => set('min_oi_order_multiple', v)}
+        description={multiple > 0
+          ? <>
+              Passes if there are at least {multiple}× as many open contracts as you're selling
+              (e.g. selling 10 → needs {multiple * 10}+ open). Cheaper stocks often can't reach
+              the dollar size in Test 1, so this gives them a fair way to pass. Set to Off to use Test 1 only.
+            </>
+          : 'Off: only Test 1 counts.'}
+      />
+      <div className="text-xs text-gray-500 dark:text-gray-600 leading-relaxed bg-gray-50 dark:bg-gray-800/50 rounded-md px-3 py-2">
+        <span className="font-medium text-gray-600 dark:text-gray-400">Skipped when:</span> less than {fmtM(activeNotional)} is open
+        {multiple > 0 && <> <span className="font-medium">and</span> there are fewer than {multiple}× the contracts you're selling</>}.
+        Options with fewer than {floor} open contracts are always skipped.
+      </div>
+    </div>
+  )
+}
+
 function SliderRow({ label, value, min, max, step = 1, format = v => v, onChange, description }) {
   const fillPct = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0
   return (
@@ -1074,24 +1133,7 @@ export default function SettingsPage() {
           onChange={v => set('max_spread_hard_cap', v)}
           description="Always skip regardless of yield if spread exceeds this %"
         />
-        <SliderRow
-          label="Min OI Notional"
-          value={settings.min_oi_notional ?? 1000000}
-          min={250000} max={5000000} step={250000}
-          format={v => `$${(v / 1e6).toFixed(2)}M`}
-          onChange={v => set('min_oi_notional', v)}
-          description="Skip if open-interest notional (OI × strike × 100) is below this — unless the order-size rule below passes"
-        />
-        <SliderRow
-          label="…or OI ≥ N× Order Size"
-          value={settings.min_oi_order_multiple ?? 5}
-          min={0} max={20} step={1}
-          format={v => (v > 0 ? `${v}×` : 'Off')}
-          onChange={v => set('min_oi_order_multiple', v)}
-          description={(settings.min_oi_order_multiple ?? 5) > 0
-            ? `Also pass when open interest is at least ${settings.min_oi_order_multiple ?? 5}× the contracts being sold — so cheap names aren't held to the same dollar floor as $300 stocks`
-            : 'Off — only the notional floor applies'}
-        />
+        <OiLiquidityCheck settings={settings} set={set} />
       </Section>
 
       {/* Execution */}

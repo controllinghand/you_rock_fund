@@ -464,8 +464,8 @@ Shown under Strategy Track only on YRVI-CSP-M, and switched on when you pick tha
 | Max Spread % | 20% | 5% – 50% | Skip a CSP if the bid/ask spread exceeds this percentage of the mid price. Protects against poor fills on illiquid options. |
 | Min Bid Yield % | 1% | 0.5% – 3% | Minimum premium on every put (bid ÷ strike). Below it, a FOK limit at mid is tried only if mid clears it; otherwise the put is skipped. Also lets a wide spread proceed at the bid. |
 | Max Spread Hard Cap % | 50% | 25% – 100% | Always skip regardless of yield if spread exceeds this. An absolute ceiling that cannot be overridden by bid yield. |
-| Min OI Notional | $1.0M | $0.25M – $5.0M | Skip if the option's open-interest notional (open interest × strike × 100) is below this. A price-neutral liquidity floor that replaced the old flat "open interest ≥ 100" count, which unfairly penalized high-strike names (the same dollar liquidity shows fewer contracts on a $300 stock than a $30 one). A small absolute floor (10 contracts) still rejects totally-dead strikes. |
-| …or OI ≥ N× Order Size | 5× | Off – 20× | Also pass the open-interest check when OI is at least N× the contracts being sold, so cheap names aren't held to a $300 stock's dollar floor. |
+| Open Interest Check — Test 1: Dollar size | $1.0M | $0.25M – $5.0M | An option is traded if it passes **either** Test 1 or Test 2, and skipped only if it fails both. Test 1 passes if the option's open-interest notional (open interest × strike × 100) is at least this. A price-neutral liquidity floor that replaced the old flat "open interest ≥ 100" count, which unfairly penalized high-strike names (the same dollar liquidity shows fewer contracts on a $300 stock than a $30 one). A small absolute floor (10 contracts) still rejects totally-dead strikes. |
+| Open Interest Check — Test 2: Contracts vs. your order | 5× | Off – 20× | Passes if open interest is at least N× the contracts being sold (5× and selling 10 → 50+ open), so cheap names aren't held to a $300 stock's dollar floor. Off = Test 1 only. |
 
 ### Execution
 
