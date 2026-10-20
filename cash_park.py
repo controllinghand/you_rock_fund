@@ -9,7 +9,9 @@ it on the last trading day of the week so the cash is back for Monday.
 Two entry points, both driven by settings (feature is OFF by default):
 
   maybe_buy_park(csp_outcome, context, dry_run, ...)   — Monday, after CSPs execute
-  sell_park(dry_run, ...)                               — end of week (Thu/Fri job)
+  sell_park(dry_run, ...)                               — end of week (Thu/Fri job), and at
+                                                          the start of a Monday run / Run Now
+                                                          for a park left from an earlier day
 
 Design guards (see the buy path):
   • Idle-cash basis = IBKR BuyingPower read LIVE at sweep time on a cash/IRA
@@ -36,11 +38,12 @@ Design guards (see the buy path):
     wheel/CSP paths.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ib_insync import IB, Stock, Order
 
 import log_setup
+from app_timezone import LOCAL_TZ
 import settlement
 from config import (
     IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID_CASH_PARK, ACCOUNT, ACCOUNT_TYPE,
@@ -353,6 +356,11 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
 
         cash_account = bool(get_settings().get("cash_account", False))
         freed        = context.get("freed_capital", 0.0) or 0.0
+        # A park sold at the start of this run (monday_runner._sell_park_before_run).
+        # Treated exactly like the wheel's freed proceeds: a live run reads it from
+        # BuyingPower at sweep time; a preview adds it to idle cash, but NOT to the
+        # settled-cash cap — it settles T+1, so today's re-park can't spend it.
+        park_freed   = context.get("park_proceeds", 0.0) or 0.0
 
         # ── Base = idle cash available to park.
         #
@@ -384,7 +392,7 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # collateral, so the explicit committed_csp subtraction is still what keeps a
         # same-week re-run off margin (v5.2.58).
         if cash_account and buying_power is not None:
-            idle = max(0.0, buying_power) + (freed - planned_csp if dry_run else 0.0)
+            idle = max(0.0, buying_power) + (freed + park_freed - planned_csp if dry_run else 0.0)
             remainder = max(0.0, idle)
             basis = "live buying_power (cash account)"
         else:
@@ -529,7 +537,10 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         # ── Reconcile: don't double-buy if a prior park never sold ──
         state = _load_state()
         existing = state.get("cash_park")
-        if existing and existing.get("status") == "open" and existing.get("shares"):
+        # A preview that sold the park at the start of the run still finds it open
+        # in state.json (a preview writes nothing), so trust the run's own record.
+        if existing and existing.get("status") == "open" and existing.get("shares") \
+                and not context.get("park_sold"):
             log.warning(f"  ⚠️  Prior {existing.get('instrument')} park still open — not buying again")
             if not orders_dry_run:
                 _discord_alert(f"⚠️ **YRVI** Cash sweep: a prior {existing.get('instrument')} park "
@@ -777,11 +788,22 @@ def sell_park(dry_run: bool = False, client_id: int = None, ib: IB = None) -> di
 def _record_park_pnl(state: dict, realized: float) -> None:
     """Fold the sweep's realized P&L into this week's weekly_pnl (park_pnl field +
     total_realized). weekly_pnl was written Monday; the sell lands later the same
-    week, so we add park_pnl to the existing components."""
-    wp = state.get("weekly_pnl")
-    if not isinstance(wp, dict):
+    week, so we add park_pnl to the existing components.
+
+    ADDED, not assigned: a week can now hold two sales (the Monday run sells a
+    park left from earlier, re-parks, and Friday sells that one), and assigning
+    erased the first. A sale before this week's weekly_pnl exists — the Monday run
+    selling a stranded park, ahead of the row it is about to write — is queued in
+    pending_park_pnl instead; _write_weekly_pnl books it, exactly as it books
+    pending_called_away. Writing it into last week's row would put it in a week
+    that is already closed and posted."""
+    wp  = state.get("weekly_pnl")
+    now = datetime.now(LOCAL_TZ)
+    this_monday = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    if not isinstance(wp, dict) or wp.get("week_start") != this_monday:
+        state["pending_park_pnl"] = round((state.get("pending_park_pnl") or 0.0) + realized, 2)
         return
-    wp["park_pnl"] = round(realized, 2)
+    wp["park_pnl"] = round((wp.get("park_pnl") or 0.0) + realized, 2)
     # Re-sum EVERY realized component, not just the ones that existed when this
     # was written: this runs days after Monday and overwrites total_realized, so
     # a component missing from this list is silently erased from the week.
@@ -790,7 +812,7 @@ def _record_park_pnl(state: dict, realized: float) -> None:
         + (wp.get("cc_premium") or 0.0)
         + (wp.get("shares_sold_pnl") or 0.0)
         + (wp.get("called_away_pnl") or 0.0)
-        + realized, 2)
+        + wp["park_pnl"], 2)
     wp["last_updated"] = datetime.now().isoformat()
 
 

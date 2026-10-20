@@ -108,6 +108,13 @@ def _write_weekly_pnl(csp_premium: float, context: dict, fund_budget: float = 0,
     # cash_park.sell_park(), so a Monday re-run for the SAME week must not drop it.
     # A new week starts fresh at 0 (the ETF for that week hasn't been sold yet).
     park_pnl = prev.get("park_pnl", 0.0) if prev.get("week_start") == week_monday else 0.0
+    # Plus a sale this run made before this week's row existed (a park left open
+    # from an earlier week, sold at the start of the run) — queued by
+    # cash_park._record_park_pnl and drained here, like pending_called_away below.
+    pending_park = state.pop("pending_park_pnl", 0.0) or 0.0
+    if pending_park:
+        log.info(f"  🅿️  Booking cash-sweep P&L ${pending_park:+,.2f} from a park sold this run")
+        park_pnl += pending_park
 
     # Realized stock P&L from shares CALLED AWAY, queued by detect_assignments —
     # Saturday's or this morning's. Draining the queue here (and clearing it in the
@@ -434,7 +441,11 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # the fill target so a re-run only fills the *remaining* slots.
     already_open_puts  = list(context.get("open_short_put_tickers", []))
     skip_tickers       = set(context.get("skip_tickers", [])) | set(already_open_puts)
-    freed_capital      = context.get("freed_capital", 0.0)
+    # A cash-sweep sale at the start of the run frees cash exactly as a wheel share
+    # sale does, so it joins the same pool (and gets the same margin-account rule:
+    # not added there, because the parked stock was already inside net_liq).
+    freed_capital      = (context.get("freed_capital", 0.0) or 0.0) \
+                       + (context.get("park_proceeds", 0.0) or 0.0)
     reserved_capital   = context.get("reserved_capital", 0.0)
     active_wheel_count = context.get("active_wheel_count", 0)
     open_csp_count     = len(already_open_puts)
@@ -645,12 +656,49 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
 
 # ── Full Monday sequence (wheel check → CSP pipeline) ──────────
 
+def _sell_park_before_run(dry_run: bool = False) -> dict | None:
+    """Sell an open cash-sweep position before the wheel check, so its cash joins
+    this run's CSP budget. Returns sell_park's result when cash was (or, on a
+    preview, would be) freed; None otherwise. Never raises into the run.
+
+    A normal Monday finds nothing: Friday's job already sold it, and those proceeds
+    have settled by Monday (T+1). This catches the two cases that leave one open —
+    a Friday sell that failed (gateway down, app crash) and a re-run later in the
+    week after a Monday that parked cash.
+
+    A park bought TODAY is left alone. Selling it would be a same-day round trip (a
+    day trade), and a park is only bought once every option slot has filled, so a
+    same-day re-run has nothing to put the cash into anyway.
+    """
+    try:
+        cp = _load_state().get("cash_park") or {}
+        if cp.get("status") != "open" or not cp.get("shares"):
+            return None
+        if str(cp.get("buy_date") or "")[:10] == date.today().isoformat():
+            log.info(f"  🅿️  Cash sweep: {cp.get('instrument')} park was bought today — "
+                     f"left open (no same-day round trip); the end-of-week job sells it")
+            return None
+        log.info(f"  🅿️  Cash sweep: selling the open {cp.get('instrument')} park "
+                 f"({cp.get('shares')} sh, bought {str(cp.get('buy_date'))[:10]}) "
+                 f"so its cash backs this run's puts")
+        from cash_park import sell_park
+        result = sell_park(dry_run=dry_run)
+    except Exception as e:
+        log.error(f"❌ Cash sweep sell before run failed (non-fatal): {e}", exc_info=True)
+        return None
+    # "dry_run" covers both the preview and a live run with the Settings Dry Run
+    # toggle on. Anything else freed nothing: reconciled_none means IBKR held no
+    # shares, and a failure leaves the position open for the end-of-week job.
+    return result if result and result.get("status") in ("sold", "dry_run") else None
+
+
 def run_monday(dry_run: bool = False, progress_callback=None,
                account_summary: tuple = None, manual: bool = False,
                client_id: int = None, phase_callback=None) -> dict:
     """
-    THE Monday sequence, for every caller: reconcile → wheel check → CSP pipeline
-    → cash sweep, with the wheel check's in-memory results driving the pipeline.
+    THE Monday sequence, for every caller: reconcile → sell a leftover cash-sweep
+    park → wheel check → CSP pipeline → cash sweep, with the wheel check's
+    in-memory results driving the pipeline.
 
     dry_run=True  → faithful preview, places no orders (Run Screener)
     dry_run=False → live execution: sells shares, writes CCs, opens CSPs
@@ -690,6 +738,12 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     _phase("reconcile")
     reconcile = _reconcile_before_run(dry_run=dry_run)
 
+    # Sell a parked cash-sweep position left over from an earlier day, so its cash
+    # backs this run's puts instead of sitting in QQQ/SGOV (stock has no loan value
+    # in a cash/IRA account, so a park is collateral the puts can't use).
+    _phase("cash sweep sell")
+    park_sale = _sell_park_before_run(dry_run=dry_run)
+
     # Hand the reconciled holdings straight to the wheel check, rather than
     # letting it re-read state.json — which on a preview would be the stale file,
     # since the reconcile's own write happens under a flag the preview shares.
@@ -701,6 +755,11 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     log.info(f"✅ Wheel check done — freed ${wheel.get('freed_capital', 0):,.0f}  "
              f"reserved ${wheel.get('reserved_capital', 0):,.0f}  "
              f"skip {wheel.get('skip_tickers') or 'none'}")
+    # Kept apart from the wheel's freed_capital (which Discord and the Run Now
+    # banner label as share-sale proceeds); the budget and the sweep add both.
+    if park_sale:
+        wheel["park_proceeds"] = park_sale.get("proceeds") or 0.0
+        wheel["park_sold"]     = True
 
     _phase("CSP pipeline")
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,
@@ -732,4 +791,4 @@ def run_monday(dry_run: bool = False, progress_callback=None,
         log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
 
     return {"dry_run": dry_run, "wheel": wheel, "csp": csp, "cash_park": park,
-            "reconcile": reconcile}
+            "cash_park_sale": park_sale, "reconcile": reconcile}

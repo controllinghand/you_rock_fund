@@ -1,3 +1,16 @@
+## [5.2.144] — 2026-10-20
+
+### Added
+- **The Monday run sells a leftover cash-sweep park before it trades.** The scheduled 9:55 job, Run Now and Run Screener (as a preview) all go through `monday_runner.run_monday`, which now sells an open QQQ/SGOV park bought before today as its first step after the reconcile. Before, only the end-of-week job could sell it, so a failed Friday sell or a re-run later in the week traded with that cash stuck outside the puts. In a cash/IRA account stock has no loan value, so the parked cash could not back a put at all. The proceeds join the CSP budget the same way wheel share-sale proceeds do, and the end-of-run sweep can park the new remainder.
+- A park bought **today** is left open. Selling it would be a same-day round trip (a day trade), and a park is only bought once every option slot fills, so a same-day re-run has nothing to put the cash into.
+- Normal weeks are unchanged: Friday's job sells the park and those proceeds have settled (T+1) by Monday.
+
+### Fixed
+- **A second park sale in one week erased the first's P&L.** `cash_park._record_park_pnl` assigned `park_pnl` instead of adding to it. It now adds. A sale made before this week's `weekly_pnl` row exists (the Monday run selling last week's park) is queued in `pending_park_pnl` and booked by `_write_weekly_pnl`, as `pending_called_away` is, instead of landing in last week's closed row.
+
+### Settlement
+- Writing puts against same-day stock-sale proceeds is not restricted by IBKR (the 2026-09-21 HUT put filled against unsettled cash; see 5.2.123/5.2.128), so the puts can use the sale. Buying stock with them is what's restricted, and the end-of-run re-park is already capped by `SettledCash`, so it parks only settled money. A preview adds the sale to idle cash but not to that cap.
+
 ## [5.2.139] — 2026-10-03
 
 ### Changed
