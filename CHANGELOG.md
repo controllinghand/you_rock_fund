@@ -1,3 +1,11 @@
+## [5.2.145] — 2026-10-20
+
+### Added
+- **Run Screener keeps its last result.** Leaving This Week used to throw away the preview, so coming back meant another 1–2 minute run. The api now saves each preview to `/data/last_screener.json` and serves it from `GET /api/screener/last`. The page shows it on open, with a **Last preview** bar giving the time and age (amber once it's over a day old) and a **Refresh** button that reruns it. It's also there after a reload and on another device.
+- **A preview still running is picked up.** The request keeps running server-side after you navigate away. When you come back the page shows it as in progress, with elapsed time counted from when it started, and displays the result when it finishes.
+- A second preview while one is running gets a 409 instead of starting another dry run on the same IBKR client id. The page follows the running one.
+- A saved preview is only returned under the trading mode it was made in, so a paper preview never shows on a live box.
+
 ## [5.2.144] — 2026-10-20
 
 ### Added

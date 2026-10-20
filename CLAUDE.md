@@ -294,6 +294,9 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   /data/run_progress.json) — the rebuild restarts the scheduler and would kill the run partway (v5.2.141).
   That feed only clears itself when the run ends, so the scheduler clears a leftover executing:true at
   boot (with a Discord "run interrupted — Run Now" alert), and /api/run-status ignores a feed idle > 60 min
+- Run Screener's last result is saved to /data/last_screener.json (a UI cache, not trading state) and
+  served by GET /api/screener/last with `running_since`, so This Week shows it on return and follows a
+  preview still running server-side. A concurrent /api/screener gets 409 (v5.2.145)
 - All operational alerts are persisted in-app (/data/alerts.json) AND sent to Discord via the single
   _send_discord_alert chokepoint in api.py; the dashboard bell reads GET /api/alerts (per-box, standalone)
 

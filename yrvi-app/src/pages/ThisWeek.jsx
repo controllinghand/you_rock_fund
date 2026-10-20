@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
-import { Clock, TrendingUp, AlertCircle, Play } from 'lucide-react'
+import { Clock, TrendingUp, AlertCircle, Play, RefreshCw } from 'lucide-react'
 
 function useCountdown(isoStr) {
   const [label, setLabel] = useState('')
@@ -29,17 +29,31 @@ function fmtDate(s) {
   } catch { return s }
 }
 
-// Ticks once per second while `active`, resetting to 0 each time it turns on.
-// Drives the dry-run progress display so a 1–2 min preview never looks frozen.
-function useElapsedSeconds(active) {
+// Ticks once per second while `active`, counting from `since` (an ISO time) or from
+// when it turned on. Drives the dry-run progress display so a 1–2 min preview never
+// looks frozen — including one already running when the page was opened.
+function useElapsedSeconds(active, since) {
   const [secs, setSecs] = useState(0)
   useEffect(() => {
     if (!active) { setSecs(0); return }
-    const start = Date.now()
-    const id = setInterval(() => setSecs(Math.floor((Date.now() - start) / 1000)), 1000)
+    const start = since ? new Date(since).getTime() : Date.now()
+    const tick = () => setSecs(Math.max(0, Math.floor((Date.now() - start) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
     return () => clearInterval(id)
-  }, [active])
+  }, [active, since])
   return secs
+}
+
+// "just now" / "12 min ago" / "3 h ago" / "2 days ago"
+function fmtAge(date) {
+  const mins = Math.floor((Date.now() - date.getTime()) / 60000)
+  if (mins < 1)  return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)  return `${hrs} h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days} day${days !== 1 ? 's' : ''} ago`
 }
 
 // Approximate phases of the /api/screener dry-run, in real execution order.
@@ -65,12 +79,48 @@ export default function ThisWeek() {
   const [manualRunning, setManualRunning] = useState(false)
   const [manualMsg, setManualMsg]     = useState(null)
   const [runStatus, setRunStatus]     = useState(null)
-  const elapsed = useElapsedSeconds(loading)
+  // Start time of a preview running server-side that this page didn't start (it was
+  // started before navigating away, or from another device). We poll until it ends.
+  const [waitingSince, setWaitingSince] = useState(null)
+  const elapsed = useElapsedSeconds(loading, waitingSince)
+
+  const showSaved = useCallback(result => {
+    setScreener(result)
+    setRunAt(result?.run_at ? new Date(result.run_at) : null)
+  }, [])
 
   useEffect(() => {
     axios.get('/api/status').then(r => setStatus(r.data)).catch(() => {})
     axios.get('/api/run-status').then(r => setRunStatus(r.data)).catch(() => {})
-  }, [])
+    // The server keeps the last preview, so coming back to this page shows it
+    // instead of an empty card — and picks up one that is still running.
+    axios.get('/api/screener/last').then(r => {
+      if (r.data.result) showSaved(r.data.result)
+      if (r.data.running_since) {
+        setLoading(true)
+        setWaitingSince(r.data.running_since)
+      }
+    }).catch(() => {})
+  }, [showSaved])
+
+  useEffect(() => {
+    if (!waitingSince) return
+    const id = setInterval(() => {
+      axios.get('/api/screener/last').then(r => {
+        if (r.data.running_since) return
+        setWaitingSince(null)
+        setLoading(false)
+        const result = r.data.result
+        if (result) showSaved(result)
+        // The run ended but left no newer result: it failed. The error itself
+        // went to the request that started it, so just say so.
+        if (!result?.run_at || new Date(result.run_at) < new Date(waitingSince)) {
+          setError('The preview finished without a new result — run it again.')
+        }
+      }).catch(() => {})
+    }, 3000)
+    return () => clearInterval(id)
+  }, [waitingSince, showSaved])
 
   // Always poll run-status every 5s so we catch both manual and scheduled runs
   useEffect(() => {
@@ -160,14 +210,18 @@ export default function ThisWeek() {
       // its own). With multiple wheels active this routinely exceeds 60s, so give
       // it generous headroom rather than aborting a run that's still working.
       const res = await axios.get('/api/screener', { timeout: 150000 })
-      setScreener(res.data)
-      setRunAt(new Date())
+      showSaved(res.data)
+      setLoading(false)
     } catch (err) {
+      if (err.response?.status === 409) {
+        // One is already running (another tab or device) — follow it instead.
+        const r = await axios.get('/api/screener/last').catch(() => null)
+        if (r?.data?.running_since) { setWaitingSince(r.data.running_since); return }
+      }
       setError(err.response?.data?.detail ?? err.message)
-    } finally {
       setLoading(false)
     }
-  }, [])
+  }, [showSaved])
 
   const positions = screener?.positions ?? []
 
@@ -308,6 +362,29 @@ export default function ThisWeek() {
       {/* Results */}
       {screener && !loading && (
         <>
+          <div className="flex items-center justify-between gap-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-5 py-3">
+            <div className="text-sm text-gray-500 min-w-0">
+              Last preview{runAt && (
+                <>
+                  {' '}<span className="text-gray-900 dark:text-white">
+                    {runAt.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                  </span>
+                  <span className={Date.now() - runAt.getTime() > 86400000 ? 'text-amber-600 dark:text-amber-400' : ''}>
+                    {' '}· {fmtAge(runAt)}
+                  </span>
+                </>
+              )}
+            </div>
+            <button
+              onClick={runScreener}
+              className="flex items-center gap-2 px-3 py-1.5 shrink-0 bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium rounded-lg transition-colors"
+              title="Run the preview again with live data"
+            >
+              <RefreshCw size={14} />
+              Refresh
+            </button>
+          </div>
+
           {/* Capital allocation (shown when wheel holdings are active) */}
           {(screener.active_wheel_count ?? 0) > 0 && (() => {
             const slotsTotal   = screener.num_positions ?? ((screener.active_wheel_count ?? 0) + positions.length)
@@ -618,11 +695,6 @@ export default function ThisWeek() {
             {' '}Running this again, or clicking <span className="font-medium">Run Now</span>, executes this same plan for real.
           </div>
 
-          {runAt && (
-            <div className="text-gray-400 dark:text-gray-700 text-xs text-right">
-              Screener run at {runAt.toLocaleTimeString()}
-            </div>
-          )}
         </>
       )}
 
