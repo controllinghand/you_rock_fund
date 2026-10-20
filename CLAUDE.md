@@ -53,7 +53,7 @@ directly — it is a symlink into `/data` and rotation would rename the link.
 |---|---|---|
 | Saturday 8:00AM | Assignment detection | `wheel_manager.detect_assignments()` |
 | Saturday 6:00PM | Screener preview | `screener` + `position_sizer` |
-| Monday 9:55AM | Reconcile vs IBKR → wheel check → CSP pipeline → cash sweep (one chained job) | `scheduler.run_pipeline()` → `monday_runner.run_monday()` |
+| Monday 9:55AM | Reconcile vs IBKR → sell leftover cash-sweep park → wheel check → CSP pipeline → cash sweep (one chained job) | `scheduler.run_pipeline()` → `monday_runner.run_monday()` |
 | Tue–Thu 9:00AM | Daily risk monitor | `risk_manager.run_daily_monitor()` |
 | Thu/Fri 12:30PM | Cash-sweep sell (last trading day only) | `cash_park.sell_park()` |
 
@@ -192,6 +192,18 @@ Step 0 — reconcile (_reconcile_before_run):
   → only bails (leaving state untouched) when IBKR returns NO open positions at
     all AND GrossPositionValue can't confirm the account is genuinely flat
 
+Step 0c — sell a leftover cash-sweep park (_sell_park_before_run):
+  → if state.json has an OPEN cash_park bought BEFORE today, sell it (sell_park) so
+    its cash backs this run's puts — a park is collateral a cash/IRA account's puts
+    can't use (stock has no loan value there). Normal Mondays find nothing (Friday
+    sold it). Catches a failed Friday sell and a mid-week re-run.
+  → a park bought TODAY is left open: no same-day round trip, and a park is only
+    bought once every slot filled, so a same-day re-run has nothing to deploy into
+  → proceeds ride in the context as park_proceeds (kept apart from the wheel's
+    freed_capital); the CSP budget and the sweep add them like freed_capital
+  → P&L: added to this week's weekly_pnl.park_pnl, or queued in pending_park_pnl
+    when this week's row doesn't exist yet, and drained by _write_weekly_pnl
+
 Step A — wheel_check (run_wheel_check):
   → call get_all_candidates() to get screener ticker set
   → Step 0b: if csp_only_mode → sell every UNCOVERED holding at market, skip all remaining
@@ -273,7 +285,8 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Daily monitor (Tue–Thu) alerts if a ticker drops from screener mid-week
 - Cash sweep (opt-in, default OFF) parks the week's undeployed remainder in QQQ (default) or SGOV
   after the Monday option workflow, then sells it on the week's last trading day (Fri, or Thu when
-  Fri is a holiday). Buy = min(remainder [+ this week's premium if enabled], settled cash, 10% net-liq)
+  Fri is a holiday). Any Monday run / Run Now also sells a park left open from an EARLIER day before
+  the wheel check, so a failed Friday sell or a re-run doesn't leave that cash out of the puts. Buy = min(remainder [+ this week's premium if enabled], settled cash, 10% net-liq)
   — the settled-cash cap means it NEVER uses margin. On MARGIN accounts collateral + stock + park is also
   held to 98% of net liq (MARGIN_SWEEP_CEILING), so normal option mark moves don't tip the deployed gauge over 100%. Skipped (with a Discord alert) if any option slot
   went unfilled that week, so a broken Monday run isn't masked by parking idle cash. Fractional via cashQty.
