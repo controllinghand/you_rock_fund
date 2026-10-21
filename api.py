@@ -3845,14 +3845,66 @@ def get_performance():
         "net_growth_pct": net_growth_pct,
     }
 
+# The last Run Screener result, so leaving This Week (or reloading, or opening it on
+# another device) doesn't throw away a 1–2 min preview. File-backed for the same
+# reason as ALERTS_FILE: the api restarts on upgrades and trading-mode switches.
+LAST_SCREENER_FILE = (
+    Path("/data/last_screener.json") if CONTAINERIZED
+    else BASE_DIR / "last_screener.json"
+)
+# When the preview in flight started (None when idle). The request keeps running
+# server-side after the browser navigates away, so a page that comes back can show
+# "still running" and pick up the result instead of starting a second preview on
+# the same IBKR client id.
+_screener_running = {"started_at": None}
+_screener_lock    = threading.Lock()
+
+
+def _save_last_screener(result: dict, trading_mode: str) -> None:
+    try:
+        tmp = LAST_SCREENER_FILE.with_name(LAST_SCREENER_FILE.name + ".tmp")
+        tmp.write_text(json.dumps({"trading_mode": trading_mode, "result": result}, default=str))
+        tmp.replace(LAST_SCREENER_FILE)
+    except Exception as e:
+        logger.warning(f"Could not save last screener result: {e}")
+
+
+@app.get("/api/screener/last")
+def last_screener():
+    """The last saved Run Screener result (or null) and whether one is running now.
+    A result saved under the other trading mode is not returned — a paper preview
+    must never show on a live box."""
+    result = None
+    try:
+        if LAST_SCREENER_FILE.exists():
+            saved = json.loads(LAST_SCREENER_FILE.read_text())
+            if saved.get("trading_mode") == load_settings().get("trading_mode", "paper"):
+                result = saved.get("result")
+    except Exception as e:
+        logger.warning(f"Could not read last screener result: {e}")
+    return {"result": result, "running_since": _screener_running["started_at"]}
+
+
 @app.get("/api/screener")
 def run_screener():
     """
     Preview the FULL Monday sequence (wheel check + CSP pipeline) with zero side
     effects — a dry run of exactly what the scheduler / Run Now will execute.
     Connects to IBKR to query option chains for the covered-call decisions, so it
-    takes ~20–40s. Places no orders, writes no state, posts no Discord.
+    takes ~20–40s. Places no orders, writes no state, posts no Discord. The result
+    is saved for GET /api/screener/last (a UI cache, not trading state).
     """
+    with _screener_lock:
+        if _screener_running["started_at"]:
+            raise HTTPException(status_code=409, detail="A screener preview is already running")
+        _screener_running["started_at"] = datetime.now(PST).isoformat()
+    try:
+        return _run_screener()
+    finally:
+        _screener_running["started_at"] = None
+
+
+def _run_screener():
     settings = load_settings()
     try:
         import importlib, sys
@@ -3896,7 +3948,7 @@ def run_screener():
         state           = load_state()
         wheel_holdings  = state.get("wheel_holdings", [])
 
-        return {
+        result = {
             "positions":          positions,
             "raw_targets":        csp.get("raw_targets", []),
             "total_premium":      total_premium,
@@ -3934,6 +3986,8 @@ def run_screener():
             "dry_run":              True,
             "run_at":               datetime.now(PST).isoformat(),
         }
+        _save_last_screener(result, settings.get("trading_mode", "paper"))
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
