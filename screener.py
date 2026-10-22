@@ -40,6 +40,18 @@ def _entry_params(settings: dict | None = None) -> tuple[dict, dict | None]:
             "earnings_days_hide": cyc["dte"] + 1, "earnings_recent_hide": 3}, cyc
 
 
+def _chain_price(r: dict) -> float:
+    """The stock price to measure a row's put strike against: the option chain's own
+    `underlying_price` (quoted with the chain the strike came from), falling back to
+    `latest_price` (the prices table's last close) when Render doesn't send it.
+
+    Mixing the two overstated the buffer after a big move: on 2026-10-22 the monthly
+    rows were fetched midday, TTMI's 20Δ put was $60 off a ~$74 stock, but against
+    the prior $102.15 close it scored a 41% buffer and ranked #1."""
+    px = r.get("underlying_price")
+    return px if isinstance(px, (int, float)) and px > 0 else r["latest_price"]
+
+
 def _row_expiry(r: dict):
     """A screener row's expiry as a date, or None if missing/unparseable."""
     try:
@@ -229,7 +241,7 @@ def get_top_targets(n=5, always_include: set = None):
     # at its own target delta (0.20, or the VIX stress rule's 0.10), so they'd only
     # drop names for a strike that will never be traded.
     for r in rows:
-        r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
+        r["_buffer_pct"] = (_chain_price(r) - r["put_20d_strike"]) / _chain_price(r)
     if not monthly:
         before = len(rows)
         rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= max_delta]
@@ -284,7 +296,9 @@ def get_top_targets(n=5, always_include: set = None):
         bz          = "✅" if r.get("buyzone_flag") else "❌"
         dte         = days_to_expiry(r)
         print(f"\n#{i} {fire} {r['ticker']} — {r.get('sector', 'N/A')}  [score: {score:.3f}]")
-        print(f"   Price:       ${r['latest_price']:.2f}")
+        px = _chain_price(r)
+        print(f"   Price:       ${px:.2f}" + (f"  (last close ${r['latest_price']:.2f})"
+                                               if px != r["latest_price"] else ""))
         print(f"   Strike:      ${r['put_20d_strike']:.2f}")
         print(f"   Buffer:      {buffer_pct:.2f}%  {buf_icon}")
         print(f"   Premium:     ${r['put_20d_premium']:.2f}  ({premium_pct:.2f}%)")
@@ -357,7 +371,7 @@ def get_all_candidates(ignore_earnings_filter=False, market_cap_min=None,
     if not retention:
         rows = [r for r in rows if abs(r.get("put_20d_delta", -1)) <= max_delta]
         for r in rows:
-            r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
+            r["_buffer_pct"] = (_chain_price(r) - r["put_20d_strike"]) / _chain_price(r)
         rows = [r for r in rows if r["_buffer_pct"] >= min_buffer]
 
     if not ignore_earnings_filter:
