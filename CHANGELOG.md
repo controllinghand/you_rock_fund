@@ -1,3 +1,9 @@
+## [5.2.146] — 2026-10-22
+
+### Fixed
+- **A timed-out share sale left its market order working at IBKR.** When the wheel check's market sell (CSP-only mode, dropped screener, stop-loss, earnings, no viable CC) didn't fill within 60s, `_sell_stock_market` logged "MANUAL ACTION REQUIRED" and returned without cancelling, so the DAY order stayed live. On 2026-10-22 (dev box) a 400-share HUT sell sat in Submitted past the window and was still working a minute later. It could have filled after the run had written the shares off as unsold, and the run kept treating HUT as held. A timed-out sale now cancels its order and waits up to 15s for the cancel to confirm before reading the fill. If the cancel never confirms, it logs that the order may still be working, with its orderId and permId.
+- **Shares sold before the cancel are booked.** All shares filled during the cancel → a normal sale. Some filled → the holding's share count drops, and the proceeds and realized P&L go into `freed_capital` / `shares_sold_pnl` (the `sell_failed` entry gains `shares_sold`, `fill_price`, `proceeds` and `realized_pnl`). The partial sale is posted to Discord like a full one.
+
 ## [5.2.145] — 2026-10-20
 
 ### Added
