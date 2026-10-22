@@ -1,3 +1,12 @@
+## [5.2.147] — 2026-10-22
+
+### Fixed
+- **Monthly puts (YRVI-CSP-M) found no candidates Wednesday–Friday.** The screen asked Render for weekly put rows and kept the weekly "at least 3 days to expiry" filter, so late in the week every row failed it. On Thu 2026-10-22 an entry-window run got 82 names, kept 0, sold the CSP-only holdings and opened no monthly puts. That filter now applies to weekly puts only. Monthly puts always trade the cycle's monthly expiry.
+
+### Changed
+- **Monthly puts rank on the monthly put.** In monthly mode the screener asks Render for `expiry=monthly` (greer_project #38), so each name's premium, delta and buffer describe its next monthly put, not this week's. Rows are kept only if they expire on the cycle's monthly date. If the server answers with anything else (an older deploy that ignores the parameter and returns weekly rows, a 503 before the monthly table is filled, or a 400), the screen falls back to the weekly rows, with a ⚠️ line in the log. The trader re-quotes every name on the monthly chain either way, as before.
+- The monthly list differs from the weekly one. On 2026-10-22 it had 215 names against 82, sharing 60. The 40% IV floor and the other server-side filters now apply to each name's monthly row, so some low-volatility large caps drop out and names that list only monthly options come in.
+
 ## [5.2.146] — 2026-10-22
 
 ### Fixed
