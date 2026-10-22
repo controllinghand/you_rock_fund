@@ -1,3 +1,9 @@
+## [5.2.148] — 2026-10-22
+
+### Fixed
+- **The screener's buffer is measured against the option chain's own stock price.** Buffer (how far the 20Δ put strike sits below the stock) is half of the ranking score, and it was measured against `latest_price`, the last close loaded into Render's prices table, while the strike came from the option-chain fetch. When those came from different moments the buffer was overstated after a big move. On 2026-10-22 the monthly rows were fetched midday, and TTMI, down 27% to ~$74, was scored against its $102.15 prior close: a 41% buffer and #1 rank for a put really ~19% below the price. The screen now uses the row's `underlying_price` (quoted with the chain) when Render sends it, and falls back to `latest_price` otherwise. Applies to the entry ranking, the Min Buffer filter and the retention screen. With the live prices, TTMI drops to #17 (19.3%), MTSI #2 → #49 and CRDO #3 → #28.
+- Needs the greer_project change that adds `underlying_price` to `/api/targets/csp`. Until that's deployed nothing changes, because every row falls back to `latest_price`.
+
 ## [5.2.147] — 2026-10-22
 
 ### Fixed
