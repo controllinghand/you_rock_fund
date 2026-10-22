@@ -25,9 +25,10 @@ PARAMS = {
 def _entry_params(settings: dict | None = None) -> tuple[dict, dict | None]:
     """Render query params for NEW CSP entries, plus the monthly cycle (None when weekly).
 
-    Monthly (YRVI-CSP-M) keeps the weekly screen's ranking inputs (IV floor, market
-    cap, Best Target) but drops the weekly-only premium floor. The trader re-quotes
-    each name on its MONTHLY chain and applies the 1% bar to that put. The earnings
+    Monthly (YRVI-CSP-M) asks Render for each name's NEXT MONTHLY put row
+    (`expiry=monthly`, greer_project #38) so the screen ranks on the put it will
+    actually sell, and drops the weekly premium floor. The trader still re-quotes
+    each name on its monthly chain and applies the 1% bar to that put. The earnings
     window stretches to the monthly expiry, and names that reported in the last 3
     days are hidden too. Retention (get_all_candidates) keeps plain PARAMS: a
     CSP-only box sells its holdings on Monday regardless of the screen.
@@ -35,8 +36,51 @@ def _entry_params(settings: dict | None = None) -> tuple[dict, dict | None]:
     if tenor.active(settings) != tenor.MONTHLY:
         return {**PARAMS, "earnings_days_hide": _filters(settings)[2]}, None
     cyc = tenor.cycle()
-    return {**PARAMS, "min_target_premium_pct": 0,
+    return {**PARAMS, "expiry": "monthly", "min_target_premium_pct": 0,
             "earnings_days_hide": cyc["dte"] + 1, "earnings_recent_hide": 3}, cyc
+
+
+def _row_expiry(r: dict):
+    """A screener row's expiry as a date, or None if missing/unparseable."""
+    try:
+        return datetime.strptime(r["expiry"], "%a, %d %b %Y %H:%M:%S %Z").date()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _fetch_entry_rows(params: dict, monthly: dict | None) -> list:
+    """Fetch the entry screen's rows. Monthly rows are only trusted when they expire
+    on the cycle's monthly date; otherwise fall back to the weekly screen.
+
+    The check matters because a Render deploy without `expiry=monthly` ignores the
+    unknown parameter and answers 200 with WEEKLY rows. A 503 means the monthly
+    table hasn't been filled yet (first fetch after a deploy), and a 400 means an
+    API that rejects the value. In every one of those cases the weekly rows are
+    still a usable ranking: the trader re-quotes each name on the monthly chain.
+    """
+    response = requests.get(URL, params=params, headers=HEADERS, timeout=60)
+    if not monthly:
+        response.raise_for_status()
+        return response.json().get("rows", [])
+
+    want = monthly["next_expiry"]
+    if response.ok:
+        rows    = response.json().get("rows", [])
+        matched = [r for r in rows if _row_expiry(r) == want]
+        if matched:
+            if len(matched) < len(rows):
+                print(f"🌙 Dropped {len(rows) - len(matched)} row(s) not expiring {want}")
+            print(f"🌙 Ranking on {len(matched)} monthly ({want}) put rows")
+            return matched
+        reason = f"{len(rows)} row(s), none expiring {want}"
+    else:
+        reason = f"HTTP {response.status_code}"
+    print(f"⚠️  Monthly screener rows unavailable ({reason}) — falling back to the weekly "
+          f"screen; the trader still re-quotes each name on the {want} chain")
+    weekly = {k: v for k, v in params.items() if k != "expiry"}
+    response = requests.get(URL, params=weekly, headers=HEADERS, timeout=60)
+    response.raise_for_status()
+    return response.json().get("rows", [])
 
 # ── Render cold-start warm-up ─────────────────────────────────
 # The ledger-sync service runs on Render's free tier, which spins the instance
@@ -147,11 +191,7 @@ def get_top_targets(n=5, always_include: set = None):
     if monthly:
         print(f"🌙 Monthly puts: next expiry {monthly['next_expiry']} ({monthly['dte']} days) — "
               f"strikes are re-quoted on the monthly chain at execution")
-    response = requests.get(URL, params=params, headers=HEADERS, timeout=60)
-    response.raise_for_status()
-
-    data = response.json()
-    rows = data.get("rows", [])
+    rows = _fetch_entry_rows(params, monthly)
     print(f"✅ {len(rows)} candidates returned")
 
     # ── Filter 0: user-excluded tickers ───────────────────────
@@ -168,6 +208,10 @@ def get_top_targets(n=5, always_include: set = None):
     print(f"🔧 {len(rows)} wheel-ready candidates")
 
     # ── Filter 2: must expire at least 4 days out ─────────────
+    # Weekly only. Monthly puts always trade the cycle's monthly expiry, whatever
+    # the row says. When the monthly rows were unavailable (weekly fallback) this
+    # filter dropped EVERY name Wed–Fri: on Thu 2026-10-22 all 82 weekly rows
+    # expired the next day and a monthly entry-window run opened no puts.
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     def days_to_expiry(r):
         try:
@@ -175,13 +219,15 @@ def get_top_targets(n=5, always_include: set = None):
             return (exp - today).days
         except:
             return 99
-    before = len(rows)
-    rows = [r for r in rows if days_to_expiry(r) >= MIN_DAYS_TO_EXPIRY]
-    print(f"📅 {len(rows)} passed expiry filter (removed {before - len(rows)} expiring too soon)")
+    if not monthly:
+        before = len(rows)
+        rows = [r for r in rows if days_to_expiry(r) >= MIN_DAYS_TO_EXPIRY]
+        print(f"📅 {len(rows)} passed expiry filter (removed {before - len(rows)} expiring too soon)")
 
-    # ── Filters 3–4: weekly strike delta ≤ Max Delta and buffer ≥ Min Buffer ─────
-    # Both describe the WEEKLY put. Monthly re-picks the strike on its own chain,
-    # so they'd only drop names for a strike that will never be traded.
+    # ── Filters 3–4: strike delta ≤ Max Delta and buffer ≥ Min Buffer ─────
+    # Skipped for monthly: the trader re-picks the monthly strike on its own chain
+    # at its own target delta (0.20, or the VIX stress rule's 0.10), so they'd only
+    # drop names for a strike that will never be traded.
     for r in rows:
         r["_buffer_pct"] = (r["latest_price"] - r["put_20d_strike"]) / r["latest_price"]
     if not monthly:

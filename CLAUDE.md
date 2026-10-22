@@ -261,8 +261,10 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - DEFAULT for underwater holdings: write a ~0.20-delta CC BELOW cost (keep shares + premium) — do NOT force-sell
 - DEFAULT through earnings: keep the holding and write the CC (wheel_cc_ignore_earnings_filter=true);
   earnings filter still applies to NEW CSP entries via the Earnings Window setting
-- MONTHLY puts (YRVI-CSP-M = csp_only_mode + option_tenor "monthly"): the Render screen still ranks (weekly premium floor,
-  0.21-delta and 5% buffer filters dropped; earnings excluded through the monthly expiry, unknown dates fail closed), then the
+- MONTHLY puts (YRVI-CSP-M = csp_only_mode + option_tenor "monthly"): the Render screen ranks each name's NEXT MONTHLY put
+  row (`expiry=monthly`, v5.2.147 / greer_project #38; rows are kept only if they expire on tenor.cycle()'s monthly date,
+  else it falls back to the weekly screen) with the weekly premium floor, days-to-expiry, 0.21-delta and 5% buffer filters
+  dropped (earnings excluded through the monthly expiry, unknown dates fail closed), then the
   trader RE-QUOTES each candidate on the monthly chain (trader._monthly_start → verify_and_adjust_strike). New puts only open
   in the entry window (the first trading day after the third Friday plus one catch-up Monday); otherwise open monthlies
   fill the slots through the normal open-short-put count
