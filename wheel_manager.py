@@ -32,7 +32,8 @@ MID_WAIT_SECS    = 120
 BID_WAIT_SECS    = 120
 MARKET_WAIT_SECS = 60
 MARKET_POLL_SECS = 5
-CC_DELTA_MIN     = 0.20   # minimum call delta required to sell a covered call
+CANCEL_CONFIRM_SECS = 15  # how long a timed-out share sale's cancel may take to confirm
+CC_DELTA_MIN    = 0.20   # minimum call delta required to sell a covered call
 MAX_CC_STRIKES   = 25     # max option strikes to evaluate per holding
 
 # Covered-call chain scan waits for option greeks to stream in. A fixed sleep
@@ -570,6 +571,23 @@ def _sell_stock_market(ib: IB, ticker: str, shares: int, reason: str,
     order = MarketOrder("SELL", shares, account=ACCOUNT, tif="DAY")
     trade = ib.placeOrder(qualified[0], order)
 
+    def _sold(n: int) -> tuple:
+        """Log + post `n` sold shares; returns (fill_price, proceeds)."""
+        fill     = trade.orderStatus.avgFillPrice
+        proceeds = round(n * fill, 2)
+        realized = round(proceeds - (assigned_strike * n), 2) \
+                   if assigned_strike > 0 else None
+        log.info(f"  ✅ Sold: {n}x {ticker} @ ${fill:.2f} = ${proceeds:,.0f}")
+        discord_poster.post_emergency_share_sale({
+            "ticker":       ticker,
+            "shares":       n,
+            "fill_price":   fill,
+            "proceeds":     proceeds,
+            "reason":       reason,
+            "realized_pnl": realized,
+        })
+        return fill, proceeds
+
     elapsed = 0
     while elapsed < MARKET_WAIT_SECS:
         ib.sleep(MARKET_POLL_SECS)
@@ -578,24 +596,83 @@ def _sell_stock_market(ib: IB, ticker: str, shares: int, reason: str,
         remaining = trade.orderStatus.remaining
         filled    = trade.orderStatus.filled
         if status == "Filled" or (remaining == 0 and filled > 0):
-            fill     = trade.orderStatus.avgFillPrice
-            proceeds = round(shares * fill, 2)
-            realized = round(proceeds - (assigned_strike * shares), 2) \
-                       if assigned_strike > 0 else None
-            log.info(f"  ✅ Sold: {shares}x {ticker} @ ${fill:.2f} = ${proceeds:,.0f}")
-            discord_poster.post_emergency_share_sale({
-                "ticker":       ticker,
-                "shares":       shares,
-                "fill_price":   fill,
-                "proceeds":     proceeds,
-                "reason":       reason,
-                "realized_pnl": realized,
-            })
-            return {"status": "filled", "fill_price": fill, "proceeds": proceeds}
+            fill, proceeds = _sold(shares)
+            return {"status": "filled", "fill_price": fill, "proceeds": proceeds,
+                    "filled_shares": shares}
         log.info(f"  ⏳ Sell status: {status} after {elapsed}s")
 
-    log.error(f"  ❌ Share sale timed out for {ticker} — MANUAL ACTION REQUIRED")
-    return {"status": "failed", "proceeds": 0.0, "fill_price": None}
+    # Timed out — cancel the order. It used to be left working: on 2026-10-22 a
+    # 400-share HUT market sell sat in Submitted past the window and was still
+    # live at IBKR a minute later, so it could fill after the run had written
+    # the shares off as unsold (and kept treating HUT as held). Wait for the
+    # cancel to reach a terminal state before reading `filled`, so shares that
+    # fill while the cancel is in flight are counted rather than dropped.
+    log.warning(f"  ⏳ {ticker}: sale not filled after {MARKET_WAIT_SECS}s — cancelling order")
+    cancel_confirmed = False
+    try:
+        ib.cancelOrder(trade.order)
+        cancel_confirmed = _await_order_terminal(ib, trade, CANCEL_CONFIRM_SECS)
+    except Exception as e:
+        log.error(f"  ❌ {ticker}: cancel request failed: {e}")
+
+    filled = int(trade.orderStatus.filled or 0)
+    if filled >= shares:
+        fill, proceeds = _sold(shares)
+        return {"status": "filled", "fill_price": fill, "proceeds": proceeds,
+                "filled_shares": shares}
+
+    fill, proceeds = _sold(filled) if filled else (None, 0.0)
+    if not cancel_confirmed:
+        log.error(f"  ❗ {ticker}: CANCEL NOT CONFIRMED after {CANCEL_CONFIRM_SECS}s "
+                  f"(status {trade.orderStatus.status}, filled {filled}/{shares}, "
+                  f"orderId {trade.order.orderId}, permId {trade.order.permId}) — "
+                  f"the order may still be working at IBKR. MANUAL ACTION REQUIRED")
+    elif filled:
+        log.error(f"  ❌ Share sale timed out for {ticker} — {filled}/{shares} sold, "
+                  f"remainder cancelled. MANUAL ACTION REQUIRED")
+    else:
+        log.error(f"  ❌ Share sale timed out for {ticker} — order cancelled, "
+                  f"nothing sold. MANUAL ACTION REQUIRED")
+    return {"status": "partial_fill" if filled else "failed", "fill_price": fill,
+            "proceeds": proceeds, "filled_shares": filled,
+            "cancel_confirmed": cancel_confirmed}
+
+
+def _await_order_terminal(ib: IB, trade, timeout: float) -> bool:
+    """Poll until the order can no longer fill. False means it may STILL be
+    working at IBKR (cancel unacknowledged or the gateway dropped), so its
+    filled quantity is not final."""
+    waited = 0.0
+    while trade.orderStatus.status not in ("Filled", "Cancelled", "ApiCancelled", "Inactive"):
+        if waited >= timeout or not ib.isConnected():
+            return False
+        ib.sleep(1)
+        waited += 1
+    return True
+
+
+def _book_unsold(h: dict, ticker: str, shares: int, result: dict,
+                 assigned_strike: float, reason: str, wheel_activity: list) -> tuple:
+    """Failure branch shared by the wheel check's share-sale paths. A timed-out
+    sale can still have sold SOME shares before its cancel: book those (fewer
+    shares held, proceeds, realized P&L) so the run neither drops the cash nor
+    keeps counting them as held. Returns (proceeds, realized) for the run totals."""
+    sold  = result.get("filled_shares", 0)
+    entry = {"ticker": ticker, "action": "sell_failed", "reason": reason, "shares": shares}
+    if not sold:
+        log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
+        wheel_activity.append(entry)
+        return 0.0, 0.0
+    proceeds = result["proceeds"]
+    realized = round(proceeds - (assigned_strike * sold), 2)
+    h["shares"] = shares - sold
+    entry.update({"shares_sold": sold, "fill_price": result["fill_price"],
+                  "proceeds": proceeds, "realized_pnl": realized})
+    wheel_activity.append(entry)
+    log.error(f"  ❌ Sale INCOMPLETE for {ticker} — {sold}/{shares} sold, "
+              f"{shares - sold} still held. MANUAL ACTION REQUIRED")
+    log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
+    return proceeds, realized
 
 
 def _sell_cc_with_escalation(ib: IB, contract, shares: int, ticker: str,
@@ -1556,9 +1633,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                               result={"ticker": ticker, "status": "sold_csp_only",
                                       "shares": shares, "proceeds": proceeds})
                 else:
-                    log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
-                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
-                                           "reason": "csp_only_mode", "shares": shares})
+                    sold_proceeds, sold_pnl = _book_unsold(h, ticker, shares, result, assigned_strike,
+                                                           "csp_only_mode", wheel_activity)
+                    freed_capital   += sold_proceeds
+                    shares_sold_pnl += sold_pnl
                     _progress(ticker=ticker, stage="sale FAILED",
                               result={"ticker": ticker, "status": "sell_failed"})
                 continue
@@ -1594,9 +1672,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                               result={"ticker": ticker, "status": "sold_dropped_screener",
                                       "shares": shares, "proceeds": proceeds})
                 else:
-                    log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
-                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
-                                           "reason": "dropped_screener", "shares": shares})
+                    sold_proceeds, sold_pnl = _book_unsold(h, ticker, shares, result, assigned_strike,
+                                                           "dropped_screener", wheel_activity)
+                    freed_capital   += sold_proceeds
+                    shares_sold_pnl += sold_pnl
                     _progress(ticker=ticker, stage="sale FAILED",
                               result={"ticker": ticker, "status": "sell_failed"})
                 continue
@@ -1657,9 +1736,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                                       result={"ticker": ticker, "status": "sold_stop_loss",
                                               "shares": shares, "proceeds": proceeds})
                         else:
-                            log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
-                            wheel_activity.append({"ticker": ticker, "action": "sell_failed",
-                                                   "reason": "stop_loss", "shares": shares})
+                            sold_proceeds, sold_pnl = _book_unsold(h, ticker, shares, result, assigned_strike,
+                                                                   "stop_loss", wheel_activity)
+                            freed_capital   += sold_proceeds
+                            shares_sold_pnl += sold_pnl
                             _progress(ticker=ticker, stage="sale FAILED",
                                       result={"ticker": ticker, "status": "sell_failed"})
                         continue
@@ -1721,9 +1801,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                         })
                         log.info(f"  📊 P&L: ${realized:,.0f}  Freed: ${proceeds:,.0f}")
                     else:
-                        log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
-                        wheel_activity.append({"ticker": ticker, "action": "sell_failed",
-                                               "reason": "earnings_this_week", "shares": shares})
+                        sold_proceeds, sold_pnl = _book_unsold(h, ticker, shares, result, assigned_strike,
+                                                               "earnings_this_week", wheel_activity)
+                        freed_capital   += sold_proceeds
+                        shares_sold_pnl += sold_pnl
                     continue
             else:
                 ticker_info      = candidate_info.get(ticker, {})
@@ -1796,9 +1877,10 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                               result={"ticker": ticker, "status": "sold_no_viable_cc",
                                       "shares": shares, "proceeds": proceeds})
                 else:
-                    log.error(f"  ❌ Sale FAILED for {ticker} — MANUAL ACTION REQUIRED")
-                    wheel_activity.append({"ticker": ticker, "action": "sell_failed",
-                                           "reason": "no_viable_cc", "shares": shares})
+                    sold_proceeds, sold_pnl = _book_unsold(h, ticker, shares, result, assigned_strike,
+                                                           "no_viable_cc", wheel_activity)
+                    freed_capital   += sold_proceeds
+                    shares_sold_pnl += sold_pnl
                     _progress(ticker=ticker, stage="sale FAILED",
                               result={"ticker": ticker, "status": "sell_failed"})
                 continue
