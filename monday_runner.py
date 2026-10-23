@@ -577,6 +577,14 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     if open_csp_capital and not cash_account:
         log.info(f"  💵 Sizing budget ${csp_sizing_budget:,.0f} = effective ${effective_budget:,.0f} "
                  f"− ${open_csp_capital:,.0f} open-CSP capital (re-run safety)")
+    # YRVI-MT: this morning's QQQ sale settles T+1, and the website fund can't put
+    # it behind today's puts — held back here (on a cash account that may also be
+    # out of Buying Power already; the double count only sizes smaller).
+    mt_hold_back = context.get("mt_park_sale_proceeds") or 0.0
+    if mt_hold_back:
+        csp_sizing_budget = max(0.0, csp_sizing_budget - mt_hold_back)
+        log.info(f"  🚢 Sizing budget ${csp_sizing_budget:,.0f} — excludes ${mt_hold_back:,.0f} "
+                 f"of QQQ sold this morning (unsettled)")
 
     log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
              f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")
@@ -653,7 +661,7 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # TOTAL_FUND_BUDGET (which on a compounding account is unrelated to net liq).
     results = execute_positions(positions, extra_targets=filtered_targets,
                                 target_fills=target_fills, status_callback=progress_callback,
-                                budget=effective_budget)
+                                budget=max(0.0, effective_budget - mt_hold_back))
 
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)
@@ -708,6 +716,31 @@ def _sell_park_before_run(dry_run: bool = False) -> dict | None:
     # "dry_run" covers both the preview and a live run with the Settings Dry Run
     # toggle on. Anything else freed nothing: reconciled_none means IBKR held no
     # shares, and a failure leaves the position open for the end-of-week job.
+    return result if result and result.get("status") in ("sold", "dry_run") else None
+
+
+def _mt_park_before_run(trend_week: dict, dry_run: bool = False) -> dict | None:
+    """YRVI-MT 🚢 QQQ park, before the wheel check. While the park gate is on the
+    QQQ is HELD across weeks (the after-run buy only adds to it). When the gate is
+    off, ALL of it is sold — the website fund's rule — and the proceeds are held
+    back from today's puts. Returns sell_park's result when shares were (or, on a
+    preview, would be) sold; None otherwise. Never raises into the run."""
+    try:
+        cp = _load_state().get("cash_park") or {}
+        if cp.get("status") != "open" or not cp.get("shares"):
+            return None
+        if trend_week.get("park_gate"):
+            log.info(f"  🚢 Trend filter: park gate ON — holding {cp.get('shares')} "
+                     f"{cp.get('instrument')} across weeks")
+            return None
+        why = "puts gate open" if trend_week.get("csp_gate") else "cash week"
+        log.info(f"  🚢 Trend filter: park gate OFF ({why}) — selling all {cp.get('shares')} "
+                 f"{cp.get('instrument')}; proceeds settle T+1, so they don't fund today's puts")
+        from cash_park import sell_park
+        result = sell_park(dry_run=dry_run)
+    except Exception as e:
+        log.error(f"❌ MT park sale failed (non-fatal): {e}", exc_info=True)
+        return None
     return result if result and result.get("status") in ("sold", "dry_run") else None
 
 
@@ -782,7 +815,8 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     # backs this run's puts instead of sitting in QQQ/SGOV (stock has no loan value
     # in a cash/IRA account, so a park is collateral the puts can't use).
     _phase("cash sweep sell")
-    park_sale = _sell_park_before_run(dry_run=dry_run)
+    park_sale = (_mt_park_before_run(trend_week, dry_run=dry_run) if trend_week
+                 else _sell_park_before_run(dry_run=dry_run))
 
     # Hand the reconciled holdings straight to the wheel check, rather than
     # letting it re-read state.json — which on a preview would be the stale file,
@@ -797,7 +831,12 @@ def run_monday(dry_run: bool = False, progress_callback=None,
              f"skip {wheel.get('skip_tickers') or 'none'}")
     # Kept apart from the wheel's freed_capital (which Discord and the Run Now
     # banner label as share-sale proceeds); the budget and the sweep add both.
-    if park_sale:
+    if park_sale and trend_week:
+        # The website fund can't spend a QQQ sale's proceeds on the same day's puts
+        # (they settle T+1), so neither does a box: held back from today's CSP budget.
+        wheel["mt_park_sale_proceeds"] = park_sale.get("proceeds") or 0.0
+        wheel["park_sold"]             = True
+    elif park_sale:
         wheel["park_proceeds"] = park_sale.get("proceeds") or 0.0
         wheel["park_sold"]     = True
     if trend_week:

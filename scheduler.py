@@ -755,6 +755,13 @@ def _cash_park_stranded(now) -> bool:
 def run_cash_park_sell():
     loop = _new_loop()
     now  = datetime.now(PST)
+    # YRVI-MT 🚢 holds its QQQ across weeks while the trend gate is on; the Monday
+    # run sells it when the gate turns off. No end-of-week round trip.
+    import trend
+    if trend.active(_load_settings()):
+        log.info("⏭️  CASH SWEEP SELL skipped — trend filter (YRVI-MT) holds QQQ across weeks")
+        loop.close()
+        return
     # Normally sell only on the week's last trading day. But also sell a STRANDED
     # position — one bought in a prior week whose end-of-week sell failed — so a
     # one-off gateway wedge doesn't leave cash parked for a whole extra week. The job

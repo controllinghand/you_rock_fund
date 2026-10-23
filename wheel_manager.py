@@ -859,6 +859,9 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
     # it's a parking vehicle tracked in cash_park, not a wheeled stock.
     _cpset            = get_settings()
     park_instruments  = set()
+    import trend
+    if trend.active(_cpset):
+        park_instruments.add("QQQ")          # YRVI-MT parks QQQ regardless of the sweep toggle
     if _cpset.get("cash_park_enabled"):
         _pi = (_cpset.get("cash_park_instrument") or "").strip().upper()
         if _pi:
@@ -1273,6 +1276,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
     # configured instrument AND the instrument of any open cash_park position (in case
     # the setting changed while a position is still open).
     park_instruments = set()
+    if trend_mode:
+        park_instruments.add("QQQ")          # YRVI-MT parks QQQ regardless of the sweep toggle
     if _s.get("cash_park_enabled"):
         _pi = (_s.get("cash_park_instrument") or "").strip().upper()
         if _pi:
