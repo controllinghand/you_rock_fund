@@ -198,7 +198,12 @@ Step 0b — YRVI-MT trend snapshot (trend filter only; trend.active):
     entry_date == today (ET); a preview accepts the upcoming entry day
   → no valid snapshot → return right after the reconcile: no wheel check, no puts,
     no sweep (the website fund also skips the week), with a Discord alert on a live run
-  → otherwise the week rides in the outcome as `trend`
+  → otherwise the week rides in the outcome as `trend`, and into the wheel/CSP context:
+    the wheel check NEVER sells wheel shares under the trend filter (no screener-drop,
+    stop-loss, earnings or no-viable-CC sale; earnings ignored for CCs, below-cost CCs
+    allowed, "no CC" keeps the shares as cc_none_kept); the CSP pipeline opens puts only
+    when csp_gate is True, from trend.targets() (the snapshot's names in its bid/strike
+    order, minus excluded tickers) instead of get_top_targets()
 
 Step 0c — sell a leftover cash-sweep park (_sell_park_before_run):
   → if state.json has an OPEN cash_park bought BEFORE today, sell it (sell_park) so
@@ -257,6 +262,8 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Never buy back covered calls
 - Excluded tickers (per-holding Exclude checkbox + Settings "Excluded Tickers") are NEVER traded, adopted, or sold:
   no CSP, no CC, no wheel adoption — enforced in the screener, both adoption paths, the per-holding loop, and risk monitor
+- YRVI-MT 🚢 (trend_filter_enabled, wheel only): assigned shares are NEVER sold, and new puts open only in a
+  put-gate week from the website snapshot's ranked names (see Step 0b)
 - Sell shares Monday 9:55AM if: csp_only_mode=true (unconditional, uncovered holdings only),
   OR ticker dropped from screener (below the wheel-retention mkt-cap floor),
   OR stop-loss tripped (if enabled), OR (underwater with no CC ≥ cost AND wheel_sell_when_cc_below_assigned=true)

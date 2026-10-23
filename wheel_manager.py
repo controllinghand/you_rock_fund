@@ -1248,6 +1248,18 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                  "no covered calls will be written")
     retention_market_cap_min  = _s.get("wheel_retention_market_cap_min", 5_000_000_000)
     stop_loss_enabled         = _s.get("wheel_stop_loss_enabled", True)
+    # YRVI-MT 🚢 trend filter: like the website's YRVI-MT fund, assigned shares are
+    # NEVER sold — no screener-drop sale, no stop loss, no pre-earnings sale, no
+    # forced sale when the only call is below cost or none qualifies. They're
+    # wheeled with covered calls (earnings weeks included) until called away.
+    import trend
+    trend_mode                = trend.active(_s)
+    if trend_mode:
+        cc_ignore_earnings      = True
+        sell_when_cc_below      = False
+        allow_cc_below_assigned = True
+        stop_loss_enabled       = False
+        log.info("  🚢 TREND FILTER (YRVI-MT) — wheel shares are never sold; covered calls only")
     stop_loss_pct             = _s.get("stop_loss_pct", 0.10)
     # Default ON: when a holding is only partially covered, write the shortfall so
     # every owned share carries a covered call (topped up at the existing CC's
@@ -1642,7 +1654,8 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 continue
 
             # ── Step 1: Screener check ────────────────────────
-            if candidate_info and ticker not in candidate_info:
+            # (never under the trend filter: MT holds a name that left the screen)
+            if candidate_info and ticker not in candidate_info and not trend_mode:
                 log.warning(f"  🚫 {ticker}: dropped from screener — selling shares")
                 _progress(ticker=ticker, stage="dropped screener — selling")
                 result = _sell_stock_market(ib, ticker, shares, "dropped_screener",
@@ -1845,6 +1858,17 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
                 h["cc_status"] = "pending"
                 _progress(ticker=ticker, stage="CC deferred (no data)",
                           result={"ticker": ticker, "status": "cc_deferred"})
+                continue
+
+            if cc_info is None and trend_mode:
+                # The website's MT fund stops the week for review here; a box keeps
+                # the shares uncovered for the week and says so, never sells.
+                log.warning(f"  🚢 {ticker}: no qualifying covered call — shares KEPT "
+                            f"uncovered this week (trend filter never sells wheel shares)")
+                wheel_activity.append({"ticker": ticker, "action": "cc_none_kept", "shares": shares})
+                h["cc_status"] = "pending"
+                _progress(ticker=ticker, stage="no CC — kept (trend filter)",
+                          result={"ticker": ticker, "status": "cc_none_kept"})
                 continue
 
             if cc_info is None:

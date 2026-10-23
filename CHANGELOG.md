@@ -1,3 +1,10 @@
+## [5.2.151] — 2026-10-22
+
+### Added
+- **YRVI-MT 🚢 puts follow the weekly trend gate.** On the Trend Filter track, new puts open only when Friday's snapshot says SPY closed at or below its 50-day average. In a QQQ-park (uptrend) week or a cash week no new puts open; covered calls on wheel shares still go out. Candidates are the snapshot's names in the website's order (put bid ÷ strike, highest first) minus Settings → Excluded Tickers, instead of the regular screen. The trader re-quotes each on IBKR and applies the usual execution checks (Min Bid Yield, Trader Max Delta, spread, open interest).
+- **YRVI-MT never sells assigned shares.** Under the trend filter the wheel check skips every sale path: no sale when a name drops off the screener, no stop loss, no pre-earnings sale (earnings are ignored for covered calls), no forced sale when the only call is below cost (it's written below cost). If no covered call qualifies, the shares are kept uncovered for the week (`cc_none_kept`) instead of sold. That matches the website's YRVI-MT fund, which wheels assigned shares until they're called away.
+- Still inert for every box: the Trend Filter card stays "Coming soon" until the QQQ park, sizing and VIX rule ship.
+
 ## [5.2.150] — 2026-10-22
 
 ### Added
