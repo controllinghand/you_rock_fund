@@ -515,6 +515,16 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
         compound_enabled, cash_account, account_summary, fund_budget,
         freed_capital, reserved_capital)
 
+    # YRVI-MT slots replace num_positions: max(2, NAV/$50k) in all, less the wheel
+    # holdings and open puts (the website fund's count). Only in a put-gate week.
+    if trend_week and trend_week.get("csp_gate"):
+        import trend
+        mt_slots     = trend.slots(net_liq or fund_budget)
+        target_fills = max(0, mt_slots - active_wheel_count - open_csp_count)
+        log.info(f"  🚢 Trend filter sizing: {mt_slots} slot(s) at net liq "
+                 f"${(net_liq or 0):,.0f} → {target_fills} open "
+                 f"({active_wheel_count} wheel + {open_csp_count} open CSP)")
+
     if target_fills <= 0:
         log.info(f"  ✅ No remaining CSP slots to fill "
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP = {num_positions} cap)")
@@ -586,10 +596,17 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
         log.info(f"  🚢 Sizing budget ${csp_sizing_budget:,.0f} — excludes ${mt_hold_back:,.0f} "
                  f"of QQQ sold this morning (unsettled)")
 
-    log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
-             f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")
-    positions    = size_all(filtered_targets, budget=csp_sizing_budget,
-                            num_positions=target_fills)
+    if trend_week:
+        # The website fund's sizing: max(2, NAV/$50k) slots in all, less the wheel
+        # holdings and open puts; one contract per pick first, then balanced, with
+        # a $100k-per-ticker cap.
+        import trend
+        positions    = trend.size(filtered_targets, csp_sizing_budget, target_fills)
+    else:
+        log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
+                 f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")
+        positions    = size_all(filtered_targets, budget=csp_sizing_budget,
+                                num_positions=target_fills)
 
     total_capital = sum(p.get("capital_used", 0) for p in positions)
 

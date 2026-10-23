@@ -153,3 +153,61 @@ def targets(week: dict, excluded: set | None = None) -> list:
             "mt_rank":             rank,
         })
     return out
+
+
+SLOT_NAV = 50_000          # one put slot per $50k of net liq, never fewer than 2
+TICKER_CAP = 100_000       # max put notional (strike x 100 x contracts) per ticker
+
+
+def slots(net_liq: float | None) -> int:
+    """The website fund's position count: max(2, floor(NAV / $50k))."""
+    try:
+        return max(2, int(float(net_liq) // SLOT_NAV))
+    except (TypeError, ValueError):
+        return 2
+
+
+def size(targets: list, budget: float, n: int) -> list:
+    """The website fund's allocation for the first n ranked picks: one contract to
+    each affordable pick in rank order, then one more at a time to whichever pick
+    has the least money in it, until the budget or the $100k-per-ticker cap stops
+    it. Returns position_sizer-format CSP positions."""
+    picks, left = [], float(budget or 0)
+    for t in targets:
+        if len(picks) >= n:
+            break
+        unit = t["put_20d_strike"] * 100
+        if unit <= left and unit <= TICKER_CAP:
+            picks.append([t, 1])
+            left -= unit
+    while True:
+        room = [p for p in picks
+                if p[0]["put_20d_strike"] * 100 <= left
+                and p[0]["put_20d_strike"] * 100 * (p[1] + 1) <= TICKER_CAP]
+        if not room:
+            break
+        p = min(room, key=lambda p: (p[0]["put_20d_strike"] * 100 * p[1], picks.index(p)))
+        p[1] += 1
+        left -= p[0]["put_20d_strike"] * 100
+    out = []
+    for t, k in picks:
+        out.append({
+            "ticker":           t["ticker"],
+            "action_type":      "CSP",
+            "strike":           t["put_20d_strike"],
+            "premium":          t["put_20d_premium"],
+            "expiry":           t["expiry"],
+            "contracts":        k,
+            "capital_used":     t["put_20d_strike"] * 100 * k,
+            "premium_total":    round(k * t["put_20d_premium"] * 100, 2),
+            "yield_pct":        t["put_20d_premium_pct"] * 100,
+            "delta":            t["put_20d_delta"],
+            "iv_atm":           t["iv_atm"],
+            "sector":           t.get("sector", ""),
+            "latest_price":     t["latest_price"],
+            "buffer_pct":       t["_buffer_pct"] * 100,
+            "buyzone":          False,
+            "days_to_earnings": t.get("days_to_earnings"),
+            "mt_rank":          t.get("mt_rank"),
+        })
+    return out
