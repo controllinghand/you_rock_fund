@@ -4028,6 +4028,7 @@ class SettingsUpdate(BaseModel):
     vix_stress_enabled:                Optional[bool]  = None
     vix_stress_level:                  Optional[float] = None
     vix_stress_delta:                  Optional[float] = None
+    trend_filter_enabled:              Optional[bool]  = None
     wheel_cover_all_shares:            Optional[bool]  = None
     wheel_allow_add_to_position:       Optional[bool]  = None
     wheel_stop_loss_enabled:           Optional[bool]  = None

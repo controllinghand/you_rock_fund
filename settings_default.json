@@ -13,6 +13,7 @@
   "vix_stress_enabled": false,
   "vix_stress_level": 20,
   "vix_stress_delta": 0.10,
+  "trend_filter_enabled": false,
   "wheel_cover_all_shares": true,
   "wheel_allow_add_to_position": false,
   "wheel_stop_loss_enabled": true,

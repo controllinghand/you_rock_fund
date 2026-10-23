@@ -63,7 +63,7 @@ directly — it is a symlink into `/data` and rotation would rename the link.
 config.py          → All fund parameters, IBKR credentials, API keys
 screener.py        → Fetches CSP candidates from Render API, filters + scores them
 tenor.py           → `option_tenor` (weekly | monthly; monthly only with csp_only_mode = YRVI-CSP-M): monthly expiry, entry window, next entry
-tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M) — DERIVED from settings via pins, never stored
+tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M, plus YRVI-MT 🚢 shown as coming_soon until its rules ship) — DERIVED from settings via pins, never stored
 position_sizer.py  → Allocates capital across up to 5 positions (accepts budget override)
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
 wheel_manager.py   → Assignment detection, screener-based exits, ~0.20-delta covered call execution (prefers nearest strike ≥ cost basis; writes below-cost CC instead of force-selling underwater holdings; keeps holdings through earnings by default)

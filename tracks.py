@@ -39,6 +39,7 @@ TRACKS = [
         "pins": {
             "csp_only_mode":           False,
             "wheel_stop_loss_enabled": False,
+            "trend_filter_enabled":    False,
         },
     },
     {
@@ -64,6 +65,7 @@ TRACKS = [
             "csp_only_mode":           False,
             "wheel_stop_loss_enabled": True,
             "stop_loss_pct":           0.10,
+            "trend_filter_enabled":    False,
         },
     },
     {
@@ -124,6 +126,36 @@ TRACKS = [
             "vix_stress_enabled": True,
         },
     },
+    {
+        "id":    "YRVI-MT",
+        "name":  "Trend Filter",
+        # 🚢 (U+1F6A2): Emoji_Presentation=Yes, so no U+FE0F, a bold silhouette at the
+        # ~16px Discord footer, and the icon the website and #yrvi-mt already use.
+        "emoji": "🚢",
+        "short": "Wheel + trend gates + QQQ park",
+        "description": (
+            "Ride the Wave with market-trend gates, matching the website's YRVI-MT "
+            "fund. New puts open only when SPY and the stock are at or below their "
+            "50-day averages, ranked by highest bid yield. Spare cash holds QQQ across "
+            "weeks while SPY and QQQ are above their 50-day averages and QQQ is above "
+            "its 200-day; otherwise it stays in cash. Assigned shares are wheeled with "
+            "covered calls and never sold. When the VIX spikes above 1.75x its 50-day "
+            "average, new puts drop to ~0.10 delta, which usually means none that week."
+        ),
+        # trend_filter_enabled is the identity; the wheel settings match YRVI-26
+        # because MT IS Ride the Wave plus the gates. Its QQQ park and VIX spike rule
+        # belong to the trend filter itself (the website's MT rules), not the cash
+        # sweep or the CSP-M VIX settings, so neither of those is pinned.
+        "pins": {
+            "csp_only_mode":           False,
+            "wheel_stop_loss_enabled": False,
+            "trend_filter_enabled":    True,
+        },
+        # The card ships before the MT trading rules do. While coming_soon the card
+        # can't be picked and resolve_track() never returns it, so no box can wear
+        # the MT badge while it still trades plain Ride-the-Wave rules.
+        "coming_soon": True,
+    },
 ]
 
 CUSTOM_TRACK = {
@@ -168,11 +200,15 @@ def resolve_track(settings: dict) -> dict:
     are mutually exclusive by construction. YRVI-26 and YRVI-SL disagree on
     wheel_stop_loss_enabled, and both require csp_only_mode False where the
     two CSP tracks require True; YRVI-CSP and YRVI-CSP-M disagree on
-    option_tenor. So at most one can ever match and the iteration order
-    carries no hidden meaning.
+    option_tenor; YRVI-MT needs trend_filter_enabled True where YRVI-26 and
+    YRVI-SL pin it False (and its csp_only_mode False excludes both CSP
+    tracks). So at most one can ever match and the iteration order carries no
+    hidden meaning. A coming_soon track is never returned (see YRVI-MT).
     """
     settings = settings or {}
     for track in TRACKS:
+        if track.get("coming_soon"):
+            continue
         if all(_matches(settings, k, v) for k, v in track["pins"].items()):
             return track
     return CUSTOM_TRACK
