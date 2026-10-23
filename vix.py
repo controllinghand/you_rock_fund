@@ -15,7 +15,8 @@ never the prior close. Pausing outright instead tested worse: it sits out the
 richest premium right after a crash.
 
 Default OFF. Monthly only — on weeklies a 0.10-delta put rarely pays 1% a week,
-so the rule mostly leaves slots in cash (tested, not adopted).
+so the rule mostly leaves slots in cash. That is exactly what YRVI-MT 🚢 wants in a
+crash, so the trend filter has its own spike variant below (mt_spike_rule).
 If the VIX can't be read, the run trades normally (fail open) and says so.
 """
 import logging
@@ -93,4 +94,76 @@ def stress_rule(ib, settings: dict) -> dict | None:
                     f"(window {rule['min_delta']:.2f}–{rule['max_delta']:.2f})")
     else:
         log.info(f"  🌡️ VIX {vix:.2f} ({source}) ≤ {level:g} — normal ~0.20 delta")
+    return rule
+
+
+# ── YRVI-MT 🚢 spike rule (weekly puts) ──────────────────────────
+# The website's YRVI-MT fund (greer yrvi_mt_paper.vix_stress) stresses when the live
+# VIX is above 1.75x the mean of its 50 prior daily closes: new puts then target
+# ~0.10 delta (max 0.12) and must still pay the 1% minimum bid, which on a weekly
+# put usually means none that week. A RATIO, not a level: it reacts to how fast the
+# VIX jumps (a crash) rather than to a high-but-steady VIX. Fails open.
+MT_RATIO, MT_LOOKBACK, MT_TARGET, MT_MAX_DELTA = 1.75, 50, 0.10, 0.12
+_YAHOO_HIST = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=6mo&interval=1d"
+
+
+def _prior_closes_ibkr(ib, today) -> list:
+    from ib_insync import Index
+    try:
+        c = Index("VIX", "CBOE", "USD")
+        if not ib.qualifyContracts(c):
+            return []
+        bars = ib.reqHistoricalData(c, endDateTime="", durationStr="6 M", barSizeSetting="1 day",
+                                    whatToShow="TRADES", useRTH=True, formatDate=1)
+        return [float(b.close) for b in bars if b.date < today and b.close and b.close > 0]
+    except Exception as e:
+        log.info(f"  VIX history from IBKR unavailable: {e}")
+        return []
+
+
+def _prior_closes_yahoo(today) -> list:
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    try:
+        r = requests.get(_YAHOO_HIST, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        res = r.json()["chart"]["result"][0]
+        ny = ZoneInfo("America/New_York")
+        out = []
+        for ts, c in zip(res["timestamp"], res["indicators"]["quote"][0]["close"]):
+            d = datetime.fromtimestamp(ts, timezone.utc).astimezone(ny).date()
+            if d < today and c and c > 0:
+                out.append(float(c))
+        return out
+    except Exception as e:
+        log.info(f"  VIX history from Yahoo unavailable: {e}")
+        return []
+
+
+def mt_spike_rule(ib) -> dict:
+    """The put-delta window for a YRVI-MT run: same keys as stress_rule()."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    vix, source = read_vix(ib)
+    closes = _prior_closes_ibkr(ib, today) or _prior_closes_yahoo(today)
+    closes = closes[-MT_LOOKBACK:]
+    rule = {"vix": vix, "source": source, "level": None, "stressed": False, "target": MT_TARGET,
+            "min_delta": None, "max_delta": None, "mean50": None, "ratio": None}
+    if vix is None or len(closes) < MT_LOOKBACK:
+        log.warning(f"  🌡️ MT VIX spike rule: "
+                    f"{'VIX unreadable' if vix is None else f'only {len(closes)} prior closes'} — "
+                    f"trading the normal ~0.20 delta")
+        return rule
+    mean = sum(closes) / len(closes)
+    ratio = vix / mean
+    rule.update(mean50=round(mean, 2), ratio=round(ratio, 3), level=round(MT_RATIO * mean, 2),
+                stressed=ratio > MT_RATIO)
+    if rule["stressed"]:
+        rule.update(min_delta=round(MT_TARGET - BAND, 3), max_delta=MT_MAX_DELTA)
+        log.warning(f"  🌡️ VIX {vix:.2f} ({source}) is {ratio:.2f}x its 50-day mean {mean:.2f} "
+                    f"(> {MT_RATIO}x) — new puts target {MT_TARGET:.2f} delta (max {MT_MAX_DELTA:.2f})")
+    else:
+        log.info(f"  🌡️ VIX {vix:.2f} ({source}) is {ratio:.2f}x its 50-day mean {mean:.2f} "
+                 f"(≤ {MT_RATIO}x) — normal ~0.20 delta")
     return rule

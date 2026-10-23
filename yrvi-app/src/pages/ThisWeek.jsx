@@ -138,7 +138,9 @@ export default function ThisWeek() {
             if (freed_capital) text += `, $${freed_capital.toLocaleString()} freed`
             // The sweep runs last and can be the only thing a run actually did —
             // an all-wheel week fills no CSPs but may still park the idle cash.
-            const parkNote = cash_park?.message
+            const parkNote = r.data.result.skipped === 'trend_snapshot_unavailable'
+              ? '🚢 No MT trades this week — the website\'s Friday snapshot is unavailable (see Discord).'
+              : cash_park?.message
               ? `${cash_park.status === 'bought' ? '🅿️' : '💤'} ${cash_park.message}`
               : null
             setManualMsg({ ok: true, text, note: parkNote })
@@ -552,13 +554,37 @@ export default function ThisWeek() {
             </div>
           )}
 
+          {/* YRVI-MT 🚢 week (the website's frozen Friday decision) */}
+          {screener.trend && (() => {
+            const t = screener.trend
+            return (
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+                  <div className="text-gray-900 dark:text-white font-semibold text-sm">🚢 Trend Filter</div>
+                  <div className="text-gray-500 dark:text-gray-600 text-xs">{t.ok ? `Friday ${t.observation_date} close` : t.status}</div>
+                </div>
+                <div className="px-5 py-3 text-sm text-gray-700 dark:text-gray-300">
+                  {!t.ok
+                    ? `No valid snapshot — no MT trades this week unless one is captured (${(t.reasons ?? []).join(', ')}).`
+                    : t.csp_gate ? `Puts OPEN: SPY closed at or below its 50-day average. ${t.candidates} ranked name(s) from the website snapshot.`
+                    : t.park_gate ? 'Uptrend: no new puts; spare cash holds QQQ (held across weeks).'
+                    : 'Both gates closed: no new puts, cash stays cash.'}
+                </div>
+                <div className="px-5 py-2 text-xs text-gray-400 dark:text-gray-600 border-t border-gray-100 dark:border-gray-800/50">
+                  Same rules and snapshot as the website's YRVI-MT fund. Covered calls on assigned shares go out every week; the shares are never sold.
+                </div>
+              </div>
+            )
+          })()}
+
           {/* Cash Sweep decision (preview of the QQQ/SGOV park) */}
           {screener.cash_park && (() => {
             const cp = screener.cash_park
             const emoji = cp.status === 'bought' || cp.status === 'dry_run' ? '🅿️'
                         : cp.status === 'skipped_no_cash' ? '💤'
                         : cp.status === 'skipped_slots_unfilled' ? '⏸️'
-                        : cp.status === 'skipped_existing_open' ? '♻️' : '⚠️'
+                        : cp.status === 'skipped_existing_open' ? '♻️'
+                        : cp.status === 'skipped_trend_gate' ? '🚢' : '⚠️'
             const usd = v => `$${Math.round(v ?? 0).toLocaleString()}`
             return (
               <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden">
@@ -580,7 +606,9 @@ export default function ThisWeek() {
                   )}
                 </div>
                 <div className="px-5 py-2 text-xs text-gray-400 dark:text-gray-600 border-t border-gray-100 dark:border-gray-800/50">
-                  Buys real settled cash only (never margin). When all option slots are filled it parks the full idle amount; the 10% net-liq cap is a safety that only applies if some slots went unfilled.
+                  {screener.trend
+                    ? 'Trend filter: QQQ is held across weeks while the uptrend gate is on and sold in full when it turns off. Buys real settled cash only (never margin).'
+                    : 'Buys real settled cash only (never margin). When all option slots are filled it parks the full idle amount; the 10% net-liq cap is a safety that only applies if some slots went unfilled.'}
                 </div>
               </div>
             )

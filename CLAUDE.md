@@ -64,7 +64,7 @@ config.py          → All fund parameters, IBKR credentials, API keys
 screener.py        → Fetches CSP candidates from Render API, filters + scores them
 tenor.py           → `option_tenor` (weekly | monthly; monthly only with csp_only_mode = YRVI-CSP-M): monthly expiry, entry window, next entry
 trend.py           → YRVI-MT 🚢 trend filter: fetches the website's frozen Friday snapshot (/api/targets/csp?strategy=YRVI-MT — gates + ranked candidates); no valid snapshot on the entry day = no MT trades that week
-tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M, plus YRVI-MT 🚢 shown as coming_soon until its rules ship) — DERIVED from settings via pins, never stored
+tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M / MT 🚢) — DERIVED from settings via pins, never stored
 position_sizer.py  → Allocates capital across up to 5 positions (accepts budget override)
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
 wheel_manager.py   → Assignment detection, screener-based exits, ~0.20-delta covered call execution (prefers nearest strike ≥ cost basis; writes below-cost CC instead of force-selling underwater holdings; keeps holdings through earnings by default)
@@ -266,7 +266,10 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   put-gate week from the website snapshot's ranked names (see Step 0b). Covered call = the website rule
   (wheel_manager._pick_mt_call): the call AT the latest assignment strike if its delta ≥ 0.20, else the call
   closest to 0.20 delta among ≤ 0.22 (richer on a tie). Sizing = trend.slots/size: max(2, NAV/$50k) slots
-  less wheel + open puts; one contract per pick, then balanced by dollars, $100k cap per ticker
+  less wheel + open puts; one contract per pick, then balanced by dollars, $100k cap per ticker. VIX spike rule
+  (vix.mt_spike_rule, always on with the track): live VIX > 1.75x the mean of its 50 prior daily closes (IBKR,
+  else Yahoo) → puts target 0.10 delta (0.07–0.12 window) and must still pay the Min Bid Yield; fails open.
+  The website's YRVI-MT fund (greer yrvi_mt_paper, policy d9f5f77f) runs the same rules — change them together
 - Sell shares Monday 9:55AM if: csp_only_mode=true (unconditional, uncovered holdings only),
   OR ticker dropped from screener (below the wheel-retention mkt-cap floor),
   OR stop-loss tripped (if enabled), OR (underwater with no CC ≥ cost AND wheel_sell_when_cc_below_assigned=true)

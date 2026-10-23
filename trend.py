@@ -211,3 +211,12 @@ def size(targets: list, budget: float, n: int) -> list:
             "mt_rank":          t.get("mt_rank"),
         })
     return out
+
+
+def peek() -> dict:
+    """The latest snapshot for DISPLAY (Settings / This Week): its gates and dates
+    even when it's for another week, plus whether a live run could trade on it."""
+    week = fetch_snapshot(preview=True)
+    if week["ok"]:
+        return {**week, "tradeable": week["entry_date"] == str(_today_ny())}
+    return {**week, "tradeable": False}

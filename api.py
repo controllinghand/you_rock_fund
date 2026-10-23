@@ -4008,6 +4008,16 @@ def _trend_summary(week: dict | None) -> dict | None:
     return {**{k: week.get(k) for k in keep}, "candidates": len(week.get("rows") or [])}
 
 
+@app.get("/api/trend")
+def get_trend():
+    """YRVI-MT 🚢 week as the website froze it: gates, dates, candidate count, and
+    whether a live run today could trade on it. Display only."""
+    import trend
+    week = trend.peek()
+    return {**(_trend_summary(week) or {}), "tradeable": week.get("tradeable", False),
+            "active": trend.active(load_settings())}
+
+
 @app.get("/api/settings")
 def get_settings_endpoint():
     return load_settings()

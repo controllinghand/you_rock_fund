@@ -292,6 +292,16 @@ export default function SettingsPage() {
       .catch(() => setTrackDefs([]))   // selector hides; the toggles still work
   }, [])
 
+  // YRVI-MT 🚢: this week's gates as the website froze them (display only).
+  const [trendWeek, setTrendWeek] = useState(null)
+  const mtOn = !!settings?.trend_filter_enabled && !settings?.csp_only_mode
+  useEffect(() => {
+    if (!mtOn) { setTrendWeek(null); return }
+    axios.get('/api/trend', { timeout: 100000 })
+      .then(r => setTrendWeek(r.data))
+      .catch(() => setTrendWeek({ ok: false, status: 'unreachable', reasons: ['could not reach the website'] }))
+  }, [mtOn])
+
   useEffect(() => {
     axios.get('/api/settings').then(r => {
       setSettings(r.data)
@@ -857,6 +867,40 @@ export default function SettingsPage() {
                 </p>
               </>
             )}
+          </div>
+        )}
+        {/* YRVI-MT 🚢 — what the trend filter will do this week (the website's frozen
+            Friday decision) and the run-time match with the website fund. */}
+        {mtOn && (
+          <div className="rounded-lg border border-sky-200 dark:border-sky-900/60 bg-sky-50/40 dark:bg-sky-900/10 p-3 space-y-2 text-xs leading-relaxed">
+            <div className="text-sm font-semibold text-gray-900 dark:text-white">🚢 Trend Filter this week</div>
+            {!trendWeek ? (
+              <div className="text-gray-500">Reading the website's weekly snapshot…</div>
+            ) : trendWeek.ok ? (
+              <div className="text-gray-700 dark:text-gray-300">
+                Friday {trendWeek.observation_date} close → week of {trendWeek.entry_date}:{' '}
+                <span className="font-semibold">
+                  {trendWeek.csp_gate ? `puts OPEN (${trendWeek.candidates} ranked name${trendWeek.candidates === 1 ? '' : 's'})`
+                    : trendWeek.park_gate ? 'QQQ park ON — no new puts'
+                    : 'both gates closed — cash'}
+                </span>
+                {!trendWeek.tradeable && <span className="text-gray-500"> · preview (trades on {trendWeek.entry_date})</span>}
+              </div>
+            ) : (
+              <div className="text-amber-700 dark:text-amber-400">
+                No valid snapshot ({trendWeek.status}{trendWeek.reasons?.length ? `: ${trendWeek.reasons.join(', ')}` : ''}).
+                {' '}If that's still true on Monday, the box makes no MT trades that week, same as the website fund.
+              </div>
+            )}
+            <div className={settings.execution_time === '10:00' ? 'text-gray-500 dark:text-gray-500' : 'text-amber-700 dark:text-amber-400'}>
+              The website fund enters at 1:00 PM ET (10:00 AM PT). This box runs Monday at {settings.execution_time ?? '10:00'} ({timezone || 'local time'})
+              {settings.execution_time === '10:00' ? '.' : ' — set Execution Time to the 1:00 PM ET equivalent to trade at the same prices.'}
+            </div>
+            <div className="text-gray-500 dark:text-gray-500">
+              Puts only when SPY closed at or below its 50-day average; spare cash holds QQQ across weeks in an uptrend;
+              assigned shares are never sold; a VIX spike (above 1.75× its 50-day average) drops new puts to ~0.10 delta.
+              Number of Positions and the cash sweep settings don't apply on this track.
+            </div>
           </div>
         )}
         <SliderRow label="Initial Fund Budget"  value={settings.fund_budget}      min={10000}  max={2000000} step={10000} format={v => `$${v.toLocaleString()}`} onChange={v => set('fund_budget', v)} />
