@@ -1,3 +1,8 @@
+## [5.2.156] — 2026-10-23
+
+### Fixed
+- **This Week's empty-plan message on the Trend Filter.** A Trend Filter preview with no puts said "screener returned 0 qualified targets", which blamed the screen. It now says why: no website snapshot this week (so no MT trades), the trend gate is closed (a QQQ park week or a cash week), or none of the snapshot's names fit the open slots and budget.
+
 ## [5.2.155] — 2026-10-23
 
 ### Fixed

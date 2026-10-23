@@ -674,7 +674,15 @@ export default function ThisWeek() {
           ) : (
             <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-10 text-center">
               <TrendingUp size={32} className="text-gray-300 dark:text-gray-700 mx-auto mb-3" />
-              <div className="text-gray-500">No positions sized — screener returned 0 qualified targets</div>
+              <div className="text-gray-500">{
+                screener.skipped === 'trend_snapshot_unavailable'
+                  ? "No MT trades this week — the website's Friday snapshot isn't available"
+                  : screener.trend?.ok && !screener.trend.csp_gate
+                  ? `No new puts this week — trend gate closed (${screener.trend.park_gate ? 'QQQ park week' : 'cash week'})`
+                  : screener.trend?.ok
+                  ? "No positions sized — none of the snapshot's names fit the open slots and budget"
+                  : 'No positions sized — screener returned 0 qualified targets'
+              }</div>
             </div>
           )}
 
