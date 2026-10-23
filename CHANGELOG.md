@@ -1,3 +1,9 @@
+## [5.2.149] — 2026-10-22
+
+### Added
+- **A fifth strategy track card: 🚢 Trend Filter (`YRVI-MT`), shown as "Coming soon".** It is the website's YRVI-MT fund: Ride the Wave plus market-trend gates. New puts only when SPY and the stock are at or below their 50-day averages, ranked by highest bid yield; spare cash holds QQQ across weeks while SPY and QQQ are above their 50-day averages and QQQ is above its 200-day; assigned shares are wheeled and never sold; a VIX spike (above 1.75× its 50-day average) drops new puts to ~0.10 delta. The card can't be picked yet. The trading rules land in the next releases, and until then `resolve_track()` never returns YRVI-MT, so no box can show the badge while trading plain Ride-the-Wave rules.
+- New setting `trend_filter_enabled` (default off) is the track's identity. YRVI-26 and YRVI-SL now pin it off, which keeps all five tracks mutually exclusive. Existing boxes are unaffected: the default merges in from `settings_default.json`, so their badges don't change.
+
 ## [5.2.148] — 2026-10-22
 
 ### Fixed

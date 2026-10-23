@@ -349,6 +349,7 @@ export default function SettingsPage() {
       return have === want
     }
     return trackDefs.find(t =>
+      !t.coming_soon &&
       Object.keys(t.pins ?? {}).length > 0 &&
       Object.entries(t.pins).every(([k, v]) => matches(k, v))
     ) ?? trackDefs.find(t => t.id === 'YRVI-Custom') ?? null
@@ -632,6 +633,7 @@ export default function SettingsPage() {
     wheel_retention_market_cap_min: 5000000000,
     wheel_sell_when_cc_below_assigned: false, csp_only_mode: false,
     vix_stress_enabled: false, vix_stress_level: 20, vix_stress_delta: 0.10,
+    trend_filter_enabled: false,
     wheel_cover_all_shares: true,
     wheel_allow_add_to_position: false,
     wheel_stop_loss_enabled: true, stop_loss_pct: 0.10, compound_enabled: true, cash_account: false,
@@ -774,15 +776,19 @@ export default function SettingsPage() {
               <div className="grid gap-2 sm:grid-cols-2">
                 {trackDefs.filter(t => t.id !== 'YRVI-Custom').map(t => {
                   const on = active?.id === t.id
+                  const soon = !!t.coming_soon   // shown, not selectable yet
                   return (
                     <button
                       key={t.id}
                       type="button"
-                      onClick={() => applyTrack(t)}
+                      onClick={() => !soon && applyTrack(t)}
+                      disabled={soon}
                       aria-pressed={on}
-                      title={t.description}
+                      title={soon ? `${t.description} (Coming soon.)` : t.description}
                       className={`text-left rounded-lg border p-3 transition ${
-                        on
+                        soon
+                          ? 'border-dashed border-gray-200 dark:border-gray-800 opacity-60 cursor-not-allowed'
+                          : on
                           ? 'border-purple-400 bg-purple-50 dark:bg-purple-900/20 dark:border-purple-700 ring-1 ring-purple-300 dark:ring-purple-800'
                           : 'border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900/40'
                       }`}
@@ -790,6 +796,11 @@ export default function SettingsPage() {
                       <div className="flex items-center gap-1.5">
                         <span>{t.emoji}</span>
                         <span className="text-sm font-semibold text-gray-900 dark:text-white">{t.name}</span>
+                        {soon && (
+                          <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                            Coming soon
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] font-mono text-gray-400 dark:text-gray-600 mt-0.5">{t.id}</div>
                       <div className="text-xs text-gray-500 dark:text-gray-500 mt-1 leading-snug">{t.short}</div>
