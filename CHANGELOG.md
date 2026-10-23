@@ -1,3 +1,10 @@
+## [5.2.153] — 2026-10-22
+
+### Added
+- **YRVI-MT 🚢 covered calls use the website fund's strike rule.** On the Trend Filter track the weekly call is the one **at** the latest assignment strike when its delta is at least 0.20 (shares get called away at what they cost). Otherwise it's the call closest to 0.20 delta among those at or under 0.22, with the higher premium winning a tie. This replaces the usual "lowest strike at or above the premium-netted cost" rule for MT only. A scan that never reached a ≤0.22-delta call keeps the shares and retries next week rather than writing a deep call.
+- **YRVI-MT sizing matches the website fund.** Slots = max(2, net liq ÷ $50,000), less wheel holdings and open puts (the Number of Positions setting doesn't apply on this track). The first picks in the snapshot's ranking get one contract each, then extra contracts go one at a time to whichever pick has the least money in it, with at most $100,000 of put notional per ticker. Checked against the website's allocation code: identical contract counts.
+- Still inert for every box until the Trend Filter card leaves "Coming soon".
+
 ## [5.2.152] — 2026-10-22
 
 ### Added

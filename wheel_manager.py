@@ -292,7 +292,8 @@ def _next_friday_expiry() -> str:
 
 def _find_cc_strike(ib: IB, ticker: str, expiry: str,
                     assigned_strike: float,
-                    allow_below_assigned: bool = False) -> tuple | None:
+                    allow_below_assigned: bool = False,
+                    mt_rule: bool = False) -> tuple | None:
     """
     Find the best call strike to sell as a covered call.
 
@@ -491,6 +492,9 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
         mid_str = f"${mid:.2f}" if mid else "?"
         log.info(f"  ${strike:>7.2f}  {delta:>6.3f}  {mid_str:>8}  {flag}")
 
+    if mt_rule:
+        return _pick_mt_call(ticker, results, assigned_strike, current_price)
+
     viable = [(s, d, m, iv) for s, d, m, iv in results if d >= CC_DELTA_MIN]
     if not viable:
         # No strike reached CC_DELTA_MIN. When below-cost CCs are allowed (the
@@ -538,6 +542,41 @@ def _find_cc_strike(ib: IB, ticker: str, expiry: str,
     s, d, m, iv = viable[-1]
     log.info(f"  🎯 No viable strike at/above assigned ${assigned_strike:.2f} — "
              f"using ${s:.2f} (delta={d:.3f})")
+    return (s, d, m, iv, current_price)
+
+
+MT_CC_MAX_DELTA = 0.22
+
+
+def _pick_mt_call(ticker: str, results: list, reference_strike: float,
+                  current_price: float):
+    """YRVI-MT 🚢 covered call — the website fund's rule (greer yrvi_mt_paper.weekly):
+    the call AT the reference (latest assigned) strike when its delta is >= 0.20;
+    otherwise the call closest to 0.20 delta among those <= 0.22, the richer one on
+    a tie. results: [(strike, |delta|, mid, iv)].
+
+    Nothing <= 0.22 in the scan means the far-OTM strikes never streamed in (the
+    scan starts near the money), so it defers and KEEPS the shares (CC_NO_DATA)
+    rather than writing a deep call. Empty after that (no strikes at all) is None,
+    which an MT caller also turns into keeping the shares.
+    """
+    at_ref = [(s, d, m, iv) for s, d, m, iv in results
+              if reference_strike > 0 and abs(s - reference_strike) < 1e-6 and d >= CC_DELTA_MIN]
+    if at_ref:
+        s, d, m, iv = at_ref[0]
+        log.info(f"  🚢 {ticker}: call AT assigned strike ${s:.2f} (delta {d:.3f} ≥ "
+                 f"{CC_DELTA_MIN:.2f}) — website MT rule")
+        return (s, d, m, iv, current_price)
+    near = [(s, d, m, iv) for s, d, m, iv in results if d <= MT_CC_MAX_DELTA]
+    if not near:
+        if results:
+            log.warning(f"  ⚠️  {ticker}: no call ≤ {MT_CC_MAX_DELTA:.2f} delta in the scan — "
+                        f"incomplete read; deferring and KEEPING shares")
+            return CC_NO_DATA
+        return None
+    s, d, m, iv = min(near, key=lambda r: (round(abs(r[1] - CC_DELTA_MIN), 6), -(r[2] or 0.0), r[0]))
+    log.info(f"  🚢 {ticker}: call closest to {CC_DELTA_MIN:.2f} delta — ${s:.2f} (delta "
+             f"{d:.3f}){' — below assigned' if reference_strike and s < reference_strike else ''}")
     return (s, d, m, iv, current_price)
 
 
@@ -1837,8 +1876,16 @@ def run_wheel_check(dry_run: bool = False, client_id: int = None,
             # ── Step 3: Find best CC strike ───────────────────
             # Floor at net_cost (premium-netted breakeven) — a CC at/above our net
             # cost can't lock an economic loss even if called away.
-            cc_info = _find_cc_strike(ib, ticker, expiry, net_cost,
-                                      allow_below_assigned=allow_cc_below_assigned)
+            if trend_mode:
+                # The website MT fund's reference is the latest assignment strike
+                # (not the premium-netted cost), so the "at strike" call can match.
+                tranches = [t for t in (h.get("tranches") or []) if t.get("strike")]
+                mt_ref   = float(tranches[-1]["strike"]) if tranches else assigned_strike
+                cc_info = _find_cc_strike(ib, ticker, expiry, mt_ref,
+                                          allow_below_assigned=True, mt_rule=True)
+            else:
+                cc_info = _find_cc_strike(ib, ticker, expiry, net_cost,
+                                          allow_below_assigned=allow_cc_below_assigned)
 
             # ── Step 4: Decision ──────────────────────────────
             # CC_NO_DATA means _find_cc_strike couldn't price any call — the

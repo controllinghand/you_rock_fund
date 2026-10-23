@@ -263,7 +263,10 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 - Excluded tickers (per-holding Exclude checkbox + Settings "Excluded Tickers") are NEVER traded, adopted, or sold:
   no CSP, no CC, no wheel adoption — enforced in the screener, both adoption paths, the per-holding loop, and risk monitor
 - YRVI-MT 🚢 (trend_filter_enabled, wheel only): assigned shares are NEVER sold, and new puts open only in a
-  put-gate week from the website snapshot's ranked names (see Step 0b)
+  put-gate week from the website snapshot's ranked names (see Step 0b). Covered call = the website rule
+  (wheel_manager._pick_mt_call): the call AT the latest assignment strike if its delta ≥ 0.20, else the call
+  closest to 0.20 delta among ≤ 0.22 (richer on a tie). Sizing = trend.slots/size: max(2, NAV/$50k) slots
+  less wheel + open puts; one contract per pick, then balanced by dollars, $100k cap per ticker
 - Sell shares Monday 9:55AM if: csp_only_mode=true (unconditional, uncovered holdings only),
   OR ticker dropped from screener (below the wheel-retention mkt-cap floor),
   OR stop-loss tripped (if enabled), OR (underwater with no CC ≥ cost AND wheel_sell_when_cc_below_assigned=true)
