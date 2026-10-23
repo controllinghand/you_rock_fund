@@ -1,3 +1,11 @@
+## [5.2.152] — 2026-10-22
+
+### Added
+- **YRVI-MT 🚢 holds QQQ across weeks, all or nothing.** On the Trend Filter track, a week whose Friday snapshot has the park gate on (SPY and QQQ above their 50-day averages, QQQ above its 200-day) puts all spare cash into QQQ after the Monday run and **adds** it to the QQQ already held. There's no end-of-week sale: the Thu/Fri job skips MT boxes. When the gate turns off (a put week or a cash week), the Monday run sells **all** of it before trading. That sale's proceeds are held back from the same day's puts, since they settle the next day, matching the website's YRVI-MT fund.
+- The MT park uses the cash-sweep machinery but not its toggle or instrument setting: it's always QQQ. The 10% net-liq / unfilled-slot cap doesn't apply (a park week never has put slots). On a margin account the QQQ already held is subtracted before adding, and the 98% margin ceiling still applies. The cash-account margin-headroom checks are unchanged.
+- One position, many buys: each add increases the share count and cost basis (average price), keeps the original buy date, and P&L is booked when it's sold. A week with nothing new to add logs quietly instead of posting to Discord. The wheel never adopts QQQ as an assignment on an MT box, even with the cash sweep off.
+- Still inert for every box until the Trend Filter card leaves "Coming soon".
+
 ## [5.2.151] — 2026-10-22
 
 ### Added

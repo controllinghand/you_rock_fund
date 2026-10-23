@@ -300,6 +300,11 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   already closed and posted) no matter which detection pass found it
 - Sold tickers are skipped in the same week's CSP screener
 - Daily monitor (Tue–Thu) alerts if a ticker drops from screener mid-week
+- YRVI-MT 🚢 QQQ park (trend filter; independent of the cash-sweep toggle, always QQQ): park-gate week →
+  maybe_buy_park puts ALL spare cash in QQQ and ADDS to the held position (margin: minus the QQQ already held,
+  98% ceiling kept; no 10% / unfilled-slot cap). Gate off → monday_runner._mt_park_before_run sells ALL of it
+  and holds the proceeds back from that day's CSP budget (unsettled, like the website fund). The Thu/Fri
+  sell job skips MT boxes; the wheel never adopts QQQ there
 - Cash sweep (opt-in, default OFF) parks the week's undeployed remainder in QQQ (default) or SGOV
   after the Monday option workflow, then sells it on the week's last trading day (Fri, or Thu when
   Fri is a holiday). Any Monday run / Run Now also sells a park left open from an EARLIER day before

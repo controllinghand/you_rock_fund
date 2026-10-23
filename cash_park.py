@@ -300,11 +300,16 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     Never raises into the caller — a sweep failure must not break the Monday run.
     """
     s = get_settings()
-    if not s.get("cash_park_enabled", False):
+    # YRVI-MT 🚢: the trend filter owns its own QQQ park (the website fund's rule),
+    # independent of the cash-sweep toggle: while the park gate is on, ALL spare cash
+    # holds QQQ and is ADDED to the existing position, held across weeks.
+    trend_week = context.get("trend")
+    mt = bool(trend_week)
+    if not mt and not s.get("cash_park_enabled", False):
         return None
 
-    instrument   = (s.get("cash_park_instrument") or "QQQ").strip().upper()
-    include_prem = bool(s.get("cash_park_include_premiums", False))
+    instrument   = "QQQ" if mt else (s.get("cash_park_instrument") or "QQQ").strip().upper()
+    include_prem = False if mt else bool(s.get("cash_park_include_premiums", False))
     # Simulate (no real order) on a preview OR when the Settings Dry Run toggle is on.
     orders_dry_run = dry_run or bool(s.get("dry_run", False))
 
@@ -337,7 +342,15 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     # safety. On a preview nothing executed, so use the sized count as the proxy.
     fills  = len(csp_outcome.get("positions", [])) if dry_run else csp_outcome.get("fills", 0)
     target = csp_outcome.get("target_fills", 0)
-    all_filled = fills >= target
+    # MT parks only in a park-gate week, which never has put slots, so the
+    # unfilled-slot 10% cap doesn't apply to it.
+    all_filled = mt or fills >= target
+
+    if mt and not trend_week.get("park_gate"):
+        why = "puts gate open" if trend_week.get("csp_gate") else "cash week"
+        log.info(f"  🚢 Trend filter: park gate OFF ({why}) — no QQQ bought")
+        return _finish({"status": "skipped_trend_gate",
+                        "message": f"Trend filter: no QQQ this week ({why})"})
 
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
@@ -403,6 +416,17 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                             - committed_csp - headroom)
             basis = (f"effective_budget − committed CSP − {1 - MARGIN_SWEEP_CEILING:.0%} "
                      f"net-liq headroom ${headroom:,.0f}")
+            # MT keeps last week's QQQ, which is still inside net liq (and so inside
+            # effective_budget). Take it out, or the add would buy on margin.
+            held_park = _held_shares(ib, instrument) if mt else 0.0
+            if held_park > 0:
+                _, px_held = _price(ib, instrument)
+                held_value = round(held_park * (px_held or 0.0), 2)
+                remainder  = max(0.0, remainder - held_value)
+                basis += f" − ${held_value:,.0f} {instrument} already held"
+                if not px_held:
+                    remainder = 0.0
+                    basis += " (price unavailable — not adding)"
         base = remainder
         if include_prem:
             base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
@@ -513,6 +537,11 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                 reason = (f"remainder ${remainder:,.0f} capped by settled cash ${cash_cap:,.0f}"
                           + ("" if all_filled else f" / 10% net-liq ${netliq_cap:,.0f} (partial run)"))
             log.info(f"  💤 Nothing to park (${buy_amount:,.2f}) — {reason}")
+            if mt:
+                # Normal for MT: the spare cash is already in the QQQ held from
+                # earlier weeks. Not worth a weekly Discord ping.
+                return _finish({"status": "skipped_no_cash", **caps,
+                                "message": "Trend filter: QQQ held — no new spare cash to add"})
             # Say so in Discord, not just on the dashboard. A silent skip is
             # indistinguishable from the sweep never having run, and the
             # unfilled-slot case in particular is worth explaining: after
@@ -539,8 +568,10 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         existing = state.get("cash_park")
         # A preview that sold the park at the start of the run still finds it open
         # in state.json (a preview writes nothing), so trust the run's own record.
+        adding   = bool(mt and existing and existing.get("status") == "open" and existing.get("shares")
+                        and (existing.get("instrument") or "").upper() == instrument)
         if existing and existing.get("status") == "open" and existing.get("shares") \
-                and not context.get("park_sold"):
+                and not context.get("park_sold") and not adding:
             log.warning(f"  ⚠️  Prior {existing.get('instrument')} park still open — not buying again")
             if not orders_dry_run:
                 _discord_alert(f"⚠️ **YRVI** Cash sweep: a prior {existing.get('instrument')} park "
@@ -658,19 +689,32 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
         cost   = round(shares * fill, 2)
         now    = datetime.now().isoformat()
         state = _load_state()   # reload — the pipeline wrote weekly_pnl meanwhile
-        state["cash_park"] = {
-            "instrument":   instrument,
-            "shares":       shares,
-            "buy_price":    fill,
-            "cost_basis":   cost,
-            "buy_date":     now,
-            "status":       "open",
-            "sell_price":   None,
-            "realized_pnl": None,
-            "last_checked": now,
-        }
+        prior = state.get("cash_park") or {}
+        if adding and prior.get("status") == "open" and prior.get("shares"):
+            # YRVI-MT: one position held across weeks — add shares and cost, keep the
+            # original buy_date (the hold started then), average the price.
+            tot_sh   = round(float(prior["shares"]) + shares, 4)
+            tot_cost = round(float(prior.get("cost_basis") or 0.0) + cost, 2)
+            prior.update({"shares": tot_sh, "cost_basis": tot_cost,
+                          "buy_price": round(tot_cost / tot_sh, 4) if tot_sh else fill,
+                          "last_added": now, "last_checked": now, "held_by": "trend_filter"})
+            state["cash_park"] = prior
+        else:
+            state["cash_park"] = {
+                "instrument":   instrument,
+                "shares":       shares,
+                "buy_price":    fill,
+                "cost_basis":   cost,
+                "buy_date":     now,
+                "status":       "open",
+                "sell_price":   None,
+                "realized_pnl": None,
+                "last_checked": now,
+                **({"held_by": "trend_filter"} if mt else {}),
+            }
         _save_state(state)
-        log.info(f"  ✅ Parked ${cost:,.2f}: {shares} {instrument} @ ${fill:.2f}")
+        log.info(f"  ✅ Parked ${cost:,.2f}: {shares} {instrument} @ ${fill:.2f}"
+                 + (f" (now {state['cash_park']['shares']} sh held)" if adding else ""))
         # When a partial run held the buy down to the 10% net-liq cap, say so —
         # otherwise a deliberately small park looks like the whole remainder.
         cap_note = ""
@@ -678,9 +722,15 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
             cap_note = (f"\nHeld to the 10% net-liq cap (${netliq_cap:,.0f}) because "
                         f"{max(0, target - fills)} of {target} slot(s) went unfilled — "
                         f"the remainder was ${base:,.0f}.")
-        _discord_alert(f"🅿️ **YRVI** Cash sweep — parked **${cost:,.0f}** in "
-                       f"**{instrument}** ({shares} sh @ ${fill:.2f}). Sells end of week."
-                       f"{cap_note}")
+        if mt:
+            _discord_alert(f"🚢 **YRVI-MT** QQQ park — bought **${cost:,.0f}** of **QQQ** "
+                           f"({shares} sh @ ${fill:.2f}); now holding "
+                           f"{state['cash_park']['shares']} sh. Held across weeks while the "
+                           f"uptrend gate stays on.")
+        else:
+            _discord_alert(f"🅿️ **YRVI** Cash sweep — parked **${cost:,.0f}** in "
+                           f"**{instrument}** ({shares} sh @ ${fill:.2f}). Sells end of week."
+                           f"{cap_note}")
         return _finish({"status": "bought", **caps, "shares": shares,
                         "buy_price": fill, "cost_basis": cost,
                         "message": f"Parked ${cost:,.0f} in {instrument} ({shares} sh @ ${fill:.2f})"})
