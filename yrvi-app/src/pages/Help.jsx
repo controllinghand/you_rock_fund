@@ -137,6 +137,16 @@ const SETTINGS_GROUPS = [
     ],
   },
   {
+    title: 'Trend Filter (YRVI-MT 🚢)',
+    items: [
+      { label: 'Trend Filter track', default: 'Off', range: 'Pick the 🚢 card', description: 'Ride the Wave with market-trend gates, run on the same weekly snapshot as the website\'s YRVI-MT fund (frozen at Friday\'s close). New puts only when SPY closed at or below its 50-day average, on names also at or below theirs, ranked by highest bid yield. In an uptrend (SPY and QQQ above their 50-day averages, QQQ above its 200-day) spare cash holds QQQ across weeks; it is sold in full when that turns off. No valid snapshot on Monday = no MT trades that week, same as the website.' },
+      { label: 'Wheel on this track', default: '—', range: '—', description: 'Assigned shares are never sold: no screener-drop, stop-loss or earnings sale. The weekly covered call is the one at the assigned strike if its delta is at least 0.20, otherwise the call closest to 0.20 delta (max 0.22).' },
+      { label: 'Sizing on this track', default: 'max(2, net liq ÷ $50k)', range: '—', description: 'Slots scale with the account like the website fund (Number of Positions is not used), less wheel holdings and open puts. One contract per pick first, then balanced by dollars, at most $100k of put notional per ticker.' },
+      { label: 'VIX spike rule', default: 'Always on with this track', range: '—', description: 'When the live VIX is above 1.75× the average of its last 50 daily closes at the Monday run, new puts target ~0.10 delta (max 0.12) and must still pay the Min Bid Yield, which on weekly puts usually means none that week. If the VIX or its history can\'t be read, the run trades normally.' },
+      { label: 'Run time', default: '10:00 AM PT', range: '—', description: 'The website fund enters at 1:00 PM ET. Keep Execution Time at the 1:00 PM ET equivalent so a box trades at the same prices.' },
+    ],
+  },
+  {
     title: 'VIX Stress Rule (part of YRVI-CSP-M)',
     items: [
       { label: 'VIX Stress Rule', default: 'On with YRVI-CSP-M', range: 'On / Off', description: 'Shown under Strategy Track only on YRVI-CSP-M, and switched on when you pick that track (turning it off makes the box Custom). It has no effect on the weekly tracks. When the live VIX is above the VIX Level at the Monday run, new puts target the Stress Delta instead of ~0.20. Every put must still pay the Min Bid Yield. If the VIX can\'t be read (IBKR, then Yahoo), the run trades normally. Backtest 2017–2026: worst drawdown −25% → −17% at about the same return.' },

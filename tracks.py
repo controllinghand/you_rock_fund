@@ -151,10 +151,10 @@ TRACKS = [
             "wheel_stop_loss_enabled": False,
             "trend_filter_enabled":    True,
         },
-        # The card ships before the MT trading rules do. While coming_soon the card
-        # can't be picked and resolve_track() never returns it, so no box can wear
-        # the MT badge while it still trades plain Ride-the-Wave rules.
-        "coming_soon": True,
+        # Selectable since v5.2.154, when the last of its rules shipped (snapshot,
+        # gates, never-sell wheel, QQQ held across weeks, website CC rule and
+        # sizing, VIX spike rule). A future track can still ship card-first with
+        # "coming_soon": True — resolve_track() and the Settings page skip it.
     },
 ]
 

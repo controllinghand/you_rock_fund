@@ -1,3 +1,20 @@
+## [5.2.154] — 2026-10-22
+
+### Added
+- **🚢 Trend Filter (YRVI-MT) is now a selectable strategy track.** It runs the same rules, on the same frozen Friday snapshot, as the website's YRVI-MT fund:
+  - new puts only in a week when SPY closed at or below its 50-day average, ranked by highest bid yield;
+  - in an uptrend, spare cash holds QQQ across weeks, sold in full when the uptrend gate turns off;
+  - assigned shares are wheeled and never sold, using the website's covered-call strike rule;
+  - sizing = max(2, net liq ÷ $50k) slots, $100k per ticker;
+  - no valid snapshot means no MT trades that week.
+- **VIX spike rule for MT puts.** At the Monday run, if the live VIX is above 1.75× the average of its last 50 daily closes, new puts target ~0.10 delta (0.07–0.12) and still have to pay the Min Bid Yield. On weekly puts that usually means no new puts that week, which is the point in a crash. It's a ratio, so a high-but-steady VIX doesn't trigger it. The history comes from IBKR, or Yahoo if IBKR doesn't have it, and the rule fails open. The website fund uses the same rule.
+- **Settings:** with the Trend Filter on, a panel shows this week's gates from the website snapshot (puts open / QQQ park / cash, or "no valid snapshot") and warns if the Monday run time isn't 10:00 AM PT, the website fund's 1:00 PM ET entry.
+- **This Week:** a 🚢 Trend Filter card in the preview, MT wording on the cash-sweep card, and a Run Now banner note when a week was skipped for want of a snapshot.
+- **Help:** a Trend Filter section.
+
+### Changed
+- A box switching to the Trend Filter with a non-QQQ cash-sweep park open (e.g. SGOV) sells it at the next Monday run; the trend filter only parks QQQ.
+
 ## [5.2.153] — 2026-10-22
 
 ### Added

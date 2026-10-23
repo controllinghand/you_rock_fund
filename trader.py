@@ -1368,8 +1368,15 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     monthly = tenor.cycle() if tenor.active(get_settings()) == tenor.MONTHLY else None
     if monthly:
         log.info(f"  🌙 Monthly puts — expiry {monthly['next_expiry']} ({monthly['dte']} days)")
-    # VIX stress rule (monthly only, default off): read the live VIX once per run.
-    stress = vix.stress_rule(ib, get_settings()) if monthly else None
+    # VIX stress rule, read once per run: the CSP-M level rule on monthly puts, or
+    # the YRVI-MT 🚢 spike rule (VIX > 1.75x its 50-day mean) on trend-filter puts.
+    import trend
+    if monthly:
+        stress = vix.stress_rule(ib, get_settings())
+    elif trend.active(get_settings()):
+        stress = vix.mt_spike_rule(ib)
+    else:
+        stress = None
     stressed = bool(stress and stress["stressed"])
     put_target = stress["target"] if stressed else 0.20
     monthly_floor = stress["min_delta"] if stressed else MONTHLY_MIN_DELTA

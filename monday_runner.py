@@ -746,10 +746,18 @@ def _mt_park_before_run(trend_week: dict, dry_run: bool = False) -> dict | None:
         cp = _load_state().get("cash_park") or {}
         if cp.get("status") != "open" or not cp.get("shares"):
             return None
-        if trend_week.get("park_gate"):
+        if trend_week.get("park_gate") and (cp.get("instrument") or "").upper() == "QQQ":
             log.info(f"  🚢 Trend filter: park gate ON — holding {cp.get('shares')} "
                      f"{cp.get('instrument')} across weeks")
             return None
+        if trend_week.get("park_gate"):
+            # A cash-sweep park from before the box switched tracks (e.g. SGOV):
+            # MT only ever holds QQQ, so clear it out like a gate-off week.
+            log.info(f"  🚢 Trend filter: selling the {cp.get('instrument')} park left from the "
+                     f"cash sweep — the trend filter parks only QQQ")
+            from cash_park import sell_park
+            result = sell_park(dry_run=dry_run)
+            return result if result and result.get("status") in ("sold", "dry_run") else None
         why = "puts gate open" if trend_week.get("csp_gate") else "cash week"
         log.info(f"  🚢 Trend filter: park gate OFF ({why}) — selling all {cp.get('shares')} "
                  f"{cp.get('instrument')}; proceeds settle T+1, so they don't fund today's puts")
