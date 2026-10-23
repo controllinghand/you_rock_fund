@@ -63,6 +63,7 @@ directly — it is a symlink into `/data` and rotation would rename the link.
 config.py          → All fund parameters, IBKR credentials, API keys
 screener.py        → Fetches CSP candidates from Render API, filters + scores them
 tenor.py           → `option_tenor` (weekly | monthly; monthly only with csp_only_mode = YRVI-CSP-M): monthly expiry, entry window, next entry
+trend.py           → YRVI-MT 🚢 trend filter: fetches the website's frozen Friday snapshot (/api/targets/csp?strategy=YRVI-MT — gates + ranked candidates); no valid snapshot on the entry day = no MT trades that week
 tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M, plus YRVI-MT 🚢 shown as coming_soon until its rules ship) — DERIVED from settings via pins, never stored
 position_sizer.py  → Allocates capital across up to 5 positions (accepts budget override)
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
@@ -191,6 +192,13 @@ Step 0 — reconcile (_reconcile_before_run):
   → hands the reconciled list to the wheel check as holdings_override
   → only bails (leaving state untouched) when IBKR returns NO open positions at
     all AND GrossPositionValue can't confirm the account is genuinely flat
+
+Step 0b — YRVI-MT trend snapshot (trend filter only; trend.active):
+  → trend.fetch_snapshot(): the website's frozen Friday decision. A live run needs
+    entry_date == today (ET); a preview accepts the upcoming entry day
+  → no valid snapshot → return right after the reconcile: no wheel check, no puts,
+    no sweep (the website fund also skips the week), with a Discord alert on a live run
+  → otherwise the week rides in the outcome as `trend`
 
 Step 0c — sell a leftover cash-sweep park (_sell_park_before_run):
   → if state.json has an OPEN cash_park bought BEFORE today, sell it (sell_park) so

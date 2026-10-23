@@ -3983,6 +3983,9 @@ def _run_screener():
             "num_positions":        settings.get("num_positions", 5),
             # Cash sweep decision for this plan (buy / skip + reason), or None when off:
             "cash_park":            cash_park_eval,
+            # YRVI-MT 🚢 week (gates + candidate count), or None when the trend filter is off:
+            "trend":                _trend_summary(outcome.get("trend")),
+            "skipped":              outcome.get("skipped"),
             "dry_run":              True,
             "run_at":               datetime.now(PST).isoformat(),
         }
@@ -3994,6 +3997,16 @@ def _run_screener():
 @app.get("/api/live-ready")
 def get_live_ready():
     return _live_ready()
+
+def _trend_summary(week: dict | None) -> dict | None:
+    """The YRVI-MT week for the UI: gates and candidate count, without the raw
+    snapshot payload (this rides on payloads that are polled and cached)."""
+    if not week:
+        return None
+    keep = ("ok", "status", "reasons", "observation_date", "entry_date", "expiry",
+            "csp_gate", "park_gate")
+    return {**{k: week.get(k) for k in keep}, "candidates": len(week.get("rows") or [])}
+
 
 @app.get("/api/settings")
 def get_settings_endpoint():
@@ -4725,6 +4738,8 @@ def manual_run():
                     "cash_park":     {"status":     park.get("status"),
                                       "instrument": park.get("instrument"),
                                       "message":    park.get("message")} if park else None,
+                    "trend":         _trend_summary(outcome.get("trend")),
+                    "skipped":       outcome.get("skipped"),
                     "completed":     datetime.now().isoformat(),
                 }
             })

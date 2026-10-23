@@ -1,3 +1,11 @@
+## [5.2.150] — 2026-10-22
+
+### Added
+- **YRVI-MT 🚢 reads the website's weekly trend snapshot (`trend.py`).** The website's YRVI-MT fund decides each week on Friday's close and freezes that decision: whether new puts may open (SPY at or below its 50-day average), whether spare cash holds QQQ (SPY and QQQ above their 50-day averages, QQQ above its 200-day), and the ranked candidates. A box on the Trend Filter track now fetches that snapshot right after the Monday reconcile, so the box and the website fund can't disagree about the week.
+- **No valid snapshot = no MT trades that week.** If the snapshot is missing, isn't ready, has broken gates, or belongs to a different week, the run stops after the reconcile: no covered calls, no puts, no cash-sweep change, and a Discord alert says why. That's what the website fund does too. A live run (scheduled or Run Now) needs the snapshot's entry day to be today; Run Screener and the weekend preview accept the upcoming entry day.
+- The preview and Run Now results carry a small `trend` summary (gates, entry day, candidate count) for the UI.
+- No box runs this yet: the Trend Filter card is still "Coming soon", and the trend filter never applies with CSP-only mode on. The trading rules that use the snapshot come next.
+
 ## [5.2.149] — 2026-10-22
 
 ### Added
