@@ -738,6 +738,27 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     _phase("reconcile")
     reconcile = _reconcile_before_run(dry_run=dry_run)
 
+    # YRVI-MT 🚢: the week's trend decision is the website's frozen Friday snapshot.
+    # Without a valid one the website fund trades nothing that week (no CC, no put,
+    # no QQQ change), so neither does a box — after the reconcile, which only
+    # corrects the cache and isn't a trade.
+    trend_week = None
+    import trend
+    if trend.active(get_settings()):
+        _phase("trend snapshot")
+        trend_week = trend.fetch_snapshot(preview=dry_run)
+        log.info(f"🚢 Trend filter: {trend.describe(trend_week)}")
+        if not trend_week["ok"]:
+            if not dry_run:
+                _discord_alert(
+                    f"🚢 **YRVI-MT** No trades this week — {trend.describe(trend_week)}. "
+                    "This matches the website's YRVI-MT fund, which also skips a week "
+                    "without a frozen Friday snapshot. Nothing else is needed; next "
+                    "week runs normally once a snapshot is captured.")
+            return {"dry_run": dry_run, "wheel": {}, "csp": {}, "cash_park": None,
+                    "cash_park_sale": None, "reconcile": reconcile, "trend": trend_week,
+                    "skipped": "trend_snapshot_unavailable"}
+
     # Sell a parked cash-sweep position left over from an earlier day, so its cash
     # backs this run's puts instead of sitting in QQQ/SGOV (stock has no loan value
     # in a cash/IRA account, so a park is collateral the puts can't use).
@@ -791,4 +812,4 @@ def run_monday(dry_run: bool = False, progress_callback=None,
         log.error(f"❌ Cash sweep buy error (non-fatal): {e}", exc_info=True)
 
     return {"dry_run": dry_run, "wheel": wheel, "csp": csp, "cash_park": park,
-            "cash_park_sale": park_sale, "reconcile": reconcile}
+            "cash_park_sale": park_sale, "reconcile": reconcile, "trend": trend_week}
