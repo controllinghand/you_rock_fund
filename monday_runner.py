@@ -498,6 +498,16 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
                      f"{monthly['next_entry']} (current cycle expires {monthly['next_expiry']})")
             target_fills = 0
 
+    # YRVI-MT 🚢: new puts open only in a put-gate week (SPY at or below its 50-day
+    # average on Friday's close). A QQQ-park or cash week opens none, like the
+    # website fund; covered calls on wheel shares were already written regardless.
+    trend_week = context.get("trend")
+    if trend_week and not trend_week.get("csp_gate") and target_fills > 0:
+        why = "QQQ park week (uptrend)" if trend_week.get("park_gate") else "cash week"
+        log.info(f"  🚢 Trend filter: put gate closed — {why}; no new puts "
+                 f"({target_fills} slot(s) stay open)")
+        target_fills = 0
+
     # Compute the budget up front — even on an all-wheel week — so the cash sweep can
     # always derive remainder = effective_budget − total_capital (zeroing it here made
     # an all-wheel account with real idle cash look empty).
@@ -542,7 +552,16 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # fallback depth. In weeks where the top ranks are gutted by wheel-exit
     # skips + illiquid/oversized names, a shallow pool under-fills even though
     # dozens of names qualify (v5.2.55 under-fill: 52 qualified, only 10 seen).
-    all_targets = get_top_targets(None)
+    if trend_week:
+        # The website's frozen ranking, not today's screen: the snapshot's names,
+        # in its order (put bid / strike), minus Settings → Excluded Tickers.
+        import trend
+        excluded = {t.strip().upper() for t in settings.get("excluded_tickers", []) if t and t.strip()}
+        all_targets = trend.targets(trend_week, excluded)
+        log.info(f"  🚢 Trend filter: {len(all_targets)} snapshot candidate(s), "
+                 f"Friday {trend_week.get('observation_date')} ranking")
+    else:
+        all_targets = get_top_targets(None)
     filtered_targets = [t for t in all_targets if t["ticker"] not in skip_tickers]
 
     # Subtract capital committed by CSPs opened in EARLIER runs this week so a re-run
@@ -781,6 +800,8 @@ def run_monday(dry_run: bool = False, progress_callback=None,
     if park_sale:
         wheel["park_proceeds"] = park_sale.get("proceeds") or 0.0
         wheel["park_sold"]     = True
+    if trend_week:
+        wheel["trend"] = trend_week
 
     _phase("CSP pipeline")
     csp   = run_csp_pipeline(wheel, dry_run=dry_run,

@@ -113,3 +113,43 @@ def describe(mt: dict) -> str:
             else "QQQ park ON (uptrend)" if mt["park_gate"] else "both gates closed — cash")
     return (f"week of {mt['entry_date']} (Friday {mt['observation_date']} close): {gate}, "
             f"{len(mt['rows'])} ranked candidate(s), expiry {mt['expiry']}")
+
+
+def targets(week: dict, excluded: set | None = None) -> list:
+    """The snapshot's eligible candidates as screener-format targets, in the website's
+    rank order (put bid / strike, highest first). The trader still re-quotes each on
+    IBKR at execution and applies the app's execution checks (Min Bid Yield, Trader
+    Max Delta, spread, open interest)."""
+    excluded = {t.upper() for t in (excluded or set())}
+    out = []
+    for rank, r in enumerate(week.get("rows") or [], 1):
+        try:
+            ticker = str(r["ticker"]).upper()
+            if r.get("eligible") is False or ticker in excluded:
+                continue
+            strike, bid = float(r["put_20d_strike"]), float(r["put_20d_bid"])
+            price = float(r.get("underlying_price") or 0)
+            expiry = date.fromisoformat(str(r["expiry"])[:10])
+            if strike <= 0 or bid <= 0 or price <= 0:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.append({
+            "ticker":              ticker,
+            "put_20d_strike":      strike,
+            "put_20d_premium":     bid,
+            "put_20d_premium_pct": bid / strike,
+            "put_20d_delta":       float(r.get("put_20d_delta") or -0.20),
+            "iv_atm":              float(r.get("iv_atm") or 0),
+            "latest_price":        price,
+            "underlying_price":    price,
+            "_buffer_pct":         (price - strike) / price,
+            "expiry":              expiry.strftime("%a, %d %b %Y 00:00:00 GMT"),
+            "days_to_earnings":    r.get("days_to_earnings_at_entry"),
+            "earnings_date":       r.get("earnings_date"),
+            "sector":              r.get("sector") or "",
+            "wheel_fit":           "Wheel-ready",
+            "_score":              bid / strike,
+            "mt_rank":             rank,
+        })
+    return out
