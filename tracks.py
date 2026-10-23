@@ -92,8 +92,11 @@ TRACKS = [
         # CSP-only box read "Custom" purely because a dead toggle was left on
         # (exactly the state of the dev box on 2026-08-22).
         "pins": {
-            "csp_only_mode": True,
-            "option_tenor":  "weekly",
+            "csp_only_mode":        True,
+            "option_tenor":         "weekly",
+            # Inert under CSP-only, but picking this card from the Trend Filter must
+            # switch the filter off too, or it's left on behind the scenes.
+            "trend_filter_enabled": False,
         },
     },
     {
@@ -121,9 +124,10 @@ TRACKS = [
         # so pinning it here keeps it off every other track's settings page. Its
         # level/delta are NOT pinned — tuning them stays YRVI-CSP-M.
         "pins": {
-            "csp_only_mode":      True,
-            "option_tenor":       "monthly",
-            "vix_stress_enabled": True,
+            "csp_only_mode":        True,
+            "option_tenor":         "monthly",
+            "vix_stress_enabled":   True,
+            "trend_filter_enabled": False,   # see YRVI-CSP
         },
     },
     {

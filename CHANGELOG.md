@@ -1,3 +1,8 @@
+## [5.2.155] — 2026-10-23
+
+### Fixed
+- **Switching from the Trend Filter to CSP Only or CSP Monthly left the trend filter switched on.** It had no effect (CSP-only mode overrides it), but the setting stayed on behind the scenes and the page showed unsaved changes after switching back. Both CSP tracks now set it off when picked. Existing CSP boxes are unaffected; the setting already defaults to off.
+
 ## [5.2.154] — 2026-10-22
 
 ### Added
