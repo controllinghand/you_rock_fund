@@ -64,7 +64,7 @@ config.py          → All fund parameters, IBKR credentials, API keys
 screener.py        → Fetches CSP candidates from Render API, filters + scores them
 tenor.py           → `option_tenor` (weekly | monthly; monthly only with csp_only_mode = YRVI-CSP-M): monthly expiry, entry window, next entry
 trend.py           → YRVI-MT 🚢 trend filter: fetches the website's frozen Friday snapshot (/api/targets/csp?strategy=YRVI-MT — gates + ranked candidates); no valid snapshot on the entry day = no MT trades that week
-tracks.py          → Named strategy tracks (YRVI-26 / SL / CSP / CSP-M / MT 🚢) — DERIVED from settings via pins, never stored
+tracks.py          → Named strategy tracks (YRVI / SL / CSP / CSP-M / MT 🚢) — DERIVED from settings via pins, never stored
 position_sizer.py  → Allocates capital across up to 5 positions (accepts budget override)
 trader.py          → IBKR CSP execution: qualify → liquidity check (spread + OI-notional floor) → limit/market escalation
 wheel_manager.py   → Assignment detection, screener-based exits, ~0.20-delta covered call execution (prefers nearest strike ≥ cost basis; writes below-cost CC instead of force-selling underwater holdings; keeps holdings through earnings by default)

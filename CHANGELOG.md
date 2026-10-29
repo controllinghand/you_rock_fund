@@ -1,3 +1,8 @@
+## [5.2.157] — 2026-10-29
+
+### Changed
+- **The Ride the Wave track is now called YRVI, not YRVI-26.** The "-26" was the fund's 2026 launch year and has been dropped everywhere on the website. The dashboard track badge and the Discord post footer now say YRVI. Nothing about the track's settings changes, and picking a track works the same way.
+
 ## [5.2.156] — 2026-10-23
 
 ### Fixed

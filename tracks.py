@@ -22,7 +22,7 @@ badge is recomputed from what actually landed on disk.
 # load-bearing rather than cosmetic.
 TRACKS = [
     {
-        "id":    "YRVI-26",
+        "id":    "YRVI",
         "name":  "Ride the Wave",
         # 🏄 not 🌊: this renders in the Discord embed FOOTER as well as the
         # Track field, and the footer draws at ~16px where the water-wave glyph
@@ -146,7 +146,7 @@ TRACKS = [
             "covered calls and never sold. When the VIX spikes above 1.75x its 50-day "
             "average, new puts drop to ~0.10 delta, which usually means none that week."
         ),
-        # trend_filter_enabled is the identity; the wheel settings match YRVI-26
+        # trend_filter_enabled is the identity; the wheel settings match YRVI
         # because MT IS Ride the Wave plus the gates. Its QQQ park and VIX spike rule
         # belong to the trend filter itself (the website's MT rules), not the cash
         # sweep or the CSP-M VIX settings, so neither of those is pinned.
@@ -201,10 +201,10 @@ def resolve_track(settings: dict) -> dict:
     """Return the track the given settings are actually running.
 
     Falls back to CUSTOM_TRACK when no track matches. The named tracks
-    are mutually exclusive by construction. YRVI-26 and YRVI-SL disagree on
+    are mutually exclusive by construction. YRVI and YRVI-SL disagree on
     wheel_stop_loss_enabled, and both require csp_only_mode False where the
     two CSP tracks require True; YRVI-CSP and YRVI-CSP-M disagree on
-    option_tenor; YRVI-MT needs trend_filter_enabled True where YRVI-26 and
+    option_tenor; YRVI-MT needs trend_filter_enabled True where YRVI and
     YRVI-SL pin it False (and its csp_only_mode False excludes both CSP
     tracks). So at most one can ever match and the iteration order carries no
     hidden meaning. A coming_soon track is never returned (see YRVI-MT).
