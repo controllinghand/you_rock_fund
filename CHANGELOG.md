@@ -1,3 +1,8 @@
+## [5.2.158] — 2026-11-03
+
+### Fixed
+- **Monthly puts disappeared from the dashboard a week after they opened.** On CSP Monthly (YRVI-CSP-M), the Mondays between entries have nothing new to sell, and that run cleared the week's positions, so the Open Positions cards went blank while the puts were still open. The dashboard now rebuilds those cards from the trade log until the puts expire. With IBKR connected, a put you bought back early drops off. The Discord weekly post and Trade History "Current Week" are unchanged.
+
 ## [5.2.157] — 2026-10-29
 
 ### Changed
