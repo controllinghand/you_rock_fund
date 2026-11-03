@@ -3685,6 +3685,61 @@ def get_diag():
     return _build_diag()
 
 
+def _monthly_carried_positions(trade_log: list, shown: list, portfolio: list,
+                               ibkr_live: bool) -> list:
+    """Position cards for monthly puts opened in an earlier week of this cycle.
+
+    Source is trade_log.json (unexpired short puts, real fills only), minus any
+    ticker the state already shows. With IBKR connected, a put must still be held
+    — one bought back early drops off; with IBKR down, the log is shown as is.
+    """
+    today = datetime.now(PST).strftime("%Y%m%d")
+    shown_tickers = {p.get("ticker") for p in shown
+                     if p.get("status") in ("filled", "partial_fill")}
+    held = {(i.get("symbol"), i.get("expiry"), i.get("strike"))
+            for i in portfolio if i.get("right") == "P" and (i.get("position") or 0) < 0}
+    px = {i.get("symbol"): i.get("underlyingPrice") for i in portfolio
+          if i.get("underlyingPrice") is not None}
+
+    cards = []
+    for rec in trade_log:
+        sym, exp, strike = rec.get("symbol"), str(rec.get("expiry") or ""), rec.get("strike")
+        if (rec.get("right") != "P" or rec.get("dry_run") or not strike
+                or exp < today or sym in shown_tickers):
+            continue
+        if ibkr_live and (sym, exp, strike) not in held:
+            continue
+        contracts = rec.get("contracts") or 0
+        prem      = rec.get("premium_per_contract")
+        try:
+            expiry_str = datetime.strptime(exp, "%Y%m%d").strftime("%a, %d %b %Y 00:00:00 GMT")
+        except ValueError:
+            expiry_str = exp
+        shown_tickers.add(sym)
+        cards.append({
+            "ticker":               sym,
+            "strike":               strike,
+            "premium":              prem,
+            "expiry":               expiry_str,
+            "contracts":            contracts,
+            "capital_used":         round(strike * 100 * contracts, 2),
+            "premium_total":        rec.get("total_premium"),
+            "yield_pct":            round(prem / strike * 100, 4) if prem else None,
+            "latest_price":         px.get(sym),
+            "status":               "filled",
+            "fill_price":           prem,
+            "fill_yield_pct":       round(prem / strike * 100, 4) if prem else None,
+            "premium_collected":    rec.get("total_premium") or 0,
+            "exec_timestamp":       rec.get("entry_date"),
+            "delta_at_entry":       rec.get("delta_at_entry"),
+            "iv_at_entry":          rec.get("iv_at_entry"),
+            "stock_price_at_entry": rec.get("stock_price_at_entry"),
+            "buffer_pct_at_entry":  rec.get("buffer_pct_at_entry"),
+            "carried":              True,
+        })
+    return cards
+
+
 @app.get("/api/positions")
 def get_positions():
     state = load_state()
@@ -3755,6 +3810,15 @@ def get_positions():
             "premium_per_contract": tl.get("premium_per_contract"),
             "total_premium":        tl.get("total_premium"),
         })
+
+    # Monthly track: a put sold on the entry Monday stays open ~4–5 weeks, but the
+    # off-window Mondays clear state["positions"] (deliberately — the Discord weekly
+    # post and Trade-History "Current Week" are week-scoped). Rebuild the cards from
+    # the durable trade_log so they stay on the dashboard until the puts expire.
+    import tenor
+    if tenor.active(settings) == tenor.MONTHLY:
+        enriched += _monthly_carried_positions(trade_log, enriched, portfolio,
+                                               ibkr.get("account_summary") is not None)
 
     return {
         "positions":       enriched,
