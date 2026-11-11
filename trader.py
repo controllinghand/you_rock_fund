@@ -1252,9 +1252,147 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
     return _finalize("failed")
 
 
+def _plan_top_up(fills: list, spare: float) -> dict:
+    """Spread `spare` dollars over this run's filled puts, ONE contract at a time in
+    the order they were placed (best-ranked first), round-robin, until no further
+    contract fits. Round-robin, not "all on the first name", so the extra cash
+    widens every position a little instead of concentrating one.
+
+    fills: [(ticker, cost_per_contract)] in placement order. Returns {ticker: n}.
+    """
+    plan: dict = {}
+    left = spare
+    while True:
+        added = False
+        for ticker, cost in fills:
+            if cost > 0 and cost <= left + 0.01:
+                plan[ticker] = plan.get(ticker, 0) + 1
+                left -= cost
+                added = True
+        if not added:
+            return plan
+
+
+def _top_up_filled(ib: IB, results: list, attempted: dict, all_sized: list,
+                   trade_rows: dict, spare: float, max_delta: float,
+                   status_cb=None) -> float:
+    """Spare-cash put top-up, step 1 (opt-in `csp_topup_enabled`, v5.2.159): sell MORE
+    contracts of the exact puts this run just filled — same ticker, strike, expiry —
+    with the cash the sweep would otherwise park. Lyle's manual routine: write the
+    week, see what the premium left over, sell another contract or two, park the rest.
+
+    Every added contract passes the same gates as a fresh put: live delta ≤ the
+    trader max, market data, and check_liquidity (spread / bid yield / OI against the
+    position's NEW total), then the normal mid → bid → market escalation for just the
+    added quantity. A top-up that fails any gate is skipped and its cash falls through
+    to the sweep — it never retries at a worse price.
+
+    Fills merge INTO the original result, trade_log row and sized position, because
+    all three are keyed by ticker (or ticker+strike+expiry): a second row for the same
+    contract would overwrite the first and drop its premium from the week.
+
+    Returns the collateral added.
+    """
+    fills = [(r["ticker"], attempted[r["ticker"]]["strike"] * 100)
+             for r in results
+             if r.get("status") == "filled" and r.get("ticker") in attempted]
+    if not fills:
+        log.info("  ➕ Top-up: no puts filled this run to add contracts to")
+        return 0.0
+    plan = _plan_top_up(fills, spare)
+    if not plan:
+        cheapest = min((c for _, c in fills), default=None)
+        log.info(f"  ➕ Top-up: ${spare:,.0f} spare doesn't cover another contract of this "
+                 f"week's puts" + (f" (cheapest ${cheapest:,.0f})" if cheapest else ""))
+        return 0.0
+    log.info(f"  ➕ Top-up plan with ${spare:,.0f} spare: "
+             + ", ".join(f"{t} +{n}" for t, n in plan.items()))
+
+    added_capital = 0.0
+    for ticker, n in plan.items():
+        info = attempted[ticker]
+        r    = next(x for x in results if x.get("ticker") == ticker and x.get("status") == "filled")
+        cost = info["strike"] * 100
+        if status_cb:
+            try:
+                status_cb(ticker=ticker, stage=f"top-up +{n}", result=None)
+            except Exception:
+                pass
+        try:
+            contract = Option(ticker, info["expiry"], info["strike"], "P", "SMART", currency="USD")
+            q = ib.qualifyContracts(contract)
+            if not q:
+                log.info(f"  ➕ {ticker} top-up skipped — could not re-qualify the contract")
+                continue
+            contract = q[0]
+            probe = _probe_strike(ib, contract)
+            if probe.delta is None or abs(probe.delta) > max_delta:
+                log.info(f"  ➕ {ticker} top-up skipped — live delta "
+                         f"{'n/a' if probe.delta is None else f'{abs(probe.delta):.2f}'} "
+                         f"(max {max_delta:.2f})")
+                continue
+            mkt = get_market_data(ib, contract, screener_premium=r.get("fill_price") or 0.0)
+            if not mkt:
+                log.info(f"  ➕ {ticker} top-up skipped — no market data")
+                continue
+            total = int(r.get("filled_contracts") or r.get("contracts") or 0) + n
+            skip = check_liquidity(mkt, ticker, total)
+            if skip:
+                log.info(f"  ➕ {ticker} top-up skipped — liquidity ({skip.get('reason')})")
+                continue
+            res = place_order_with_escalation(ib, contract, n, mkt, ticker, dry_run=False)
+        except Exception as e:
+            log.error(f"  ❌ {ticker} top-up error: {e} — leaving the rest to the sweep")
+            break
+
+        got = int(res.get("filled_contracts") or 0)
+        if got <= 0:
+            log.info(f"  ➕ {ticker} top-up not filled ({res.get('status')})")
+            if res.get("status") in _ABORT_ESCALATION_STATUSES:
+                break
+            continue
+
+        prev_n    = int(r.get("filled_contracts") or r.get("contracts") or 0)
+        prem      = round((r.get("premium_collected") or 0) + (res.get("premium_collected") or 0), 2)
+        new_n     = prev_n + got
+        r.update({
+            "contracts":         int(r.get("contracts") or prev_n) + got,
+            "filled_contracts":  new_n,
+            "premium_collected": prem,
+            "fill_price":        round(prem / new_n / 100, 2),
+            "topped_up": {"contracts": got, "requested": n,
+                          "fill_price": res.get("fill_price"),
+                          "premium": res.get("premium_collected"),
+                          "timestamp": res.get("exec_timestamp")},
+        })
+        info["contracts"] = int(info.get("contracts") or prev_n) + got
+        for i, sp in enumerate(all_sized):
+            if sp.get("ticker") == ticker:
+                all_sized[i] = {**sp, "contracts": sp.get("contracts", prev_n) + got,
+                                "capital_used": round(sp.get("capital_used", 0) + got * cost, 2),
+                                "premium_total": round((sp.get("premium_total") or 0)
+                                                       + (res.get("premium_collected") or 0), 2)}
+                break
+        row = trade_rows.get(ticker)
+        if row:
+            row = {**row, "contracts": new_n, "total_premium": prem,
+                   "premium_per_contract": r["fill_price"]}
+            trade_rows[ticker] = row
+            try:
+                _append_trade_log(dict(row))
+            except Exception as tl_err:
+                log.warning(f"  ⚠️  trade_log.json top-up write failed: {tl_err}")
+        added_capital += got * cost
+        log.info(f"  ➕ {ticker} topped up +{got} @ ${res.get('fill_price') or 0:.2f} "
+                 f"(${res.get('premium_collected') or 0:,.0f}) → {new_n} contracts")
+        ib.sleep(2)
+    return added_capital
+
+
 def execute_positions(sized_positions: list, extra_targets: list = None,
                       target_fills: int = None, status_callback=None,
-                      dry_run: bool = None, budget: float = None) -> list:
+                      dry_run: bool = None, budget: float = None,
+                      topup_spare=None) -> list:
     """
     Execute up to target_fills fills (defaults to NUM_POSITIONS). If a candidate
     fails qualification, market data, or liquidity, the next-ranked screener target
@@ -1269,6 +1407,12 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
       after a UI toggle (it kept simulating fills while Settings said OFF — the
       Trade History "Dry Run" mismatch). Read live, like check_liquidity does for its
       thresholds. Callers may pass an explicit bool to force it (e.g. /api/test-run).
+    topup_spare: opt-in spare-cash top-up (csp_topup_enabled, v5.2.159). A callable
+      fn(ib, premium_so_far) -> spare dollars (cash_park.spare_cash's deployable
+      figure). After every slot fills, that cash first buys more contracts of this
+      run's puts (_top_up_filled), then — if it still covers one contract of a
+      ranked name — opens ONE more put from the remaining candidates. What's left
+      goes to the cash sweep as before. None = off. Never on a dry run.
     """
     from position_sizer import size_position
 
@@ -1362,6 +1506,7 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     slot       = 0
     reconnects = 0
     attempted_contracts: dict = {}   # ticker → final contract worked this run
+    trade_rows: dict = {}            # ticker → trade_log.json row, for a top-up to merge into
     # Monthly puts (YRVI-CSP-M): each candidate is re-quoted on the monthly chain
     # when its turn comes. Doing it lazily keeps the IBKR chain work to the names
     # actually attempted, not the whole fallback pool.
@@ -1381,303 +1526,364 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
     put_target = stress["target"] if stressed else 0.20
     monthly_floor = stress["min_delta"] if stressed else MONTHLY_MIN_DELTA
 
-    while filled_count < _target:
-        pos = next_candidate()
-        if pos is None:
-            log.warning(f"⚠️  No more candidates — {filled_count}/{_target} positions filled")
-            break
+    topup_phase = None   # None → not run yet; "done" → ran (or not applicable)
+    topup_first = None   # index in results where the top-up's new-name step began
+    while True:
+        while filled_count < _target:
+            pos = next_candidate()
+            if pos is None:
+                log.warning(f"⚠️  No more candidates — {filled_count}/{_target} positions filled")
+                break
 
-        slot      += 1
-        ticker     = pos["ticker"]
-        attempted.add(ticker)
-        strike     = pos["strike"]
-        expiry     = pos["expiry"]
-        contracts  = pos["contracts"]
-        premium    = pos["premium"]
+            slot      += 1
+            ticker     = pos["ticker"]
+            attempted.add(ticker)
+            strike     = pos["strike"]
+            expiry     = pos["expiry"]
+            contracts  = pos["contracts"]
+            premium    = pos["premium"]
 
-        log.info(f"\n[attempt {slot}  fill {filled_count + 1}/{_target}] "
-                 f"{ticker} — {contracts} contracts @ ${strike:.2f} (screener strike)")
-        _status(ticker=ticker, stage="qualifying")
+            log.info(f"\n[attempt {slot}  fill {filled_count + 1}/{_target}] "
+                     f"{ticker} — {contracts} contracts @ ${strike:.2f} (screener strike)")
+            _status(ticker=ticker, stage="qualifying")
 
-        try:
-            screener_delta = pos.get("delta", 0.0)
-            if monthly:
-                start = _monthly_start(ib, ticker, monthly["next_expiry"], pos.get("iv_atm"),
-                                       target_delta=put_target)
-                if start is None:
-                    results.append({"ticker": ticker, "status": "skipped_monthly_chain"})
-                    _status(ticker=ticker, stage=None,
-                            result={"ticker": ticker, "status": "skipped_monthly_chain"})
+            try:
+                screener_delta = pos.get("delta", 0.0)
+                if monthly:
+                    start = _monthly_start(ib, ticker, monthly["next_expiry"], pos.get("iv_atm"),
+                                           target_delta=put_target)
+                    if start is None:
+                        results.append({"ticker": ticker, "status": "skipped_monthly_chain"})
+                        _status(ticker=ticker, stage=None,
+                                result={"ticker": ticker, "status": "skipped_monthly_chain"})
+                        continue
+                    m_strike, m_bid = start
+                    # Keep the capital the sizer planned for this slot; the monthly strike
+                    # is lower, so the same dollars buy more contracts. The every-put
+                    # budget check below still trims if the total would overrun.
+                    contracts = max(1, int(pos["capital_used"] // (m_strike * 100)))
+                    strike, expiry = m_strike, tenor.screener_expiry_str(monthly["next_expiry"])
+                    premium = m_bid or 0.0
+                    pos = {**pos, "strike": strike, "expiry": expiry, "contracts": contracts,
+                           "capital_used": round(contracts * strike * 100, 2), "premium": premium,
+                           "premium_total": round(contracts * premium * 100, 2), "tenor": tenor.MONTHLY,
+                           **({"vix": stress["vix"], "vix_stressed": stressed, "target_delta": put_target}
+                              if stress else {})}
+                    for _i, _sp in enumerate(all_sized):
+                        if _sp.get("ticker") == ticker:
+                            all_sized[_i] = pos
+                            break
+                    # No live delta must never pass a guessed strike: an out-of-range
+                    # fallback delta makes verify scan and require real greeks instead.
+                    screener_delta = -1.0
+                # Verify delta at execution time — auto-adjust if stock moved since Saturday
+                delta_result = verify_and_adjust_strike(
+                    ib, ticker, strike, expiry, screener_delta=screener_delta,
+                    contracts=contracts,
+                    min_delta=stress["min_delta"] if stressed else None,
+                    max_delta=stress["max_delta"] if stressed else None,
+                )
+                if delta_result is None:
+                    cap = stress["max_delta"] if stressed else _max_delta()
+                    log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {cap}, trying next")
+                    results.append({"ticker": ticker, "status": "skipped_delta"})
                     continue
-                m_strike, m_bid = start
-                # Keep the capital the sizer planned for this slot; the monthly strike
-                # is lower, so the same dollars buy more contracts. The every-put
-                # budget check below still trims if the total would overrun.
-                contracts = max(1, int(pos["capital_used"] // (m_strike * 100)))
-                strike, expiry = m_strike, tenor.screener_expiry_str(monthly["next_expiry"])
-                premium = m_bid or 0.0
-                pos = {**pos, "strike": strike, "expiry": expiry, "contracts": contracts,
-                       "capital_used": round(contracts * strike * 100, 2), "premium": premium,
-                       "premium_total": round(contracts * premium * 100, 2), "tenor": tenor.MONTHLY,
-                       **({"vix": stress["vix"], "vix_stressed": stressed, "target_delta": put_target}
-                          if stress else {})}
-                for _i, _sp in enumerate(all_sized):
-                    if _sp.get("ticker") == ticker:
-                        all_sized[_i] = pos
-                        break
-                # No live delta must never pass a guessed strike: an out-of-range
-                # fallback delta makes verify scan and require real greeks instead.
-                screener_delta = -1.0
-            # Verify delta at execution time — auto-adjust if stock moved since Saturday
-            delta_result = verify_and_adjust_strike(
-                ib, ticker, strike, expiry, screener_delta=screener_delta,
-                contracts=contracts,
-                min_delta=stress["min_delta"] if stressed else None,
-                max_delta=stress["max_delta"] if stressed else None,
-            )
-            if delta_result is None:
-                cap = stress["max_delta"] if stressed else _max_delta()
-                log.info(f"  🔄 {ticker} — no valid strike with delta ≤ {cap}, trying next")
-                results.append({"ticker": ticker, "status": "skipped_delta"})
-                continue
 
-            contract, strike, orig_delta, final_delta, final_iv, was_adjusted = delta_result
-            # Monthly: the scan can end on a strike with NO usable delta near 20. On
-            # 2026-09-28 GRAB ($3 stock, $0.50 strike steps) went from $3.00 at 0.34 to
-            # $2.50 at 0.03, and the scan settled on $1.50 at 0.000 (strikes with no
-            # OI/bid tick pass the liquidity pre-check). A ~0-delta put is not the
-            # strategy, so require a real delta of at least MONTHLY_MIN_DELTA.
-            if monthly and (final_delta is None or abs(final_delta) < monthly_floor):
-                log.info(f"  🌙 {ticker} — no monthly strike near {put_target:.2f}-delta (best ${strike:.2f} at "
-                         f"delta {final_delta if final_delta is not None else 'n/a'}) — trying next")
-                results.append({"ticker": ticker, "status": "skipped_delta"})
-                _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_delta"})
-                continue
-            # Fall back to the screener's ATM IV if live greeks didn't carry one.
-            if final_iv is None:
-                final_iv = pos.get("iv_atm")
-            if was_adjusted:
-                old_capital  = pos["capital_used"]
-                new_capital  = round(pos["contracts"] * strike * 100, 2)
-                pos = {**pos, "strike": strike, "capital_used": new_capital}
-                # Persist the executed strike/capital back into the candidate list
-                # so state.json (and the dashboard) reflect what we actually filled,
-                # not the original screener strike.
-                for _i, _sp in enumerate(all_sized):
-                    if _sp.get("ticker") == ticker:
-                        all_sized[_i] = pos
-                        break
-                log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
+                contract, strike, orig_delta, final_delta, final_iv, was_adjusted = delta_result
+                # Monthly: the scan can end on a strike with NO usable delta near 20. On
+                # 2026-09-28 GRAB ($3 stock, $0.50 strike steps) went from $3.00 at 0.34 to
+                # $2.50 at 0.03, and the scan settled on $1.50 at 0.000 (strikes with no
+                # OI/bid tick pass the liquidity pre-check). A ~0-delta put is not the
+                # strategy, so require a real delta of at least MONTHLY_MIN_DELTA.
+                if monthly and (final_delta is None or abs(final_delta) < monthly_floor):
+                    log.info(f"  🌙 {ticker} — no monthly strike near {put_target:.2f}-delta (best ${strike:.2f} at "
+                             f"delta {final_delta if final_delta is not None else 'n/a'}) — trying next")
+                    results.append({"ticker": ticker, "status": "skipped_delta"})
+                    _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_delta"})
+                    continue
+                # Fall back to the screener's ATM IV if live greeks didn't carry one.
+                if final_iv is None:
+                    final_iv = pos.get("iv_atm")
+                if was_adjusted:
+                    old_capital  = pos["capital_used"]
+                    new_capital  = round(pos["contracts"] * strike * 100, 2)
+                    pos = {**pos, "strike": strike, "capital_used": new_capital}
+                    # Persist the executed strike/capital back into the candidate list
+                    # so state.json (and the dashboard) reflect what we actually filled,
+                    # not the original screener strike.
+                    for _i, _sp in enumerate(all_sized):
+                        if _sp.get("ticker") == ticker:
+                            all_sized[_i] = pos
+                            break
+                    log.info(f"  ⚡ Capital adjusted: ${old_capital:,.0f} → ${new_capital:,.0f}")
 
-            # ── Total-budget check — EVERY put, not just adjusted ones ──
-            # An UPWARD strike adjustment (stock rose since the screen) costs more
-            # collateral per contract than the sizer planned for. On 2026-08-17
-            # three adjustments turned a $224,300 plan into $240,250 deployed, so
-            # the adjusted put was checked against the remaining room.
-            # That wasn't enough: on 2026-09-22 NBIS/ARM/IREN adjusted EARLY while
-            # room was plentiful (+$4,700 total), silently eating the headroom the
-            # sizer had planned for CRCL/MSTR — which weren't adjusted, so they were
-            # never checked, and $196,400 planned became $201,100 against a
-            # $196,422 net liq. Checking every put enforces the real invariant:
-            # cumulative collateral never exceeds the budget. The last put(s) pay
-            # for earlier adjustments by trimming.
-            #
-            # This is a TOTAL-budget check, not a per-position cap: slot #1 is
-            # deliberately uncapped in compound mode (it is the best-scoring name
-            # and is meant to take the remainder), so this only stops the account
-            # from committing more than it actually has.
-            new_capital = round(contracts * strike * 100, 2)
-            room = _budget - capital_deployed
-            if new_capital > room + 1.0:
-                # Named distinctly from the cash gate's `per_contract` /
-                # `orig_contracts` further down, which are separate locals.
-                adj_per_contract = strike * 100
-                max_fit = int(room // adj_per_contract) if adj_per_contract > 0 else 0
-                if max_fit < 1:
+                # ── Total-budget check — EVERY put, not just adjusted ones ──
+                # An UPWARD strike adjustment (stock rose since the screen) costs more
+                # collateral per contract than the sizer planned for. On 2026-08-17
+                # three adjustments turned a $224,300 plan into $240,250 deployed, so
+                # the adjusted put was checked against the remaining room.
+                # That wasn't enough: on 2026-09-22 NBIS/ARM/IREN adjusted EARLY while
+                # room was plentiful (+$4,700 total), silently eating the headroom the
+                # sizer had planned for CRCL/MSTR — which weren't adjusted, so they were
+                # never checked, and $196,400 planned became $201,100 against a
+                # $196,422 net liq. Checking every put enforces the real invariant:
+                # cumulative collateral never exceeds the budget. The last put(s) pay
+                # for earlier adjustments by trimming.
+                #
+                # This is a TOTAL-budget check, not a per-position cap: slot #1 is
+                # deliberately uncapped in compound mode (it is the best-scoring name
+                # and is meant to take the remainder), so this only stops the account
+                # from committing more than it actually has.
+                new_capital = round(contracts * strike * 100, 2)
+                room = _budget - capital_deployed
+                if new_capital > room + 1.0:
+                    # Named distinctly from the cash gate's `per_contract` /
+                    # `orig_contracts` further down, which are separate locals.
+                    adj_per_contract = strike * 100
+                    max_fit = int(room // adj_per_contract) if adj_per_contract > 0 else 0
+                    if max_fit < 1:
+                        log.warning(
+                            f"  ⛔ {ticker} skipped — strike ${strike:.2f} needs "
+                            f"${adj_per_contract:,.0f}/contract but only ${room:,.0f} of the "
+                            f"${_budget:,.0f} budget is left")
+                        results.append({
+                            "ticker": ticker, "status": "skipped_budget",
+                            "reason": ("adjusted_strike_over_budget" if was_adjusted
+                                       else "budget_exhausted_by_earlier_adjustments"),
+                            "adjusted_strike": strike,
+                            "budget_room": round(room, 2),
+                            "needed": round(adj_per_contract, 2),
+                        })
+                        _status(ticker=ticker, stage=None,
+                                result={"ticker": ticker, "status": "skipped_budget"})
+                        continue
                     log.warning(
-                        f"  ⛔ {ticker} skipped — strike ${strike:.2f} needs "
-                        f"${adj_per_contract:,.0f}/contract but only ${room:,.0f} of the "
-                        f"${_budget:,.0f} budget is left")
-                    results.append({
-                        "ticker": ticker, "status": "skipped_budget",
-                        "reason": ("adjusted_strike_over_budget" if was_adjusted
-                                   else "budget_exhausted_by_earlier_adjustments"),
-                        "adjusted_strike": strike,
-                        "budget_room": round(room, 2),
-                        "needed": round(adj_per_contract, 2),
-                    })
-                    _status(ticker=ticker, stage=None,
-                            result={"ticker": ticker, "status": "skipped_budget"})
-                    continue
-                log.warning(
-                    f"  ✂️  {ticker} trimmed {contracts} → {max_fit} contracts — "
-                    f"strike ${strike:.2f} would need ${new_capital:,.0f} but "
-                    f"only ${room:,.0f} of the ${_budget:,.0f} budget is left")
-                pre_trim_contracts = contracts
-                contracts   = max_fit
-                new_capital = round(contracts * adj_per_contract, 2)
-                pos = {**pos, "strike": strike, "capital_used": new_capital,
-                       "contracts": contracts, "budget_trimmed_from": pre_trim_contracts}
-                for _i, _sp in enumerate(all_sized):
-                    if _sp.get("ticker") == ticker:
-                        all_sized[_i] = pos
-                        break
-
-            # ── Cash-secured funds gate ──────────────────────────────────
-            # Never attempt a put we can't fully secure. Checked here (after the
-            # delta adjustment settles the FINAL strike, before the market-data
-            # round trip). Rather than drop the whole name, TRIM the contract count
-            # to what the remaining cash covers (⌊cash / (strike×100)⌋) and place
-            # the smaller position — a 4-lot that needs $29.6k becomes a 2-lot at
-            # $14.8k instead of a skip. Only skip when not even one contract fits.
-            if available_cash is not None:
-                per_contract  = strike * 100
-                max_affordable = int(available_cash // per_contract)
-                if max_affordable < 1:
-                    log.info(f"  ⛔ {ticker} skipped — one contract needs ${per_contract:,.0f}, "
-                             f"only ${available_cash:,.0f} cash available")
-                    skip_res = {"ticker": ticker, "status": "skipped_insufficient_cash",
-                                "required_cash": round(per_contract, 2),
-                                "available_cash": round(available_cash, 2)}
-                    results.append(skip_res)
-                    _status(ticker=ticker, stage=None, result=skip_res)
-                    continue
-                if max_affordable < contracts:
-                    orig_contracts = contracts
-                    contracts      = max_affordable
-                    new_capital    = round(contracts * per_contract, 2)
-                    log.info(f"  ✂️  {ticker} trimmed {orig_contracts}→{contracts} contracts to fit "
-                             f"${available_cash:,.0f} cash (needs ${orig_contracts * per_contract:,.0f} at full size)")
-                    pos = {**pos, "contracts": contracts, "capital_used": new_capital,
-                           "cash_trimmed_from": orig_contracts}
+                        f"  ✂️  {ticker} trimmed {contracts} → {max_fit} contracts — "
+                        f"strike ${strike:.2f} would need ${new_capital:,.0f} but "
+                        f"only ${room:,.0f} of the ${_budget:,.0f} budget is left")
+                    pre_trim_contracts = contracts
+                    contracts   = max_fit
+                    new_capital = round(contracts * adj_per_contract, 2)
+                    pos = {**pos, "strike": strike, "capital_used": new_capital,
+                           "contracts": contracts, "budget_trimmed_from": pre_trim_contracts}
                     for _i, _sp in enumerate(all_sized):
                         if _sp.get("ticker") == ticker:
                             all_sized[_i] = pos
                             break
 
-            _status(ticker=ticker, stage="fetching market data")
-            mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
-            if not mkt:
-                log.info(f"  🔄 {ticker} — no market data, trying next candidate")
-                results.append({"ticker": ticker, "status": "failed_market_data"})
-                _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "failed_market_data"})
+                # ── Cash-secured funds gate ──────────────────────────────────
+                # Never attempt a put we can't fully secure. Checked here (after the
+                # delta adjustment settles the FINAL strike, before the market-data
+                # round trip). Rather than drop the whole name, TRIM the contract count
+                # to what the remaining cash covers (⌊cash / (strike×100)⌋) and place
+                # the smaller position — a 4-lot that needs $29.6k becomes a 2-lot at
+                # $14.8k instead of a skip. Only skip when not even one contract fits.
+                if available_cash is not None:
+                    per_contract  = strike * 100
+                    max_affordable = int(available_cash // per_contract)
+                    if max_affordable < 1:
+                        log.info(f"  ⛔ {ticker} skipped — one contract needs ${per_contract:,.0f}, "
+                                 f"only ${available_cash:,.0f} cash available")
+                        skip_res = {"ticker": ticker, "status": "skipped_insufficient_cash",
+                                    "required_cash": round(per_contract, 2),
+                                    "available_cash": round(available_cash, 2)}
+                        results.append(skip_res)
+                        _status(ticker=ticker, stage=None, result=skip_res)
+                        continue
+                    if max_affordable < contracts:
+                        orig_contracts = contracts
+                        contracts      = max_affordable
+                        new_capital    = round(contracts * per_contract, 2)
+                        log.info(f"  ✂️  {ticker} trimmed {orig_contracts}→{contracts} contracts to fit "
+                                 f"${available_cash:,.0f} cash (needs ${orig_contracts * per_contract:,.0f} at full size)")
+                        pos = {**pos, "contracts": contracts, "capital_used": new_capital,
+                               "cash_trimmed_from": orig_contracts}
+                        for _i, _sp in enumerate(all_sized):
+                            if _sp.get("ticker") == ticker:
+                                all_sized[_i] = pos
+                                break
+
+                _status(ticker=ticker, stage="fetching market data")
+                mkt = get_market_data(ib, contract, screener_premium=premium, dry_run=dry_run)
+                if not mkt:
+                    log.info(f"  🔄 {ticker} — no market data, trying next candidate")
+                    results.append({"ticker": ticker, "status": "failed_market_data"})
+                    _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "failed_market_data"})
+                    continue
+
+                skip_info = check_liquidity(mkt, ticker, contracts)
+                if skip_info:
+                    log.info(f"  🔄 {ticker} — failed liquidity, trying next candidate")
+                    results.append({"ticker": ticker, "status": "skipped_liquidity", **skip_info})
+                    _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_liquidity"})
+                    continue
+
+                _status(ticker=ticker, stage="placing order — limit mid")
+                # Record what we are about to work, so the post-run reconcile can match
+                # broker positions against THIS run's contracts and never touch an open
+                # CSP carried over from a previous week.
+                attempted_contracts[ticker] = {
+                    "expiry":         contract.lastTradeDateOrContractMonth,
+                    "strike":         float(strike),
+                    "contracts":      contracts,
+                    "delta_at_entry": round(final_delta, 4) if final_delta is not None else None,
+                    "iv_at_entry":    round(final_iv, 4) if final_iv is not None else None,
+                }
+                result = place_order_with_escalation(ib, contract, contracts, mkt, ticker, dry_run=dry_run)
+            except GatewayUnavailable as e:
+                # Infrastructure, not strategy. Reported under its own status so the
+                # Discord card can never imply the delta was out of range, and routed
+                # through the same reconnect/abort path as any other IBKR error.
+                log.error(f"  ❌ {ticker} — GATEWAY CONNECTION LOST: {e}")
+                results.append({"ticker": ticker, "status": "failed_no_connection",
+                                "reason": str(e)})
+                _status(ticker=ticker, stage=None,
+                        result={"ticker": ticker, "status": "failed_no_connection"})
+                if reconnects >= MAX_RECONNECTS:
+                    log.error(f"  ❌ Max reconnects ({MAX_RECONNECTS}) reached — stopping execution")
+                    break
+                try:
+                    ib = _reconnect(ib)
+                    reconnects += 1
+                    log.info(f"  ✅ Reconnected after gateway loss ({reconnects}/{MAX_RECONNECTS})")
+                except Exception as re_err:
+                    log.error(f"  ❌ Reconnect failed: {re_err} — stopping execution")
+                    break
+                continue
+            except Exception as e:
+                log.error(f"  ❌ {ticker} — IBKR error: {e}")
+                results.append({"ticker": ticker, "status": "failed"})
+                if reconnects >= MAX_RECONNECTS:
+                    log.error(f"  ❌ Max reconnects ({MAX_RECONNECTS}) reached — stopping execution")
+                    break
+                try:
+                    ib = _reconnect(ib)
+                    reconnects += 1
+                except Exception as re:
+                    log.error(f"  ❌ Reconnect failed: {re} — stopping execution")
+                    break
                 continue
 
-            skip_info = check_liquidity(mkt, ticker, contracts)
-            if skip_info:
-                log.info(f"  🔄 {ticker} — failed liquidity, trying next candidate")
-                results.append({"ticker": ticker, "status": "skipped_liquidity", **skip_info})
-                _status(ticker=ticker, stage=None, result={"ticker": ticker, "status": "skipped_liquidity"})
-                continue
+            result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
+            result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
+            # Breadcrumb when the funds gate trimmed the lot size to fit cash, so the
+            # dashboard/Discord can show "filled 2 of 4 (cash-capped)".
+            if pos.get("cash_trimmed_from"):
+                result["cash_trimmed_from"] = pos["cash_trimmed_from"]
+            if pos.get("budget_trimmed_from"):
+                result["budget_trimmed_from"] = pos["budget_trimmed_from"]
+            results.append(result)
 
-            _status(ticker=ticker, stage="placing order — limit mid")
-            # Record what we are about to work, so the post-run reconcile can match
-            # broker positions against THIS run's contracts and never touch an open
-            # CSP carried over from a previous week.
-            attempted_contracts[ticker] = {
-                "expiry":         contract.lastTradeDateOrContractMonth,
-                "strike":         float(strike),
-                "contracts":      contracts,
-                "delta_at_entry": round(final_delta, 4) if final_delta is not None else None,
-                "iv_at_entry":    round(final_iv, 4) if final_iv is not None else None,
-            }
-            result = place_order_with_escalation(ib, contract, contracts, mkt, ticker, dry_run=dry_run)
-        except GatewayUnavailable as e:
-            # Infrastructure, not strategy. Reported under its own status so the
-            # Discord card can never imply the delta was out of range, and routed
-            # through the same reconnect/abort path as any other IBKR error.
-            log.error(f"  ❌ {ticker} — GATEWAY CONNECTION LOST: {e}")
-            results.append({"ticker": ticker, "status": "failed_no_connection",
-                            "reason": str(e)})
-            _status(ticker=ticker, stage=None,
-                    result={"ticker": ticker, "status": "failed_no_connection"})
-            if reconnects >= MAX_RECONNECTS:
-                log.error(f"  ❌ Max reconnects ({MAX_RECONNECTS}) reached — stopping execution")
-                break
-            try:
-                ib = _reconnect(ib)
-                reconnects += 1
-                log.info(f"  ✅ Reconnected after gateway loss ({reconnects}/{MAX_RECONNECTS})")
-            except Exception as re_err:
-                log.error(f"  ❌ Reconnect failed: {re_err} — stopping execution")
-                break
-            continue
-        except Exception as e:
-            log.error(f"  ❌ {ticker} — IBKR error: {e}")
-            results.append({"ticker": ticker, "status": "failed"})
-            if reconnects >= MAX_RECONNECTS:
-                log.error(f"  ❌ Max reconnects ({MAX_RECONNECTS}) reached — stopping execution")
-                break
-            try:
-                ib = _reconnect(ib)
-                reconnects += 1
-            except Exception as re:
-                log.error(f"  ❌ Reconnect failed: {re} — stopping execution")
-                break
-            continue
+            # Report result back to status callback
+            _status(ticker=ticker, stage=None, result={
+                "ticker": ticker,
+                "status": result["status"],
+                "fill_price": result.get("fill_price"),
+                "premium_collected": result.get("premium_collected"),
+                "order_type": result.get("order_type"),
+                "cash_trimmed_from": pos.get("cash_trimmed_from"),
+            })
 
-        result["delta_at_entry"] = round(final_delta, 4) if final_delta is not None else None
-        result["iv_at_entry"]    = round(final_iv, 4) if final_iv is not None else None
-        # Breadcrumb when the funds gate trimmed the lot size to fit cash, so the
-        # dashboard/Discord can show "filled 2 of 4 (cash-capped)".
-        if pos.get("cash_trimmed_from"):
-            result["cash_trimmed_from"] = pos["cash_trimmed_from"]
-        if pos.get("budget_trimmed_from"):
-            result["budget_trimmed_from"] = pos["budget_trimmed_from"]
-        results.append(result)
-
-        # Report result back to status callback
-        _status(ticker=ticker, stage=None, result={
-            "ticker": ticker,
-            "status": result["status"],
-            "fill_price": result.get("fill_price"),
-            "premium_collected": result.get("premium_collected"),
-            "order_type": result.get("order_type"),
-            "cash_trimmed_from": pos.get("cash_trimmed_from"),
-        })
-
-        if result["status"] in ("filled", "dry_run", "partial_fill"):
-            filled_count     += 1
-            capital_deployed += pos["capital_used"]
-            # Snapshot live stock price at fill for accurate buffer/price in the dashboard
-            live_price  = _get_stock_price(ib, ticker)
-            stock_price = live_price if live_price is not None else pos.get("latest_price")
-            result["stock_price_at_entry"] = stock_price
-            fill_price  = result.get("fill_price")
-            if result["status"] == "partial_fill" and fill_price:
-                filled_qty = round(result.get("premium_collected", 0) / fill_price / 100)
+            if result["status"] in ("filled", "dry_run", "partial_fill"):
+                filled_count     += 1
+                capital_deployed += pos["capital_used"]
+                # Snapshot live stock price at fill for accurate buffer/price in the dashboard
+                live_price  = _get_stock_price(ib, ticker)
+                stock_price = live_price if live_price is not None else pos.get("latest_price")
+                result["stock_price_at_entry"] = stock_price
+                fill_price  = result.get("fill_price")
+                if result["status"] == "partial_fill" and fill_price:
+                    filled_qty = round(result.get("premium_collected", 0) / fill_price / 100)
+                else:
+                    filled_qty = contracts
+                # Funds gate: drop the cash this fill just secured so the next slot's
+                # check sees the true remainder (exact for cash-secured puts = strike×100×qty).
+                if available_cash is not None:
+                    available_cash = max(0.0, available_cash - strike * 100 * filled_qty)
+                    log.info(f"  💵 Funds gate — ${available_cash:,.0f} cash remaining after {ticker}")
+                try:
+                    _tl_row = {
+                        "symbol":               ticker,
+                        "expiry":               contract.lastTradeDateOrContractMonth,
+                        "strike":               float(strike),
+                        "right":                "P",
+                        "entry_date":           result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                        "delta_at_entry":       round(final_delta, 4) if final_delta is not None else None,
+                        "iv_at_entry":          round(final_iv, 4) if final_iv is not None else None,
+                        "stock_price_at_entry": stock_price,
+                        "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2) if stock_price else None,
+                        "premium_per_contract": fill_price,
+                        "contracts":            filled_qty,
+                        "total_premium":        result.get("premium_collected"),
+                        "dry_run":              result["status"] == "dry_run",
+                    }
+                    trade_rows[ticker] = dict(_tl_row)
+                    _append_trade_log(_tl_row)
+                    log.info(f"  📝 trade_log.json: {ticker} "
+                             f"{'NOT recorded (dry run)' if result['status'] == 'dry_run' else 'recorded'}")
+                except Exception as tl_err:
+                    log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
             else:
-                filled_qty = contracts
-            # Funds gate: drop the cash this fill just secured so the next slot's
-            # check sees the true remainder (exact for cash-secured puts = strike×100×qty).
-            if available_cash is not None:
-                available_cash = max(0.0, available_cash - strike * 100 * filled_qty)
-                log.info(f"  💵 Funds gate — ${available_cash:,.0f} cash remaining after {ticker}")
-            try:
-                _append_trade_log({
-                    "symbol":               ticker,
-                    "expiry":               contract.lastTradeDateOrContractMonth,
-                    "strike":               float(strike),
-                    "right":                "P",
-                    "entry_date":           result.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-                    "delta_at_entry":       round(final_delta, 4) if final_delta is not None else None,
-                    "iv_at_entry":          round(final_iv, 4) if final_iv is not None else None,
-                    "stock_price_at_entry": stock_price,
-                    "buffer_pct_at_entry":  round(((stock_price - strike) / stock_price) * 100, 2) if stock_price else None,
-                    "premium_per_contract": fill_price,
-                    "contracts":            filled_qty,
-                    "total_premium":        result.get("premium_collected"),
-                    "dry_run":              result["status"] == "dry_run",
-                })
-                log.info(f"  📝 trade_log.json: {ticker} "
-                         f"{'NOT recorded (dry run)' if result['status'] == 'dry_run' else 'recorded'}")
-            except Exception as tl_err:
-                log.warning(f"  ⚠️  trade_log.json write failed: {tl_err}")
-        else:
-            log.info(f"  🔄 {ticker} — order failed, trying next candidate")
+                log.info(f"  🔄 {ticker} — order failed, trying next candidate")
 
-        if filled_count < _target:
+            if filled_count < _target:
+                ib.sleep(3)
+
+        # ── Spare-cash top-up (opt-in, v5.2.159) ─────────────────────
+        # Runs once, after the slots are done. Only when EVERY slot filled — an
+        # unfilled slot means a skip or a broken run, and the spare cash is then
+        # not really spare (the sweep applies its 10% cap for the same reason).
+        if topup_spare is None or topup_phase == "done":
+            break
+        if dry_run:
+            log.info("  ➕ Top-up skipped — Dry Run (spare cash can't be read from simulated fills)")
+            break
+        if not ib.isConnected() or reconnects >= MAX_RECONNECTS:
+            break
+        if topup_phase is None:
+            topup_phase = "done"
+            if filled_count < _target:
+                log.info(f"  ➕ Top-up skipped — {filled_count}/{_target} slots filled")
+                break
+            prem_now = sum(r.get("premium_collected", 0) or 0 for r in results
+                           if r.get("status") in ("filled", "partial_fill"))
+            ib.sleep(3)   # let IBKR's account values catch up with the fills
+            try:
+                spare = float(topup_spare(ib, prem_now) or 0.0)
+            except Exception as e:
+                log.warning(f"  ⚠️  Top-up skipped — could not read spare cash: {e}")
+                break
+            log.info(f"  ➕ Top-up: ${spare:,.0f} spare cash after {filled_count} fill(s)")
+            if spare < 1.0:
+                break
+            capital_deployed += _top_up_filled(
+                ib, results, attempted_contracts, all_sized, trade_rows, spare,
+                stress["max_delta"] if stressed else _max_delta(), _status)
+            # Step 2: one more ranked name with whatever is still spare.
             ib.sleep(3)
+            prem_now = sum(r.get("premium_collected", 0) or 0 for r in results
+                           if r.get("status") in ("filled", "partial_fill"))
+            try:
+                spare = float(topup_spare(ib, prem_now) or 0.0)
+            except Exception as e:
+                log.warning(f"  ⚠️  Top-up new-name step skipped — could not read spare cash: {e}")
+                break
+            if spare < 1.0:
+                break
+            log.info(f"  ➕ Top-up: ${spare:,.0f} still spare — trying one more ranked name")
+            _target  = filled_count + 1
+            _budget  = capital_deployed + spare
+            topup_phase = "done"
+            topup_first = len(results)
+            continue
+        break
+
+    # Mark the put the new-name step opened, so Discord / the dashboard can say the
+    # extra position came from spare cash rather than a regular slot.
+    if topup_first is not None:
+        for r in results[topup_first:]:
+            if r.get("status") in ("filled", "partial_fill"):
+                r["topup_extra"] = True
 
     # Verify against the broker BEFORE dropping the connection. Runs on every
     # execution, not only after a visible wedge: it is two read-only calls, and

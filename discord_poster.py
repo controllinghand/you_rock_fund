@@ -215,10 +215,18 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
             else:
                 delta_str = ""
 
+            # Spare-cash top-up (v5.2.159): extra contracts on a put this run
+            # filled, or an extra put opened with the premium left over.
+            topped = (ex.get("topped_up") or {}).get("contracts")
+            contracts_str = f"{contracts} contracts"
+            if topped:
+                contracts_str += f" (+{topped} from spare cash)"
+            elif ex.get("topup_extra"):
+                contracts_str += " (spare cash)"
             parts = [
                 f"{emoji} **{ticker}**",
                 f"{strike_str}",
-                f"{contracts} contracts",
+                contracts_str,
                 f"{fill_str} {screener_str}{otype_str}".strip(),
             ]
             if delta_str:
