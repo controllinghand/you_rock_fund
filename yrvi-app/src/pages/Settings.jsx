@@ -652,7 +652,7 @@ export default function SettingsPage() {
     dry_run: false, discord_webhook_enabled: true, execution_time: '10:00',
     auto_restart_time: '11:59 PM', auto_restart_suppress_mins: 30,
     auto_update_enabled: false, show_verse_of_the_day: true,
-    cash_park_enabled: false, cash_park_instrument: 'QQQ', cash_park_include_premiums: false,
+    cash_park_enabled: false, cash_park_instrument: 'QQQ', cash_park_include_premiums: false, csp_topup_enabled: false,
   }
 
   const resetToDefaults = () => {
@@ -949,6 +949,12 @@ export default function SettingsPage() {
 
       {/* Cash Sweep */}
       <Section title="Cash Sweep" emoji="🅿️">
+        <Toggle
+          label="Sell more puts with spare cash first"
+          sub="After every slot fills, use the leftover cash plus this week's premium to sell extra contracts of this week's puts (one at a time, spread across them), then one more ranked name if a contract still fits. Whatever's left goes to the sweep below. Every extra contract passes the same delta, spread and bid-yield checks. Never uses margin; off on Trend Filter and outside a monthly entry window."
+          checked={!!settings.csp_topup_enabled}
+          onChange={v => set('csp_topup_enabled', v)}
+        />
         <Toggle
           label="Park leftover cash each week"
           sub="After Monday's option workflow, buy the instrument below with the undeployed remainder, then sell it on the week's last trading day — so idle cash keeps working."

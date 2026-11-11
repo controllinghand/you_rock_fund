@@ -4142,6 +4142,7 @@ class SettingsUpdate(BaseModel):
     cash_park_enabled:             Optional[bool]  = None
     cash_park_instrument:          Optional[str]   = None
     cash_park_include_premiums:    Optional[bool]  = None
+    csp_topup_enabled:             Optional[bool]  = None
 
 @app.post("/api/settings")
 def update_settings(body: SettingsUpdate):

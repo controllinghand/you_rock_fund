@@ -311,6 +311,13 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
   98% ceiling kept; no 10% / unfilled-slot cap). Gate off → monday_runner._mt_park_before_run sells ALL of it
   and holds the proceeds back from that day's CSP budget (unsettled, like the website fund). The Thu/Fri
   sell job skips MT boxes; the wheel never adopts QQQ there
+- Spare-cash put top-up (csp_topup_enabled, opt-in, default OFF, v5.2.159): inside trader.execute_positions,
+  after EVERY slot filled, spend cash_park.spare_cash's figure (what the sweep would park, + this week's
+  premium) on more contracts of this run's filled puts (round-robin, rank order, same strike/expiry, each
+  re-checked: live delta, market data, check_liquidity on the new total), then ONE more ranked name if a
+  contract still fits (works on an all-wheel week). Merges into the same result / trade_log row / position
+  (all ticker-keyed — a second row would overwrite the first). Not on trend filter, monthly outside the
+  entry window, preview or Dry Run. The sweep then parks the rest
 - Cash sweep (opt-in, default OFF) parks the week's undeployed remainder in QQQ (default) or SGOV
   after the Monday option workflow, then sells it on the week's last trading day (Fri, or Thu when
   Fri is a holiday). Any Monday run / Run Now also sells a park left open from an EARLIER day before

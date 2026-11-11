@@ -40,5 +40,6 @@
   "show_verse_of_the_day": true,
   "cash_park_enabled": false,
   "cash_park_instrument": "QQQ",
-  "cash_park_include_premiums": false
+  "cash_park_include_premiums": false,
+  "csp_topup_enabled": false
 }

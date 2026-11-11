@@ -285,6 +285,151 @@ def _reject_reason(trade) -> tuple:
 
 # ── Buy (Monday, after the option workflow) ────────────────────
 
+def spare_cash(ib: IB, csp_outcome: dict, context: dict, dry_run: bool = False,
+               include_prem: bool = False, mt: bool = False,
+               instrument: str = "QQQ") -> dict:
+    """Idle cash the account can deploy right now WITHOUT margin — the figure the
+    cash sweep parks, and (v5.2.159) the figure the spare-cash put top-up spends
+    first. One function for both, so the two can never disagree about how much is
+    spare. Read-only: places nothing.
+
+    Returns the components; the deployable amount is min(base, cash_cap) (the sweep
+    adds its own 10% net-liq cap on a partial run).
+    """
+    # ── Committed CSP capital = cash reserved to back ALL open short puts
+    # (strike×100), read LIVE from IBKR. Subtracting this is what makes a re-run
+    # safe: on a re-run this run deploys 0 new CSPs, but the puts opened in earlier
+    # runs this week are still consuming the budget. Using only this run's
+    # total_capital treated the whole budget as idle and over-parked onto margin
+    # (v5.2.58). On a DRY preview the CSPs aren't placed yet, so add the planned
+    # (sized) capital; on a LIVE run they're already open and counted here.
+    total_cash, net_liq, buying_power, init_margin = _account_summary(ib)
+    committed_csp = _open_short_put_capital(ib)
+    planned_csp   = (csp_outcome.get("total_capital", 0.0) or 0.0) if dry_run else 0.0
+    committed_csp += planned_csp
+
+    cash_account = bool(get_settings().get("cash_account", False))
+    freed        = context.get("freed_capital", 0.0) or 0.0
+    # A park sold at the start of this run (monday_runner._sell_park_before_run).
+    # Treated exactly like the wheel's freed proceeds: a live run reads it from
+    # BuyingPower at sweep time; a preview adds it to idle cash, but NOT to the
+    # settled-cash cap — it settles T+1, so today's re-park can't spend it.
+    park_freed   = context.get("park_proceeds", 0.0) or 0.0
+
+    # ── Base = idle cash available to park.
+    #
+    # CASH/IRA account: read it LIVE from BuyingPower at this moment, which is
+    # what the docstring has always claimed and what the code threw away until
+    # v5.2.124. IBKR's BuyingPower on such an account is ELV − InitMarginReq, so
+    # every open put's collateral is ALREADY removed from it. Deriving the
+    # remainder from the run's `effective_budget` instead double-subtracted that
+    # collateral, because for a cash account the budget IS BuyingPower
+    # (monday_runner._compute_effective_budget) and cash_park then subtracted
+    # committed_csp on top:
+    #
+    #   2026-09-21 preview — budget $8,405 (put collateral already out)
+    #                        − committed_csp $9,500 → remainder $0.00
+    #                        while the account held $8,405.15 of genuinely idle cash.
+    #
+    # The scheduled 09:55 run escaped it only by ordering luck: its budget is
+    # snapshotted BEFORE the puts are sold, so subtracting was right there. Any
+    # run with the puts already open — every Run Now, every re-run — parked $0.
+    # Reading BuyingPower at sweep time removes the ordering dependence entirely:
+    # by then every put this run placed is open and counted exactly once, and it
+    # picks up the premium those fills added to cash (worth $107.21 on 9/21).
+    #
+    # A DRY preview has placed nothing and sold nothing, so it models both:
+    # subtract the planned CSP capital, add the proceeds of sales the wheel check
+    # only intends to make.
+    #
+    # MARGIN account: unchanged. There net_liq − reserved does NOT net out put
+    # collateral, so the explicit committed_csp subtraction is still what keeps a
+    # same-week re-run off margin (v5.2.58).
+    if cash_account and buying_power is not None:
+        idle = max(0.0, buying_power) + (freed + park_freed - planned_csp if dry_run else 0.0)
+        remainder = max(0.0, idle)
+        basis = "live buying_power (cash account)"
+    else:
+        # Leave (1 − MARGIN_SWEEP_CEILING) of live net liq unparked, so collateral +
+        # stock + park tops out at ~98% instead of exactly 100%.
+        headroom  = (1 - MARGIN_SWEEP_CEILING) * net_liq if net_liq and net_liq > 0 else 0.0
+        remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
+                        - committed_csp - headroom)
+        basis = (f"effective_budget − committed CSP − {1 - MARGIN_SWEEP_CEILING:.0%} "
+                 f"net-liq headroom ${headroom:,.0f}")
+        # MT keeps last week's QQQ, which is still inside net liq (and so inside
+        # effective_budget). Take it out, or the add would buy on margin.
+        held_park = _held_shares(ib, instrument) if mt else 0.0
+        if held_park > 0:
+            _, px_held = _price(ib, instrument)
+            held_value = round(held_park * (px_held or 0.0), 2)
+            remainder  = max(0.0, remainder - held_value)
+            basis += f" − ${held_value:,.0f} {instrument} already held"
+            if not px_held:
+                remainder = 0.0
+                basis += " (price unavailable — not adding)"
+    base = remainder
+    if include_prem:
+        base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
+              + (context.get("cc_premium", 0.0) or 0.0)
+
+    # No-margin cap = real settled cash LESS the cash already reserved to secure the
+    # open short puts. TotalCashValue alone is not enough: opening a put on margin
+    # doesn't reduce it (premium even raises it), so on a re-run the raw cash cap
+    # let the sweep park cash that was already backing the puts → margin (v5.2.58).
+    # On a DRY preview add freed proceeds to model POST-sale cash (a stop-loss week
+    # is otherwise wrongly zeroed by the pre-sale negative settled cash). The 10%
+    # net-liq cap is an additional safety for a partial (unfilled) run.
+    settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
+
+    # ── Margin headroom (cash/IRA accounts only) ──
+    # In this account type STOCK HAS NO LOAN VALUE: EquityWithLoanValue equals
+    # TotalCashValue to the cent while $17,507.84 of CRWV counts zero. So buying
+    # stock converts ELV-counting cash into a non-counting asset and drops ELV
+    # dollar-for-dollar — and IBKR refuses the order unless post-trade ELV still
+    # EXCEEDS InitMarginReq (the cash backing the open puts). It also prices a
+    # MARKET order ~5% above last for that check.
+    #
+    # Spending the whole $8,405.15 of available funds therefore lands ELV at
+    # exactly the $9,500 requirement, and under it once the buffer applies. That
+    # is what produced Error 201 on BOTH 2026-09-21 and 2026-09-22 — reproducible
+    # to within a dollar:
+    #
+    #   Mon  11 × $739.01 × 1.05 = $8,535.57 → ELV $9,369.58 (IBKR: $9,368.63)
+    #   Tue  11 × $745.72 × 1.05 = $8,613.07 → ELV $9,292.08 (IBKR: $9,291.09)
+    #
+    # Ten shares would have filled on either day. Dividing the cap by the market
+    # buffer is what keeps the order one share under instead of one share over.
+    #
+    # v5.2.123 blamed T+1 settlement for this and subtracted a ledger of recent
+    # sales. That was wrong: on 2026-09-22 the cash was fully settled
+    # (SettledCashByDate agreed to the cent, gap $0.00) and the order was refused
+    # anyway. The ledger is gone; the settlement logging that disproved it stays.
+    #
+    # Prefer IBKR's own InitMarginReq but never go below our strike×100 figure —
+    # on a MARGIN account IBKR reserves far less than full notional, and that
+    # subtraction is the v5.2.58 guard that keeps a same-week re-run off margin.
+    margin_req = max(committed_csp, init_margin or 0.0)
+    if settled_eff is None:
+        cash_cap = base
+    elif cash_account:
+        # Two independent ceilings, lower wins: our own arithmetic, and IBKR's
+        # BuyingPower (which on this account type IS cash − InitMarginReq, and
+        # drops dollar-for-dollar as stock is bought). Ours protects against a
+        # stale/absent BuyingPower; theirs against anything our subtraction has
+        # not thought of.
+        headroom = max(0.0, settled_eff - margin_req)
+        if buying_power is not None:
+            headroom = min(headroom, max(0.0, buying_power))
+        cash_cap = headroom / MKT_ORDER_BUFFER
+    else:
+        cash_cap = max(0.0, settled_eff - committed_csp)
+    return {"total_cash": total_cash, "net_liq": net_liq, "buying_power": buying_power,
+            "committed_csp": committed_csp, "remainder": remainder, "basis": basis,
+            "base": base, "settled_eff": settled_eff, "margin_req": margin_req,
+            "cash_cap": cash_cap, "cash_account": cash_account}
+
+
 def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
                    client_id: int = None, ib: IB = None) -> dict | None:
     """Buy the configured instrument with the account's idle settled cash.
@@ -355,134 +500,12 @@ def maybe_buy_park(csp_outcome: dict, context: dict, dry_run: bool = False,
     owns = _connect(client_id) if ib is None else None
     ib   = ib or owns
     try:
-        # ── Committed CSP capital = cash reserved to back ALL open short puts
-        # (strike×100), read LIVE from IBKR. Subtracting this is what makes a re-run
-        # safe: on a re-run this run deploys 0 new CSPs, but the puts opened in earlier
-        # runs this week are still consuming the budget. Using only this run's
-        # total_capital treated the whole budget as idle and over-parked onto margin
-        # (v5.2.58). On a DRY preview the CSPs aren't placed yet, so add the planned
-        # (sized) capital; on a LIVE run they're already open and counted here.
-        total_cash, net_liq, buying_power, init_margin = _account_summary(ib)
-        committed_csp = _open_short_put_capital(ib)
-        planned_csp   = (csp_outcome.get("total_capital", 0.0) or 0.0) if dry_run else 0.0
-        committed_csp += planned_csp
-
-        cash_account = bool(get_settings().get("cash_account", False))
-        freed        = context.get("freed_capital", 0.0) or 0.0
-        # A park sold at the start of this run (monday_runner._sell_park_before_run).
-        # Treated exactly like the wheel's freed proceeds: a live run reads it from
-        # BuyingPower at sweep time; a preview adds it to idle cash, but NOT to the
-        # settled-cash cap — it settles T+1, so today's re-park can't spend it.
-        park_freed   = context.get("park_proceeds", 0.0) or 0.0
-
-        # ── Base = idle cash available to park.
-        #
-        # CASH/IRA account: read it LIVE from BuyingPower at this moment, which is
-        # what the docstring has always claimed and what the code threw away until
-        # v5.2.124. IBKR's BuyingPower on such an account is ELV − InitMarginReq, so
-        # every open put's collateral is ALREADY removed from it. Deriving the
-        # remainder from the run's `effective_budget` instead double-subtracted that
-        # collateral, because for a cash account the budget IS BuyingPower
-        # (monday_runner._compute_effective_budget) and cash_park then subtracted
-        # committed_csp on top:
-        #
-        #   2026-09-21 preview — budget $8,405 (put collateral already out)
-        #                        − committed_csp $9,500 → remainder $0.00
-        #                        while the account held $8,405.15 of genuinely idle cash.
-        #
-        # The scheduled 09:55 run escaped it only by ordering luck: its budget is
-        # snapshotted BEFORE the puts are sold, so subtracting was right there. Any
-        # run with the puts already open — every Run Now, every re-run — parked $0.
-        # Reading BuyingPower at sweep time removes the ordering dependence entirely:
-        # by then every put this run placed is open and counted exactly once, and it
-        # picks up the premium those fills added to cash (worth $107.21 on 9/21).
-        #
-        # A DRY preview has placed nothing and sold nothing, so it models both:
-        # subtract the planned CSP capital, add the proceeds of sales the wheel check
-        # only intends to make.
-        #
-        # MARGIN account: unchanged. There net_liq − reserved does NOT net out put
-        # collateral, so the explicit committed_csp subtraction is still what keeps a
-        # same-week re-run off margin (v5.2.58).
-        if cash_account and buying_power is not None:
-            idle = max(0.0, buying_power) + (freed + park_freed - planned_csp if dry_run else 0.0)
-            remainder = max(0.0, idle)
-            basis = "live buying_power (cash account)"
-        else:
-            # Leave (1 − MARGIN_SWEEP_CEILING) of live net liq unparked, so collateral +
-            # stock + park tops out at ~98% instead of exactly 100%.
-            headroom  = (1 - MARGIN_SWEEP_CEILING) * net_liq if net_liq and net_liq > 0 else 0.0
-            remainder = max(0.0, (csp_outcome.get("effective_budget", 0.0) or 0.0)
-                            - committed_csp - headroom)
-            basis = (f"effective_budget − committed CSP − {1 - MARGIN_SWEEP_CEILING:.0%} "
-                     f"net-liq headroom ${headroom:,.0f}")
-            # MT keeps last week's QQQ, which is still inside net liq (and so inside
-            # effective_budget). Take it out, or the add would buy on margin.
-            held_park = _held_shares(ib, instrument) if mt else 0.0
-            if held_park > 0:
-                _, px_held = _price(ib, instrument)
-                held_value = round(held_park * (px_held or 0.0), 2)
-                remainder  = max(0.0, remainder - held_value)
-                basis += f" − ${held_value:,.0f} {instrument} already held"
-                if not px_held:
-                    remainder = 0.0
-                    basis += " (price unavailable — not adding)"
-        base = remainder
-        if include_prem:
-            base += (csp_outcome.get("csp_premium", 0.0) or 0.0) \
-                  + (context.get("cc_premium", 0.0) or 0.0)
-
-        # No-margin cap = real settled cash LESS the cash already reserved to secure the
-        # open short puts. TotalCashValue alone is not enough: opening a put on margin
-        # doesn't reduce it (premium even raises it), so on a re-run the raw cash cap
-        # let the sweep park cash that was already backing the puts → margin (v5.2.58).
-        # On a DRY preview add freed proceeds to model POST-sale cash (a stop-loss week
-        # is otherwise wrongly zeroed by the pre-sale negative settled cash). The 10%
-        # net-liq cap is an additional safety for a partial (unfilled) run.
-        settled_eff = (total_cash + freed) if (dry_run and total_cash is not None) else total_cash
-
-        # ── Margin headroom (cash/IRA accounts only) ──
-        # In this account type STOCK HAS NO LOAN VALUE: EquityWithLoanValue equals
-        # TotalCashValue to the cent while $17,507.84 of CRWV counts zero. So buying
-        # stock converts ELV-counting cash into a non-counting asset and drops ELV
-        # dollar-for-dollar — and IBKR refuses the order unless post-trade ELV still
-        # EXCEEDS InitMarginReq (the cash backing the open puts). It also prices a
-        # MARKET order ~5% above last for that check.
-        #
-        # Spending the whole $8,405.15 of available funds therefore lands ELV at
-        # exactly the $9,500 requirement, and under it once the buffer applies. That
-        # is what produced Error 201 on BOTH 2026-09-21 and 2026-09-22 — reproducible
-        # to within a dollar:
-        #
-        #   Mon  11 × $739.01 × 1.05 = $8,535.57 → ELV $9,369.58 (IBKR: $9,368.63)
-        #   Tue  11 × $745.72 × 1.05 = $8,613.07 → ELV $9,292.08 (IBKR: $9,291.09)
-        #
-        # Ten shares would have filled on either day. Dividing the cap by the market
-        # buffer is what keeps the order one share under instead of one share over.
-        #
-        # v5.2.123 blamed T+1 settlement for this and subtracted a ledger of recent
-        # sales. That was wrong: on 2026-09-22 the cash was fully settled
-        # (SettledCashByDate agreed to the cent, gap $0.00) and the order was refused
-        # anyway. The ledger is gone; the settlement logging that disproved it stays.
-        #
-        # Prefer IBKR's own InitMarginReq but never go below our strike×100 figure —
-        # on a MARGIN account IBKR reserves far less than full notional, and that
-        # subtraction is the v5.2.58 guard that keeps a same-week re-run off margin.
-        margin_req = max(committed_csp, init_margin or 0.0)
-        if settled_eff is None:
-            cash_cap = base
-        elif cash_account:
-            # Two independent ceilings, lower wins: our own arithmetic, and IBKR's
-            # BuyingPower (which on this account type IS cash − InitMarginReq, and
-            # drops dollar-for-dollar as stock is bought). Ours protects against a
-            # stale/absent BuyingPower; theirs against anything our subtraction has
-            # not thought of.
-            headroom = max(0.0, settled_eff - margin_req)
-            if buying_power is not None:
-                headroom = min(headroom, max(0.0, buying_power))
-            cash_cap = headroom / MKT_ORDER_BUFFER
-        else:
-            cash_cap = max(0.0, settled_eff - committed_csp)
+        sc = spare_cash(ib, csp_outcome, context, dry_run=dry_run,
+                        include_prem=include_prem, mt=mt, instrument=instrument)
+        total_cash, net_liq, buying_power = sc["total_cash"], sc["net_liq"], sc["buying_power"]
+        committed_csp, remainder, basis   = sc["committed_csp"], sc["remainder"], sc["basis"]
+        base, settled_eff, margin_req     = sc["base"], sc["settled_eff"], sc["margin_req"]
+        cash_cap, cash_account            = sc["cash_cap"], sc["cash_account"]
         netliq_cap  = NET_LIQ_CAP_PCT * net_liq if net_liq and net_liq > 0 else base
         buy_amount  = round(min(base, cash_cap) if all_filled
                             else min(base, cash_cap, netliq_cap), 2)

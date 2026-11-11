@@ -166,6 +166,13 @@ const SETTINGS_GROUPS = [
     ],
   },
   {
+    title: 'Cash Sweep',
+    items: [
+      { label: 'Sell more puts with spare cash first', default: 'Off', range: 'On / Off', description: 'Runs after every slot fills on Monday, before the cash sweep. The spare cash (what the sweep would park, plus this week\'s CSP and covered-call premium) first sells extra contracts of the puts just opened, one contract at a time spread across them, best-ranked first. If a whole contract of a ranked name still fits after that, it opens one more put (this also works in a week of only covered calls). What\'s left goes to the sweep. Every extra contract passes the same live delta, spread, bid-yield and open-interest checks. It never uses margin: settled cash must cover every open put, and margin accounts keep 2% of net liq free. Off on the Trend Filter track, outside a monthly entry window and on Dry Run. Trade-off: less cash cushion and a bigger assignment if the market drops that week.' },
+      { label: 'Park leftover cash each week', default: 'Off', range: 'On / Off', description: 'After the Monday option workflow, buy QQQ or SGOV with the undeployed remainder, then sell it on the week\'s last trading day.' },
+    ],
+  },
+  {
     title: 'Execution',
     items: [
       { label: 'Monday Execution Time', default: '10:00 AM PST', range: 'Any time',  description: 'When the CSP pipeline fires each Monday. 10:00 AM PST (1:00 PM ET) is recommended for best liquidity and tighter spreads. Requires a scheduler restart to take effect.' },

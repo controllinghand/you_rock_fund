@@ -415,6 +415,24 @@ def _compute_effective_budget(compound_enabled: bool, cash_account: bool,
 
 # ── CSP pipeline (Monday 10:00 half) ───────────────────────────
 
+def _topup_spare_fn(effective_budget: float, context: dict):
+    """The top-up's spare-cash reader: cash_park.spare_cash — the exact figure the
+    sweep would park — with this week's premium always included (spending premium
+    is the point of the top-up), and its no-margin caps intact: settled cash less
+    every open put's collateral, and on a margin account 2% of net liq held back."""
+    from cash_park import spare_cash
+
+    def _fn(ib, csp_premium: float) -> float:
+        sc = spare_cash(ib, {"effective_budget": effective_budget, "csp_premium": csp_premium},
+                        context, dry_run=False, include_prem=True)
+        amount = max(0.0, min(sc["base"], sc["cash_cap"]))
+        log.info(f"  ➕ Spare cash ${amount:,.2f} = min(base ${sc['base']:,.2f} "
+                 f"[{sc['basis']} + premium], no-margin cap ${sc['cash_cap']:,.2f})  "
+                 f"committed_csp=${sc['committed_csp']:,.2f}")
+        return amount
+    return _fn
+
+
 def run_csp_pipeline(context: dict, dry_run: bool = False,
                      progress_callback=None, account_summary: tuple = None,
                      manual: bool = False) -> dict:
@@ -525,7 +543,19 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
                  f"${(net_liq or 0):,.0f} → {target_fills} open "
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP)")
 
-    if target_fills <= 0:
+    # Spare-cash top-up (opt-in, v5.2.159): after the slots fill, spend what the
+    # sweep would park on more contracts of this week's puts, then one more ranked
+    # name. Weekly/monthly-in-window CSP weeks only: not the trend filter (the
+    # website fund's sizing is the rule there), not a monthly week outside its entry
+    # window, never a preview. On an all-wheel week (no slots) it still runs, so the
+    # premium from the covered calls can open a put — Lyle's IREN week.
+    topup_on = (bool(settings.get("csp_topup_enabled", False)) and not dry_run
+                and not trend_week and not (monthly and not monthly["in_window"]))
+
+    if target_fills <= 0 and topup_on:
+        log.info(f"  ➕ No open CSP slots ({active_wheel_count} wheel + {open_csp_count} open CSP) "
+                 f"— spare-cash top-up may still open a put")
+    if target_fills <= 0 and not topup_on:
         log.info(f"  ✅ No remaining CSP slots to fill "
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP = {num_positions} cap)")
         result = {
@@ -605,8 +635,10 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     else:
         log.info(f"  🔢 Filling {target_fills} CSP slot(s)  "
                  f"({active_wheel_count} wheel + {open_csp_count} open CSP already deployed)")
-        positions    = size_all(filtered_targets, budget=csp_sizing_budget,
-                                num_positions=target_fills)
+        # No slots (all-wheel week reaching here only for the top-up): size nothing —
+        # size_all would still size its #1 name with num_positions=0.
+        positions    = (size_all(filtered_targets, budget=csp_sizing_budget,
+                                 num_positions=target_fills) if target_fills > 0 else [])
 
     total_capital = sum(p.get("capital_used", 0) for p in positions)
 
@@ -678,7 +710,9 @@ def run_csp_pipeline(context: dict, dry_run: bool = False,
     # TOTAL_FUND_BUDGET (which on a compounding account is unrelated to net liq).
     results = execute_positions(positions, extra_targets=filtered_targets,
                                 target_fills=target_fills, status_callback=progress_callback,
-                                budget=max(0.0, effective_budget - mt_hold_back))
+                                budget=max(0.0, effective_budget - mt_hold_back),
+                                topup_spare=(_topup_spare_fn(effective_budget, context)
+                                             if topup_on else None))
 
     filled      = [r for r in results if r.get("status") in ("filled", "dry_run", "partial_fill")]
     csp_premium = sum(r.get("premium_collected", 0) for r in results)

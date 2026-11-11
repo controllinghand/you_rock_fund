@@ -1,3 +1,8 @@
+## [5.2.159] — 2026-11-11
+
+### Added
+- **Sell more puts with spare cash before parking it** (Settings → Cash Sweep, off by default). Asked for by Lyle: on Nov 9 his box parked $20,305 in QQQ when that cash, mostly the week's premium, would have covered a 4th ALAB contract. When on, after every slot fills, the Monday run takes the cash the sweep would park plus this week's CSP and covered-call premium. It first sells extra contracts of the puts it just opened, one at a time across them, best-ranked first. Then, if a whole contract of a ranked name still fits, it opens one more put. This also works in a week of only covered calls. Whatever's left goes to the sweep as before. Every extra contract gets the same live delta, spread, bid-yield and open-interest checks as a regular put, and a failed check leaves that cash to the sweep. It never uses margin: settled cash must cover every open put, and a margin account keeps 2% of net liq free. It doesn't run on the Trend Filter track, outside a monthly entry window, on a preview or on Dry Run. Discord shows the extra contracts as "(+1 from spare cash)".
+
 ## [5.2.158] — 2026-11-03
 
 ### Fixed
