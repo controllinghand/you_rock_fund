@@ -260,6 +260,9 @@ All orders — CSPs, covered calls, stop loss sells — use the same escalation:
 ### Key Rules
 
 - Never buy back covered calls
+- Stock splits on wheeled shares are detected in detect_assignments from IBKR's own numbers (shares ×r, avgCost ÷r,
+  same total cost) and scaled in place by splits.py — tranches, assigned_strike, current_cc_strike, cc_contracts (v5.2.160).
+  Never treat a split's extra shares as a new tranche
 - Excluded tickers (per-holding Exclude checkbox + Settings "Excluded Tickers") are NEVER traded, adopted, or sold:
   no CSP, no CC, no wheel adoption — enforced in the screener, both adoption paths, the per-holding loop, and risk monitor
 - YRVI-MT 🚢 (trend_filter_enabled, wheel only): assigned shares are NEVER sold, and new puts open only in a

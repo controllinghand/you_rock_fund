@@ -25,6 +25,7 @@ from screener import get_all_candidates
 from market_calendar import is_market_holiday
 from capital import dedupe_positions
 import discord_poster
+import splits
 
 STATE_FILE       = "state.json"
 TRADE_LOG_JSON   = "trade_log.json"
@@ -1026,6 +1027,8 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
 
     updated           = []
     new_assignments   = []
+    split_events      = []   # stock splits detected from IBKR's own share count + avgCost
+    basis_warnings    = []   # new tranches whose strike doesn't fit what IBKR says they cost
     # Drift = state disagreed with the broker. Reported so a caller can page a
     # human: silently healing a stale state.json would hide the fact that the
     # scheduled detection is failing (exactly how a broken self-heal stayed
@@ -1042,7 +1045,20 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
             _prior_cycle = (h.get("cc_status"), h.get("assignment_date")) if reopened else None
             prior_shares = sum(t.get("shares", 0) for t in h["tranches"])
             delta        = shares - prior_shares
-            if h.get("shares", 0) != shares:
+            # Stock split? IBKR changes the share count by r and avgCost by 1/r (same total
+            # cost). Scale tranches/assigned_strike instead of treating the extra shares as a
+            # new assignment — see splits.py (SNDK 8:1, 2026-11-20).
+            split_ratio = None if reopened else splits.detect_split(
+                prior_shares, shares, h.get("net_cost"), avg_cost_lookup.get(ticker))
+            if split_ratio:
+                _sp = splits.apply_split(h, split_ratio)
+                split_events.append(_sp)
+                log.warning(f"  ✂️  {ticker}: stock split {split_ratio:g}-for-1 detected from IBKR "
+                            f"({_sp['shares_before']} → {_sp['shares_after']} shares, avgCost "
+                            f"${h.get('net_cost', 0):.2f} → ${avg_cost_lookup.get(ticker, 0):.2f}) — "
+                            f"assigned_strike ${_sp['assigned_before']:.2f} → ${_sp['assigned_after']:.2f}")
+                delta = 0
+            if h.get("shares", 0) != shares and not split_ratio:
                 share_corrections.append({
                     "ticker": ticker,
                     "was":    h.get("shares", 0),
@@ -1052,6 +1068,18 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
                 # New tranche assigned at this week's CSP strike — blend it into
                 # the strike-weighted assigned_strike (the P&L basis).
                 new_strike = strike_lookup.get(ticker, 0.0)
+                # What IBKR says the added shares cost (premium-netted). A strike far from
+                # it usually means a put open across a split is being assigned at its
+                # pre-split strike — booked as-is, but flagged for a human.
+                _prior_cost = float(h.get("net_cost") or 0.0)
+                _now_cost   = float(avg_cost_lookup.get(ticker, 0.0))
+                if new_strike > 0 and _prior_cost > 0 and _now_cost > 0:
+                    _implied = (_now_cost * shares - _prior_cost * prior_shares) / delta
+                    if splits.suspicious_tranche_strike(new_strike, _implied):
+                        basis_warnings.append({"ticker": ticker, "shares": delta,
+                                               "strike": new_strike, "implied_cost": round(_implied, 2)})
+                        log.warning(f"  ⚠️  {ticker}: new tranche strike ${new_strike:.2f} vs IBKR implied "
+                                    f"cost ${_implied:.2f} — possible split on an open put; check the basis")
                 if new_strike > 0:
                     if delta % 100 != 0:
                         log.warning(
@@ -1145,6 +1173,12 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
             }
             log.info(f"  🆕 NEW ASSIGNMENT: {ticker}  {shares} shares  "
                      f"@ ${assigned_strike:.2f}")
+            if splits.suspicious_tranche_strike(assigned_strike, avg_cost_lookup.get(ticker, 0.0)):
+                basis_warnings.append({"ticker": ticker, "shares": shares, "strike": assigned_strike,
+                                       "implied_cost": avg_cost_lookup.get(ticker, 0.0)})
+                log.warning(f"  ⚠️  {ticker}: assigned at ${assigned_strike:.2f} but IBKR avgCost is "
+                            f"${avg_cost_lookup.get(ticker, 0.0):.2f} — possible split on an open put; "
+                            f"check the basis")
             new_assignments.append(h)
         updated.append(h)
         # called-away holdings are intentionally excluded from updated → removed from state
@@ -1195,10 +1229,14 @@ def detect_assignments(dry_run: bool = False, persist: bool = None) -> dict:
     # as new, so nothing would ever say "you were assigned".
     if new_assignments and persist:
         discord_poster.post_assignment_alert(new_assignments)
+    if (split_events or basis_warnings) and persist:
+        discord_poster.post_split_alert(split_events, basis_warnings)
     return {
         "called_away":       called_away,
         "new_assignments":   new_assignments,
         "share_corrections": share_corrections,
+        "splits":            split_events,
+        "basis_warnings":    basis_warnings,
         "dropped":           dropped,
         # Stale 0-share rows cleared out this pass. Reported separately from
         # `dropped` because they are housekeeping, not broker drift.
