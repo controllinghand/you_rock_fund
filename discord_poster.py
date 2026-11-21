@@ -1097,6 +1097,35 @@ def post_called_away_alert(called_away: list):
     }]})
 
 
+def post_split_alert(split_events: list, basis_warnings: list | None = None):
+    """Stock split detected on wheeled shares (IBKR share count x r, avgCost / r), and/or a
+    new tranche whose strike doesn't fit IBKR's cost (possible split on an open put)."""
+    if not WEBHOOK_URL or not (split_events or basis_warnings):
+        return
+    lines = [
+        f"• **{s['ticker']}** — {s['ratio']:g}-for-1: {s['shares_before']} → {s['shares_after']} shares, "
+        f"assigned basis ${s['assigned_before']:.2f} → ${s['assigned_after']:.2f}"
+        for s in split_events
+    ]
+    for w in basis_warnings or []:
+        lines.append(f"⚠️ **{w['ticker']}** — {w['shares']} shares booked @ ${w['strike']:.2f} but IBKR "
+                     f"says ~${w['implied_cost']:.2f}/share: possible split on an open put. "
+                     f"Check `tranches` in state.json.")
+    _post({"embeds": [{
+        "title":       "✂️ YRVI — Stock split on wheeled shares" if split_events else "⚠️ YRVI — Check an assignment basis",
+        "description": "\n".join(lines),
+        "color":       COLOR_PURPLE,
+        "fields": [{
+            "name":   "What changed",
+            "value":  "Shares and assigned basis were scaled to the post-split terms (same dollars). "
+                      "IBKR already adjusted the position and any open options.",
+            "inline": False,
+        }] if split_events else [],
+        "footer":    {"text": _footer()},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }]})
+
+
 def post_assignment_alert(new_assignments: list):
     """Post Friday alert for newly detected stock assignments."""
     if not WEBHOOK_URL or not new_assignments:

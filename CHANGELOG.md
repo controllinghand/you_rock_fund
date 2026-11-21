@@ -1,3 +1,8 @@
+## [5.2.160] — 2026-11-21
+
+### Fixed
+- **A stock split on wheeled shares was treated as a new assignment.** IBKR adjusts a split itself: the position goes from 100 to 800 shares and its average cost drops 8×, and short options are converted. But the app's own cost basis (`tranches` / `assigned_strike`) didn't change. So the Saturday reconcile read an 8-for-1 split as "+700 shares assigned" and left the assigned price about 8× above the market. That broke the covered-call floor and realized P&L, and with "sell when no CC above cost" turned on it would have sold the shares at market. The reconcile now recognizes a split from IBKR's own numbers: the share count changes by a factor while the average cost changes by the inverse, so the total cost stays the same. It then scales the tranches, the assigned price and an open covered call's strike and contract count to the post-split terms, and posts "✂️ Stock split on wheeled shares" to Discord. A real assignment never matches this, because buying shares changes the total cost. If a put left open across a split is assigned at its pre-split strike, the shares are booked as before, but Discord gets a "check the basis" warning. Found after SanDisk's 8-for-1 split on Nov 20 hit the website's paper funds; no live box held SNDK.
+
 ## [5.2.159] — 2026-11-11
 
 ### Added
