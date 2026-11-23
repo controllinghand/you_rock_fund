@@ -32,7 +32,8 @@ MARKET_WAIT_SECS    = 60    # total polling window for market orders
 MARKET_POLL_SECS    = 5     # check every N seconds
 RECONNECT_WAIT_SECS = 30
 MAX_RECONNECTS      = 3
-CANCEL_CONFIRM_SECS = 15    # how long to wait for a cancel to reach a terminal state
+CANCEL_CONFIRM_SECS = 30    # how long to wait for a cancel to reach a terminal state
+                            # (was 15 — on 2026-11-23 MSTR's cancel confirmed at ~17s on paper)
 CANCEL_POLL_SECS    = 0.5
 
 # An order in one of these states can no longer fill, so its filled quantity is
@@ -42,6 +43,13 @@ _TERMINAL_ORDER_STATES = ("Filled", "Cancelled", "ApiCancelled", "Inactive")
 # Statuses that must stop the escalation ladder rather than fall through to the
 # next leg.
 _ABORT_ESCALATION_STATUSES = ("failed_permissions", "failed_funds", "cancel_unconfirmed")
+
+
+def _escalation_aborted(res: dict) -> bool:
+    """True when the ladder must stop. An unconfirmed cancel with fills is booked
+    as partial_fill, so its status alone no longer says "stop" — the
+    cancel_unconfirmed detail does."""
+    return res.get("status") in _ABORT_ESCALATION_STATUSES or bool(res.get("cancel_unconfirmed"))
 
 
 class GatewayUnavailable(Exception):
@@ -1091,7 +1099,13 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             f"The order may still be working at IBKR — NOT escalating, because "
             f"selling the remainder now could double the position."
         )
-        _finalize("cancel_unconfirmed")
+        # Contracts that DID fill are a real position: book them as a partial fill
+        # so the slot, the collateral and the premium are all counted. Before this
+        # the result was status "cancel_unconfirmed", which execute_positions read
+        # as "order failed" — on 2026-11-23 MSTR's 2/5 filled puts went missing
+        # from trade_log.json and the week's premium, and the slot went to another
+        # name. The cancel_unconfirmed detail below is what stops the ladder.
+        _finalize("partial_fill" if filled_total > 0 else "cancel_unconfirmed")
         result["cancel_unconfirmed"] = {
             "leg": label,
             "order_status": st,
@@ -1102,7 +1116,8 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
             f"❗ **YRVI** {ticker} — the {label} cancel was not confirmed (status `{st}`). "
             f"Escalation was stopped so the position can't be sold twice. "
             f"The order may still be working at IBKR — **check open orders**. "
-            f"Filled so far: {filled_total}/{contracts}."
+            f"Filled so far: {filled_total}/{contracts}"
+            + (" (booked as a partial fill)." if filled_total else ".")
         )
 
     def try_limit(price: float, label: str, wait: int) -> bool:
@@ -1196,9 +1211,9 @@ def place_order_with_escalation(ib: IB, contract, contracts: int,
 
     if not mkt.get("use_bid_as_limit"):
         if try_limit(mkt["mid"], "limit_mid", MID_WAIT_SECS): return _finalize("filled")
-        if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
+        if _escalation_aborted(result): return result
     if try_limit(mkt["bid"], "limit_bid", BID_WAIT_SECS): return _finalize("filled")
-    if result.get("status") in _ABORT_ESCALATION_STATUSES: return result
+    if _escalation_aborted(result): return result
 
     # Market order for the REMAINING contracts only (never the full quantity) so a
     # partial fill on a cancelled limit leg can't lead to an over-sell — #72.
@@ -1348,7 +1363,7 @@ def _top_up_filled(ib: IB, results: list, attempted: dict, all_sized: list,
         got = int(res.get("filled_contracts") or 0)
         if got <= 0:
             log.info(f"  ➕ {ticker} top-up not filled ({res.get('status')})")
-            if res.get("status") in _ABORT_ESCALATION_STATUSES:
+            if _escalation_aborted(res):
                 break
             continue
 
@@ -1385,6 +1400,8 @@ def _top_up_filled(ib: IB, results: list, attempted: dict, all_sized: list,
         added_capital += got * cost
         log.info(f"  ➕ {ticker} topped up +{got} @ ${res.get('fill_price') or 0:.2f} "
                  f"(${res.get('premium_collected') or 0:,.0f}) → {new_n} contracts")
+        if _escalation_aborted(res):
+            break   # an order may still be live at IBKR — place nothing more
         ib.sleep(2)
     return added_capital
 
@@ -1792,7 +1809,9 @@ def execute_positions(sized_positions: list, extra_targets: list = None,
                 stock_price = live_price if live_price is not None else pos.get("latest_price")
                 result["stock_price_at_entry"] = stock_price
                 fill_price  = result.get("fill_price")
-                if result["status"] == "partial_fill" and fill_price:
+                if result["status"] == "partial_fill" and result.get("filled_contracts"):
+                    filled_qty = int(result["filled_contracts"])
+                elif result["status"] == "partial_fill" and fill_price:
                     filled_qty = round(result.get("premium_collected", 0) / fill_price / 100)
                 else:
                     filled_qty = contracts
