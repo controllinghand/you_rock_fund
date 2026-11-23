@@ -243,6 +243,34 @@ def _reconcile_results_against_broker(ib: IB, results: list, attempted: dict) ->
                             "recovery_note": ("recorded as not filled by the run; found "
                                               "open at IBKR during post-run reconcile"),
                         })
+                        # trade_log.json is what the week's premium, the YTD tracker
+                        # and the charts are summed from — updating the result alone
+                        # left a recovered fill out of all of them (2026-11-23 MSTR:
+                        # $316 missing from weekly_pnl until it was hand-added).
+                        if price:
+                            try:
+                                _append_trade_log({
+                                    "symbol":               c.symbol,
+                                    "expiry":               info["expiry"],
+                                    "strike":               float(info["strike"]),
+                                    "right":                "P",
+                                    "entry_date":           r.get("timestamp")
+                                                            or datetime.now(timezone.utc).isoformat(),
+                                    "delta_at_entry":       info.get("delta_at_entry"),
+                                    "iv_at_entry":          info.get("iv_at_entry"),
+                                    "stock_price_at_entry": None,   # not re-fetched: read-only, no market data
+                                    "buffer_pct_at_entry":  None,
+                                    "premium_per_contract": price,
+                                    "contracts":            qty,
+                                    "total_premium":        premium,
+                                })
+                                log.info(f"  📝 trade_log.json: {c.symbol} recorded (recovered from IBKR)")
+                            except Exception as tl_err:
+                                log.warning(f"  ⚠️  trade_log.json write failed for recovered "
+                                            f"{c.symbol}: {tl_err}")
+                        else:
+                            log.warning(f"  ⚠️  {c.symbol} recovered without a fill price — NOT "
+                                        f"written to trade_log.json; add its premium by hand")
                         break
                 discrepancies.append({"kind": "unrecorded_fill", "ticker": c.symbol,
                                       "contracts": qty, "fill_price": price,
