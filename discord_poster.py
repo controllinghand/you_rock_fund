@@ -330,7 +330,9 @@ def _build_trades_section(state: dict) -> tuple[str, str]:
             "moved up and one contract would cost more collateral than the account has left. "
             "Skipped rather than deployed onto margin."
         )
-    if "cancel_unconfirmed" in statuses:
+    # A cancel that never confirmed but had fills is booked as partial_fill and
+    # carries the cancel_unconfirmed detail — still worth the warning.
+    if "cancel_unconfirmed" in statuses or any(ex.get("cancel_unconfirmed") for ex in executions):
         footnotes.append(
             "* ❗ Cancel not confirmed = a limit order's cancel was never acknowledged, so "
             "escalation STOPPED rather than risk selling the position twice. The order may "
